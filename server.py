@@ -45,7 +45,7 @@ OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_MODEL    = "qwen2.5:3b"
 
 # Claude 設定
-CLAUDE_MODEL = "claude-sonnet-4-20250514"  # 高精度・ツール呼び出し安定
+CLAUDE_MODEL = "claude-sonnet-5"  # 高精度・ツール呼び出し安定（claude-sonnet-4 は 2026-06 廃止）
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 # ──────────────────────────────────────────────
@@ -1542,7 +1542,7 @@ async def _chat_claude_stream(body: ChatInput):
 
                 with client.messages.stream(
                     model=CLAUDE_MODEL,
-                    max_tokens=8192,
+                    max_tokens=16000,
                     system=_cached_system(system),
                     messages=msgs,
                     tools=_cached_tools(),
@@ -1776,7 +1776,7 @@ async def _chat_claude(body: ChatInput):
         # 1回目：ツール付きリクエスト
         response = client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=4096,
+            max_tokens=8192,
             system=_cached_system(system),
             messages=messages,
             tools=_cached_tools(),
@@ -1794,7 +1794,7 @@ async def _chat_claude(body: ChatInput):
                 messages.append({"role": "user", "content": "run_simulation ツールを呼び出して、今すぐシミュレーションを実行してください。テキストだけでなくツールを使ってください。"})
                 retry = client.messages.create(
                     model=CLAUDE_MODEL,
-                    max_tokens=4096,
+                    max_tokens=8192,
                     system=_cached_system(system),
                     messages=messages,
                     tools=_cached_tools(),
@@ -1927,7 +1927,7 @@ async def _chat_claude(body: ChatInput):
         for _round in range(MAX_TOOL_ROUNDS):
             resp_next = client.messages.create(
                 model=CLAUDE_MODEL,
-                max_tokens=8192,
+                max_tokens=16000,
                 system=_cached_system(system),
                 messages=messages,
                 tools=_cached_tools(),
