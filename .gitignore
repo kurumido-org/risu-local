@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 環境変数・シークレット（コミット厳禁）
+.env
+.env.local
+.env.*.local
+*.env
+!.env.example
+
+# UXsim / シミュレーション出力
+out*/
+*.csv.gz
+__pycache_osm__/
+cache/
+
+# ログ
+*.log
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*~
+
+# 一時・バックアップ
+*.bak
+*.tmp
+tmp/
+temp/
+.claude/

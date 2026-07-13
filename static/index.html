@@ -1,0 +1,3380 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RISU — Real-time Interactive Simulator for Urban mobility</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<meta property="og:title" content="RISU — 交通流シミュレーター">
+<meta property="og:description" content="自然言語で操作する交通シミュレーション。UXsim 搭載。">
+<meta property="og:image" content="/ss_grid_vehicle.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="description" content="RISU: 自然言語で操作する交通流シミュレーター（UXsim 搭載）">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@300;400;500;600;700;800&family=Noto+Sans+JP:wght@300;400;500;700&display=swap');
+
+  :root {
+    --paper:    #f6f5f1;
+    --paper2:   #efede6;
+    --paper3:   #e6e3da;
+    --surface:  #f6f5f1;
+    --bg:       #f6f5f1;
+    --border:   #1a1a1a;
+    --line:     #1a1a1a;
+    --line-soft: rgba(26,26,26,.10);
+    --line-faint: rgba(26,26,26,.06);
+    --accent:   #dc4a1c;
+    --accent-soft: rgba(220,74,28,.10);
+    --accent2:  #2d5f4a;
+    --text:     #1a1a1a;
+    --dark:     #1a1a1a;
+    --ink:      #1a1a1a;
+    --ink-soft: #3a3a38;
+    --muted:    #797977;
+    --sub:      #797977;
+    --danger:   #c2382a;
+    --user-bg:  #1a1a1a;
+    --ai-bg:    #f6f5f1;
+    --grid:     rgba(26,26,26,.045);
+    --mono:     'JetBrains Mono', ui-monospace, monospace;
+    --sans:     'Inter', 'Noto Sans JP', system-ui, sans-serif;
+    --serif:    'Inter', 'Noto Sans JP', system-ui, sans-serif;
+    --glass:    #f6f5f1;
+    --glass-border: rgba(26,26,26,.10);
+    --shadow-xs: 0 1px 2px rgba(26,26,26,.04);
+    --shadow-sm: 0 2px 6px rgba(26,26,26,.05), 0 1px 2px rgba(26,26,26,.04);
+    --shadow-md: 0 8px 24px rgba(26,26,26,.06), 0 2px 4px rgba(26,26,26,.04);
+    --shadow-lg: 0 16px 48px rgba(26,26,26,.08);
+    --radius-sm:  4px;
+    --radius-md:  6px;
+    --radius-lg:  10px;
+    --accent-grad: #1a1a1a;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--paper);
+    background-image: radial-gradient(var(--grid) 1px, transparent 1px);
+    background-size: 24px 24px;
+    background-position: -1px -1px;
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 15px;
+    font-weight: 400;
+    line-height: 1.65;
+    height: 100dvh;
+    display: grid;
+    grid-template-columns: var(--split, 1fr) 6px 1fr;
+    grid-template-rows: 56px 1fr;
+    overflow: hidden;
+  }
+  #chat-col { grid-column: 1; grid-row: 2; }
+  #splitter { grid-column: 2; grid-row: 2; }
+  #viz-col  { grid-column: 3; grid-row: 2; }
+
+  /* ── ヘッダー ── */
+  header {
+    grid-column: 1 / -1;
+    background: rgba(246,245,241,.85);
+    -webkit-backdrop-filter: saturate(180%) blur(12px);
+    backdrop-filter: saturate(180%) blur(12px);
+    border-bottom: 1px solid var(--line-soft);
+    display: flex;
+    align-items: center;
+    padding: 0 24px;
+    gap: 14px;
+    z-index: 10;
+    font-family: var(--mono);
+  }
+  header .logo {
+    font-family: var(--sans);
+    font-weight: 800;
+    font-size: 20px;
+    color: var(--ink);
+    letter-spacing: -.04em;
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+  }
+  header .logo .logo-mark { width: 22px; height: 22px; flex-shrink: 0; color: var(--ink); }
+  header .logo::before { content: "▸ "; color: var(--accent); }
+  header .sep { color: var(--sub); font-family: var(--mono); font-size: 12px; }
+  header .subtitle { font-size: 12px; color: var(--sub); letter-spacing: .06em; font-family: var(--mono); }
+  header .subtitle.powered-by { padding-left: 10px; border-left: 1px solid var(--line-soft); }
+  header .subtitle.powered-by a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--accent); }
+  header .subtitle.powered-by a:hover { color: var(--accent); }
+  @media (max-width: 980px) { header .subtitle { display: none; } header .subtitle.powered-by { display: none; } }
+  .status-dot {
+    width: 10px; height: 10px;
+    background: var(--sub);
+    margin-left: auto;
+    border-radius: 50%;
+    transition: background .2s;
+  }
+  .status-dot.ok { box-shadow: 0 0 0 3px rgba(232,85,58,.2); }
+  .status-dot.ok  { background: var(--accent); }
+  .status-dot.err { background: var(--danger); }
+  #status-label { font-size: 11px; color: var(--sub); font-family: var(--mono); letter-spacing: .12em; text-transform: uppercase; font-weight: 700; }
+
+  /* ── チャット列 ── */
+  #chat-col {
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--line-soft);
+    overflow: hidden;
+    background: var(--paper);
+  }
+
+  /* サンプル質問（上部） */
+  #examples {
+    padding: 12px 16px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    background: var(--paper2);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .ex-chip {
+    font-size: 12px;
+    padding: 6px 14px;
+    border: 1px solid var(--line-soft);
+    color: var(--ink);
+    cursor: pointer;
+    transition: all .25s ease;
+    font-family: var(--mono);
+    letter-spacing: .04em;
+    white-space: nowrap;
+    background: var(--paper);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-xs);
+  }
+  .ex-chip:hover { background: var(--ink); color: var(--paper); transform: translateY(-1px); border-color: var(--ink); box-shadow: var(--shadow-sm); }
+  .ex-chip::before { content: "▸ "; color: var(--accent); }
+  .ex-chip:hover::before { color: var(--accent); }
+
+  /* メッセージ欄 */
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    scroll-behavior: smooth;
+  }
+  #messages::-webkit-scrollbar { width: 6px; }
+  #messages::-webkit-scrollbar-track { background: transparent; }
+  #messages::-webkit-scrollbar-thumb { background: rgba(136,145,165,.3); border-radius: 3px; }
+  #messages::-webkit-scrollbar-thumb:hover { background: rgba(136,145,165,.5); }
+
+  .msg {
+    max-width: 80%;
+    padding: 14px 18px;
+    font-size: 14.5px;
+    line-height: 1.75;
+    white-space: pre-wrap;
+    word-break: break-word;
+    animation: fadeUp .2s ease;
+    position: relative;
+  }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  /* アバターボックス（共通） */
+  .msg.user,
+  .msg.assistant {
+    /* ラベル行 + 本文 を組む */
+  }
+  .msg .who {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 9px;
+    color: var(--accent);
+    letter-spacing: .2em;
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
+
+  /* ── USER（右寄せ） ── */
+  .msg.user {
+    background: var(--ink);
+    color: var(--paper);
+    border: 1px solid var(--ink);
+    align-self: flex-end;
+    margin-right: 44px;
+    border-radius: var(--radius-md) var(--radius-md) var(--radius-sm) var(--radius-md);
+    box-shadow: var(--shadow-sm);
+  }
+  .msg.user::before {
+    content: "USER";
+    display: block;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--accent);
+    letter-spacing: .25em;
+    margin-bottom: 8px;
+    font-weight: 700;
+  }
+  /* 右側アバター（円形） */
+  .msg.user::after {
+    content: "U";
+    position: absolute;
+    right: -44px;
+    top: 0;
+    width: 34px;
+    height: 34px;
+    background: var(--ink);
+    color: var(--paper);
+    border: 1px solid var(--ink);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 13px;
+    border-radius: 50%;
+  }
+
+  /* ── ASSISTANT（左寄せ） ── */
+  .msg.assistant {
+    background: var(--paper);
+    color: var(--ink);
+    border: 1px solid var(--line-soft);
+    align-self: flex-start;
+    margin-left: 44px;
+    border-radius: var(--radius-md) var(--radius-md) var(--radius-md) var(--radius-sm);
+    box-shadow: var(--shadow-sm);
+  }
+  .msg.assistant::before {
+    content: "RISU";
+    display: block;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--accent);
+    letter-spacing: .25em;
+    margin-bottom: 8px;
+    font-weight: 700;
+  }
+  /* 左側アバター（円形） */
+  .msg.assistant::after {
+    content: "R";
+    position: absolute;
+    left: -44px;
+    top: 0;
+    width: 34px;
+    height: 34px;
+    background: var(--accent);
+    color: var(--paper);
+    border: 1px solid var(--accent);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--sans);
+    font-weight: 700;
+    font-size: 14px;
+    letter-spacing: -.02em;
+    border-radius: 50%;
+  }
+
+  .msg.system {
+    background: transparent;
+    border: 1px dashed var(--line-soft);
+    align-self: center;
+    color: var(--sub);
+    font-size: 11px;
+    font-family: var(--mono);
+    max-width: 100%;
+    text-align: center;
+    letter-spacing: .1em;
+    padding: 9px 18px;
+    border-radius: 999px;
+  }
+  .msg.system::before { content: "— SYSTEM — "; color: var(--accent); font-weight: 700; }
+  /* sim_id バッジ */
+  .sim-badge {
+    display: inline-block;
+    margin-top: 10px;
+    padding: 5px 14px;
+    background: var(--ink);
+    color: var(--paper);
+    border: 1px solid var(--ink);
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: .12em;
+    cursor: pointer;
+    transition: background .2s, color .2s, transform .15s;
+    border-radius: 999px;
+  }
+  .sim-badge:hover { transform: translateY(-1px); }
+  .sim-badge::before { content: "SIM: "; color: var(--accent); }
+  .sim-badge:hover { background: var(--accent); border-color: var(--accent); }
+
+  /* 入力欄（下部） */
+  #input-area {
+    padding: 14px 16px;
+    border-top: 1px solid var(--line-soft);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background: var(--paper2);
+  }
+  #file-preview {
+    display: none;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 0 0 2px 0;
+  }
+  #file-preview.visible { display: flex; }
+  .file-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    background: var(--paper);
+    border: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--ink);
+    letter-spacing: .04em;
+    border-radius: 999px;
+  }
+  .file-chip::before { content: "▸"; color: var(--accent); font-weight: 700; }
+  .file-chip .remove {
+    cursor: pointer;
+    color: var(--sub);
+    font-size: 12px;
+    line-height: 1;
+    margin-left: 2px;
+    transition: color .15s;
+  }
+  .file-chip .remove:hover { color: var(--danger); }
+  #input-row {
+    display: flex;
+    gap: 0;
+    align-items: stretch;
+    border: 1px solid var(--line-soft);
+    background: var(--paper);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    transition: box-shadow .2s, border-color .2s;
+    box-shadow: var(--shadow-xs);
+  }
+  #input-row:focus-within { box-shadow: var(--shadow-md); border-color: var(--line); }
+  #file-btn {
+    background: var(--paper);
+    border: none;
+    border-right: 1px solid var(--line-faint);
+    width: 48px; height: 48px;
+    cursor: pointer;
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 20px;
+    font-weight: 400;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background .15s, color .15s;
+    flex-shrink: 0;
+    padding: 0;
+    line-height: 1;
+  }
+  #file-btn:hover { background: var(--ink); color: var(--paper); }
+  #file-btn.has-files { background: var(--accent); color: var(--paper); }
+  #file-input { display: none; }
+
+  #user-input {
+    flex: 1;
+    background: var(--paper);
+    border: none;
+    border-right: 1px solid var(--line-faint);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 14.5px;
+    padding: 13px 16px;
+    resize: none;
+    min-height: 48px;
+    max-height: 140px;
+    outline: none;
+    line-height: 1.6;
+  }
+  #user-input::placeholder { color: var(--sub); }
+  #send-btn {
+    background: var(--ink);
+    color: var(--paper);
+    border: none;
+    padding: 0 28px;
+    height: 48px;
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    letter-spacing: .18em;
+    transition: background .2s;
+    white-space: nowrap;
+  }
+  #send-btn::before { content: "▸ "; color: var(--accent); }
+  #send-btn:disabled { opacity: .35; cursor: not-allowed; }
+  #send-btn:hover:not(:disabled) { background: var(--accent); }
+  #send-btn:hover:not(:disabled)::before { color: var(--ink); }
+
+  /* ── ビジュアル列 ── */
+  #viz-col {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--paper);
+  }
+
+  .panel-header {
+    padding: 12px 16px;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--ink);
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--line-soft);
+    background: var(--paper2);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .panel-header::before { content: "§"; color: var(--accent); font-weight: 700; }
+  .panel-header span { color: var(--accent); font-weight: 700; }
+
+  /* 描画モード切替 */
+  #mode-toggle {
+    display: flex;
+    gap: 0;
+    margin-left: 12px;
+    border: 1px solid var(--line-soft);
+    overflow: hidden;
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-xs);
+  }
+  #mode-toggle button {
+    background: var(--paper);
+    border: none;
+    border-right: 1px solid var(--line-faint);
+    padding: 6px 14px;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--ink);
+    cursor: pointer;
+    transition: background .15s, color .15s;
+    letter-spacing: .12em;
+  }
+  #mode-toggle button:last-child { border-right: none; }
+  #mode-toggle button:hover { background: var(--paper2); }
+  #mode-toggle button.active { background: var(--ink); color: var(--paper); }
+
+  #dl-btn, #dl-scn-btn {
+    background: var(--paper);
+    border: 1px solid var(--line-soft);
+    padding: 5px 14px;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--ink);
+    cursor: pointer;
+    display: none;
+    transition: all .2s ease;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    border-radius: 999px;
+    box-shadow: var(--shadow-xs);
+  }
+  #dl-btn:hover, #dl-scn-btn:hover { transform: translateY(-1px); border-color: var(--line); box-shadow: var(--shadow-sm); }
+  #dl-scn-btn { margin-left: auto; }
+  #dl-btn:hover, #dl-scn-btn:hover { background: var(--ink); color: var(--paper); }
+
+  /* 統計 progressive charts */
+  #stats-panel {
+    padding: 0;
+    border-bottom: 1px solid var(--line-soft);
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    background: var(--paper);
+  }
+  /* ── statsPanel: 4 列の横並び・コンパクト ── */
+  #stats-panel {
+    grid-template-columns: repeat(4, 1fr) !important;
+  }
+  .stat-chart {
+    background: var(--paper);
+    border-right: 1px solid var(--line-faint);
+    border-bottom: none !important;
+    padding: 6px 10px 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    transition: background .2s;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .stat-chart:nth-child(2n) { border-right: 1px solid var(--line-faint); }
+  .stat-chart:nth-child(4),
+  .stat-chart:last-of-type { border-right: none; }
+  .stat-chart:hover { background: var(--paper2); }
+  .stat-chart .sc-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 6px;
+  }
+  .stat-chart .sc-label {
+    font-family: var(--mono);
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--sub);
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .stat-chart .sc-label::before { content: ""; }
+  .stat-chart .sc-label .sc-unit {
+    color: var(--sub);
+    font-weight: 400;
+    letter-spacing: .05em;
+    margin-left: 3px;
+    text-transform: none;
+    font-size: 8px;
+  }
+  .stat-chart .sc-value {
+    font-family: var(--sans);
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--ink);
+    line-height: 1;
+    letter-spacing: -.02em;
+    white-space: nowrap;
+    text-align: right;
+  }
+  .sv-total {
+    font-family: var(--mono);
+    font-size: 9px;
+    font-weight: 500;
+    color: var(--sub);
+    letter-spacing: 0;
+    margin-left: 2px;
+  }
+  .sv-total::before { content: "/ "; }
+  .stat-chart .sc-canvas {
+    flex: 1;
+    width: 100%;
+    height: 22px;
+    max-height: 22px;
+    display: block;
+  }
+  /* 狭い幅では 2x2 にフォールバック */
+  @media (max-width: 720px) {
+    #stats-panel { grid-template-columns: 1fr 1fr !important; }
+    .stat-chart:nth-child(2n) { border-right: none !important; }
+    .stat-chart:nth-child(4) { border-right: none !important; }
+    .stat-chart:nth-child(-n+2) { border-bottom: 1px solid var(--line) !important; }
+  }
+
+  /* ネットワーク描画 */
+  #canvas-wrap {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    background: var(--paper);
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+  #net-canvas { width: 100%; height: 100%; display: block; }
+  #canvas-placeholder {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    color: var(--sub); font-size: 10px;
+    font-family: var(--mono); gap: 12px;
+    pointer-events: none;
+    letter-spacing: .2em;
+    text-transform: uppercase;
+  }
+  #canvas-placeholder::after {
+    content: "AWAITING INPUT";
+    font-family: var(--mono);
+    font-size: 9px;
+    color: var(--accent);
+    letter-spacing: .3em;
+    margin-top: 4px;
+  }
+  #canvas-placeholder svg { opacity: .2; color: var(--ink); }
+
+  /* タイムスライダー + 再生コントロール */
+  #time-control {
+    padding: 12px 14px;
+    border-top: 1px solid var(--line-soft);
+    background: var(--paper2);
+    display: none;
+  }
+  #time-control.visible { display: block; }
+  .time-row { display: flex; align-items: center; gap: 10px; }
+  #play-btn {
+    background: var(--paper);
+    border: 1px solid var(--line);
+    width: 36px; height: 32px;
+    cursor: pointer; font-size: 12px;
+    color: var(--ink);
+    display: flex; align-items: center; justify-content: center;
+    transition: background .2s, color .2s;
+    flex-shrink: 0; line-height: 1;
+    padding: 0; user-select: none;
+    border-radius: 50%;
+  }
+  #play-btn:hover { background: var(--ink); color: var(--paper); }
+  #time-slider { flex: 1; accent-color: var(--accent); cursor: pointer; height: 4px; }
+  #time-label {
+    font-family: var(--mono); font-size: 12px;
+    color: var(--ink); min-width: 130px; text-align: right;
+    font-weight: 700; letter-spacing: .04em;
+  }
+  #speed-select {
+    font-family: var(--mono); font-size: 11px;
+    border: 1px solid var(--line);
+    background: var(--paper);
+    color: var(--ink);
+    padding: 4px 12px;
+    cursor: pointer;
+    height: 32px;
+    flex-shrink: 0;
+    font-weight: 700;
+    letter-spacing: .05em;
+    border-radius: 999px;
+  }
+  #speed-select:hover { background: var(--paper2); }
+
+  /* 凡例 */
+  #legend {
+    padding: 8px 14px;
+    background: var(--paper2);
+    border-top: 1px solid var(--line-soft);
+    display: none; align-items: center; gap: 12px;
+    font-family: var(--mono); font-size: 10px; color: var(--ink);
+    letter-spacing: .15em; text-transform: uppercase; font-weight: 700;
+  }
+  #legend.visible { display: flex; }
+  #legend-bar {
+    height: 8px; flex: 1; position: relative;
+    background: linear-gradient(to right, #c2382a 0%, #e8882a 25%, #d4b33a 50%, #86a64a 75%, #4d8c3a 100%);
+    border: 1px solid var(--line-soft);
+    border-radius: 999px;
+  }
+  #legend-bar::after {
+    content: "0 · 25 · 50 · 75 · 100%";
+    position: absolute; top: 100%; left: 0; right: 0;
+    font-family: var(--mono); font-size: 9px; font-weight: 500;
+    color: var(--sub); letter-spacing: .08em; text-align: center;
+    margin-top: 4px; pointer-events: none;
+  }
+  #legend { padding-bottom: 18px; }
+
+  /* インラインチャート */
+  .msg .chart-wrap {
+    margin-top: 12px;
+    background: var(--paper);
+    border: 1px solid var(--line-soft);
+    padding: 14px;
+    max-width: 100%;
+    position: relative;
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-xs);
+  }
+  .msg .chart-wrap::before {
+    content: "FIG.";
+    position: absolute;
+    top: -1px;
+    left: 14px;
+    background: var(--paper2);
+    padding: 0 6px;
+    transform: translateY(-50%);
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: .2em;
+    color: var(--accent);
+    font-weight: 700;
+  }
+  /* Chart.js は responsive + maintainAspectRatio:false で親要素の高さに合わせる。
+     親に高さが無いと canvas が高さ 0 になり「描画されない」状態になる。
+     canvas を専用の高さ固定ボックスで包むことで安定描画させる。 */
+  .msg .chart-wrap .chart-canvas-box {
+    position: relative;
+    height: 220px;
+    width: 100%;
+  }
+  .msg .chart-wrap canvas {
+    width: 100% !important;
+    height: 100% !important;
+  }
+  .msg .chart-title {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--ink);
+    margin-bottom: 8px;
+    letter-spacing: .1em;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+
+  /* ローディング（レガシー — addMsg thinking 用） */
+  .thinking { display: flex; gap: 4px; padding: 4px 0; }
+  .thinking span {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent); animation: blink 1.2s infinite;
+  }
+  .thinking span:nth-child(2) { animation-delay: .2s; }
+  .thinking span:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%,80%,100%{opacity:.2} 40%{opacity:1} }
+  .thinking:has(.progress-text) { display: block; }
+  .progress-text { font-size: 13px; color: var(--muted); animation: none !important;
+    width: auto !important; height: auto !important; border-radius: 0 !important;
+    background: none !important; display: inline !important; }
+
+  /* ── AI ステータスバー ── */
+  #ai-status {
+    position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+    background: var(--ink); color: var(--paper);
+    font-family: var(--mono); font-size: 11px; font-weight: 500;
+    padding: 8px 20px;
+    border: 1px solid var(--ink);
+    display: none; align-items: center; gap: 12px;
+    white-space: nowrap; z-index: 100; margin-bottom: 8px;
+    letter-spacing: .08em;
+    border-radius: 999px;
+    animation: statusSlideIn .2s ease-out;
+  }
+  #ai-status.visible { display: flex; }
+  #ai-status::before { content: "▸"; color: var(--accent); font-weight: 700; }
+  #ai-status .status-icon {
+    width: 8px; height: 8px;
+    background: var(--accent); animation: statusPulse 1.2s ease-in-out infinite;
+  }
+  #ai-status .status-msg { animation: statusTextFade 1.5s ease-in-out infinite; }
+  @keyframes statusPulse {
+    0%, 100% { opacity: .4; }
+    50% { opacity: 1; }
+  }
+  @keyframes statusTextFade {
+    0%, 100% { opacity: .7; }
+    50% { opacity: 1; }
+  }
+  @keyframes statusSlideIn {
+    from { opacity: 0; transform: translateX(-50%) translateY(6px); }
+    to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+  }
+
+  /* scrollbar — technical */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: var(--paper2); border-left: 1px solid var(--line); }
+  ::-webkit-scrollbar-thumb { background: var(--ink); border: 2px solid var(--paper2); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+  /* ── toast notification ── */
+  #toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translate(-50%, 20px);
+    background: var(--ink); color: var(--paper);
+    font-family: var(--mono); font-size: 12px; letter-spacing: .04em;
+    padding: 10px 20px; border-radius: 999px;
+    box-shadow: var(--shadow-md);
+    pointer-events: none; opacity: 0; transition: opacity .2s, transform .2s;
+    z-index: 2000; max-width: 80vw;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #toast.visible { opacity: 1; transform: translate(-50%, 0); }
+  #toast.error { background: var(--accent); }
+  #toast.warn  { background: #e8a31c; color: var(--ink); }
+
+  /* ── header extras ── */
+  .header-spacer { flex: 1; }
+  .hdr-btn {
+    background: var(--paper); border: 1px solid var(--line-soft);
+    font-family: var(--mono); font-size: 10px; font-weight: 700;
+    color: var(--ink); padding: 5px 12px; cursor: pointer;
+    letter-spacing: .12em; text-transform: uppercase;
+    display: inline-flex; align-items: center; gap: 6px;
+    border-radius: 999px; transition: all .2s ease;
+    height: 28px; line-height: 1;
+    box-shadow: var(--shadow-xs);
+  }
+  .hdr-btn:hover { background: var(--ink); color: var(--paper); border-color: var(--ink); transform: translateY(-1px); box-shadow: var(--shadow-sm); }
+  .hdr-btn:active { transform: translateY(0); box-shadow: var(--shadow-xs); }
+  .hdr-btn svg { display: block; }
+
+  /* ── group label / file chip ── */
+  .ex-group-label {
+    font-family: var(--mono); font-size: 9px; font-weight: 700;
+    letter-spacing: .2em; color: var(--accent); text-transform: uppercase;
+    padding: 3px 4px; margin-left: 4px;
+  }
+  .ex-group-label:first-child { margin-left: 0; }
+  .ex-chip.ex-file { background: var(--ink); color: var(--paper); text-decoration: none; }
+  .ex-chip.ex-file:hover { background: var(--accent); }
+
+  /* ── empty state ── */
+  #empty-state {
+    margin: auto;
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--sub);
+    animation: fadeUp .3s ease;
+  }
+  #empty-state .es-title {
+    font-family: var(--sans); font-size: 16px; font-weight: 600;
+    color: var(--ink); letter-spacing: -.015em; margin-bottom: 8px;
+  }
+  #empty-state .es-sub {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .04em;
+    color: var(--sub);
+  }
+
+  /* ── cancel button ── */
+  #cancel-btn {
+    background: var(--accent); color: var(--paper); border: none;
+    font-family: var(--mono); font-size: 9px; font-weight: 700;
+    letter-spacing: .15em; padding: 3px 10px; cursor: pointer;
+    border-radius: 999px; margin-left: 4px;
+    transition: background .15s;
+  }
+  #cancel-btn:hover { background: var(--ink); }
+
+  /* ── splitter ── */
+  #splitter {
+    grid-row: 2; width: 6px; cursor: col-resize;
+    background: transparent; border-left: 1px solid var(--line);
+    border-right: 1px solid var(--line);
+    margin: 0 -3px; position: relative; z-index: 5;
+    transition: background .15s;
+  }
+  #splitter:hover, #splitter.dragging { background: var(--accent); }
+  body.resizing { cursor: col-resize; user-select: none; }
+  body.resizing iframe, body.resizing canvas { pointer-events: none; }
+
+  /* ── sim-id button ── */
+  .sim-id-btn {
+    background: transparent; border: 1px solid var(--line-soft);
+    font-family: var(--mono); font-size: 10px; font-weight: 700;
+    color: var(--ink); padding: 3px 10px; cursor: pointer;
+    border-radius: 999px; letter-spacing: .1em;
+    transition: background .15s, color .15s, border-color .15s;
+  }
+  .sim-id-btn:hover { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .sim-id-btn.copied { background: var(--accent); color: var(--paper); border-color: var(--accent); }
+  .ph-label { color: var(--accent); font-weight: 700; margin-right: 4px; }
+  #link-count-label { font-family: var(--mono); font-size: 10px; color: var(--sub); letter-spacing: .05em; }
+
+  /* ── canvas controls ── */
+  #canvas-controls {
+    position: absolute; bottom: 14px; right: 14px;
+    display: flex; flex-direction: column; gap: 4px;
+    background: rgba(246,245,241,.92);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius-md); padding: 4px;
+    z-index: 10; box-shadow: var(--shadow-md);
+  }
+  #canvas-controls .cc-btn {
+    width: 30px; height: 30px; background: var(--paper);
+    border: none; border-radius: var(--radius-sm);
+    font-family: var(--mono); font-size: 14px; font-weight: 700;
+    color: var(--ink); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: background .15s, color .15s;
+  }
+  #canvas-controls .cc-btn:hover { background: var(--ink); color: var(--paper); }
+  #canvas-controls .cc-zoom-label {
+    font-family: var(--mono); font-size: 9px; font-weight: 700;
+    text-align: center; color: var(--sub); letter-spacing: .05em;
+    padding: 4px 0; border-top: 1px solid var(--line-soft);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  #canvas-hint {
+    position: absolute; top: 14px; right: 14px;
+    font-family: var(--mono); font-size: 10px; color: var(--sub);
+    background: var(--paper); border: 1px solid var(--line-soft);
+    padding: 4px 10px; border-radius: 999px; letter-spacing: .05em;
+    pointer-events: none; opacity: 0; transition: opacity .3s;
+    z-index: 10;
+  }
+  #canvas-hint.visible { opacity: 1; }
+
+  /* ── Canvas hover tooltip ── */
+  #canvas-tooltip {
+    position: absolute;
+    background: var(--ink); color: var(--paper);
+    border: 1px solid var(--ink);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.6;
+    letter-spacing: .03em;
+    pointer-events: none;
+    z-index: 20;
+    box-shadow: 0 4px 0 rgba(23,23,23,.3);
+    max-width: 260px;
+    white-space: nowrap;
+    opacity: 0; transform: translateY(4px);
+    transition: opacity .15s, transform .15s;
+  }
+  #canvas-tooltip.visible { opacity: 1; transform: translateY(0); }
+  #canvas-tooltip .tt-kind {
+    font-size: 9px; font-weight: 700; letter-spacing: .2em;
+    color: var(--accent); margin-bottom: 4px;
+    text-transform: uppercase;
+  }
+  #canvas-tooltip .tt-id {
+    font-size: 14px; font-weight: 700; color: var(--paper);
+    letter-spacing: .04em; margin-bottom: 6px;
+  }
+  #canvas-tooltip .tt-meta {
+    font-size: 10px; color: rgba(245,245,243,.65);
+    line-height: 1.7;
+  }
+  #canvas-tooltip .tt-meta b { color: var(--paper); font-weight: 600; }
+  #canvas-tooltip .tt-hint {
+    margin-top: 6px; padding-top: 6px;
+    border-top: 1px dashed rgba(245,245,243,.25);
+    font-size: 9px; color: rgba(245,245,243,.5);
+    letter-spacing: .08em;
+  }
+
+  /* ── placeholder enhanced ── */
+  #canvas-placeholder .ph-title {
+    font-family: var(--sans); font-size: 15px; font-weight: 600;
+    color: var(--ink); text-transform: none; letter-spacing: -.01em;
+  }
+  #canvas-placeholder .ph-sub {
+    font-family: var(--mono); font-size: 10px; color: var(--sub);
+    letter-spacing: .05em; text-transform: none; max-width: 280px;
+  }
+
+  /* ── timeline sparkline ── */
+  #slider-wrap { flex: 1; position: relative; display: flex; flex-direction: column; gap: 2px; }
+  #time-sparkline { width: 100%; height: 16px; display: block; opacity: .6; }
+  #time-slider { width: 100%; }
+
+  /* ── help / history modal & drawer ── */
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(23,23,23,.55);
+    display: none; align-items: center; justify-content: center;
+    z-index: 1000; padding: 20px;
+  }
+  .modal-backdrop.visible { display: flex; animation: fadeUp .2s ease; }
+  .modal {
+    background: var(--paper); border: 1px solid var(--line);
+    border-radius: var(--radius-md); max-width: 520px; width: 100%;
+    max-height: 80vh; overflow: auto;
+    box-shadow: 0 6px 0 var(--ink);
+  }
+  .modal-head {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 20px; border-bottom: 1px solid var(--line);
+    font-family: var(--mono); font-size: 11px; font-weight: 700;
+    letter-spacing: .2em; background: var(--paper2);
+  }
+  .modal-body { padding: 20px 24px 28px; }
+  .modal-body h4 {
+    font-family: var(--mono); font-size: 10px; font-weight: 700;
+    letter-spacing: .2em; color: var(--accent);
+    margin: 20px 0 10px; text-transform: uppercase;
+  }
+  .modal-body h4:first-child { margin-top: 0; }
+  .guide-list, .kbd-list {
+    list-style: none; padding: 0; margin: 0;
+    font-size: 13px; line-height: 1.8;
+  }
+  .guide-list li, .kbd-list li {
+    padding: 4px 0;
+    border-bottom: 1px dashed var(--line-soft);
+  }
+  .guide-list li:last-child, .kbd-list li:last-child { border-bottom: none; }
+  .guide-list { counter-reset: gl; }
+  .guide-list li { counter-increment: gl; position: relative; padding-left: 28px; }
+  .guide-list li::before {
+    content: counter(gl, decimal-leading-zero);
+    position: absolute; left: 0; top: 4px;
+    font-family: var(--mono); font-size: 11px; font-weight: 700;
+    color: var(--accent); letter-spacing: .05em;
+  }
+  kbd {
+    display: inline-block; font-family: var(--mono); font-size: 11px;
+    padding: 1px 7px; border: 1px solid var(--line);
+    border-radius: var(--radius-xs,3px); background: var(--paper2);
+    color: var(--ink); margin: 0 1px; font-weight: 600;
+    box-shadow: 0 1px 0 var(--ink);
+  }
+  .close-x {
+    width: 24px; height: 24px; background: transparent;
+    border: 1px solid var(--line); cursor: pointer; border-radius: 50%;
+    font-family: var(--mono); font-size: 14px; color: var(--ink);
+    display: inline-flex; align-items: center; justify-content: center;
+    line-height: 1; padding: 0;
+    transition: background .15s, color .15s;
+  }
+  .close-x:hover { background: var(--ink); color: var(--paper); }
+
+  /* ── history drawer ── */
+  .history-drawer {
+    position: fixed; top: 0; left: 0; height: 100vh;
+    width: 300px; background: var(--paper);
+    border-right: 1px solid var(--line);
+    transform: translateX(-100%); transition: transform .25s ease;
+    z-index: 999; display: flex; flex-direction: column;
+    box-shadow: 6px 0 0 rgba(23,23,23,.15);
+  }
+  .history-drawer.visible { transform: translateX(0); }
+  .history-head {
+    padding: 14px 20px; border-bottom: 1px solid var(--line);
+    font-family: var(--mono); font-size: 11px; font-weight: 700;
+    letter-spacing: .2em; background: var(--paper2);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  #history-list { flex: 1; overflow-y: auto; padding: 8px; }
+  .hist-item {
+    display: block; padding: 12px 14px; margin-bottom: 4px;
+    background: var(--paper); border: 1px solid var(--line-soft);
+    border-radius: var(--radius-sm); cursor: pointer;
+    transition: background .15s, border-color .15s;
+    font-size: 12px; line-height: 1.5; color: var(--ink);
+  }
+  .hist-item:hover { background: var(--paper2); border-color: var(--line); }
+  .hist-item .t { font-family: var(--mono); font-size: 9px; color: var(--sub); margin-bottom: 4px; letter-spacing: .08em; }
+  .hist-item .q { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .hist-empty { text-align: center; font-family: var(--mono); font-size: 10px; color: var(--sub); padding: 40px 20px; letter-spacing: .08em; }
+
+  /* ── chart actions ── */
+  .msg .chart-wrap { position: relative; }
+  .chart-actions {
+    position: absolute; top: 8px; right: 8px;
+    display: flex; gap: 4px; opacity: 0; transition: opacity .15s;
+  }
+  .msg .chart-wrap:hover .chart-actions { opacity: 1; }
+  .chart-actions button {
+    background: var(--paper); border: 1px solid var(--line);
+    font-family: var(--mono); font-size: 9px; font-weight: 700;
+    letter-spacing: .1em; padding: 3px 8px; cursor: pointer;
+    color: var(--ink); border-radius: var(--radius-sm);
+    transition: background .15s, color .15s;
+  }
+  .chart-actions button:hover { background: var(--ink); color: var(--paper); }
+
+  /* ── mobile tabs ── */
+  #mobile-tabs {
+    display: none; grid-column: 1 / -1;
+    border-top: 1px solid var(--line);
+    background: var(--paper);
+    padding: 0;
+  }
+  #mobile-tabs .mt-btn {
+    flex: 1; background: var(--paper); border: none;
+    border-right: 1px solid var(--line);
+    padding: 12px 0; font-family: var(--mono); font-size: 11px;
+    font-weight: 700; letter-spacing: .18em; color: var(--sub);
+    cursor: pointer;
+  }
+  #mobile-tabs .mt-btn:last-child { border-right: none; }
+  #mobile-tabs .mt-btn.active { background: var(--ink); color: var(--paper); }
+
+  @media (max-width: 768px) {
+    body {
+      grid-template-columns: 1fr !important;
+      grid-template-rows: 52px 1fr 48px !important;
+    }
+    #splitter { display: none; }
+    #mobile-tabs { display: flex; }
+    #chat-col, #viz-col { grid-column: 1; grid-row: 2; }
+    #chat-col.hidden-pane, #viz-col.hidden-pane { display: none; }
+    header .subtitle { display: none; }
+    .header-spacer { flex: 1; }
+  }
+
+  /* ── focus styles ── */
+  button:focus-visible, input:focus-visible, textarea:focus-visible,
+  select:focus-visible, .ex-chip:focus-visible, .sim-badge:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+</style>
+</head>
+<body>
+
+<!-- ヘッダー -->
+<header>
+  <div class="logo">
+    <svg class="logo-mark" viewBox="0 0 32 32" aria-hidden="true">
+      <line x1="11" y1="0"  x2="11" y2="25" stroke="currentColor" stroke-width="2"/>
+      <line x1="21" y1="7"  x2="21" y2="32" stroke="currentColor" stroke-width="2"/>
+      <line x1="0"  y1="11" x2="25" y2="11" stroke="currentColor" stroke-width="2"/>
+      <line x1="7"  y1="21" x2="32" y2="21" stroke="currentColor" stroke-width="2"/>
+    </svg>
+    <span>RISU</span>
+  </div>
+  <div class="sep">/</div>
+  <div class="subtitle">Real-time Interactive Simulator for Urban mobility</div>
+  <div class="subtitle powered-by">powered by <a href="https://github.com/toruseo/UXsim" target="_blank" rel="noopener">UXsim</a></div>
+  <div class="header-spacer"></div>
+  <!-- Toast 通知 -->
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <button class="hdr-btn" id="new-chat-btn" title="会話をリセット" aria-label="New chat">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+    NEW
+  </button>
+  <button class="hdr-btn" id="history-btn" title="会話履歴" aria-label="History">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v5h5M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l3 3"/></svg>
+  </button>
+  <button class="hdr-btn" id="help-btn" title="ヘルプ / キーボード" aria-label="Help">?</button>
+  <div id="status-label">CONNECTING</div>
+  <div class="status-dot" id="status-dot" aria-label="Connection status"></div>
+</header>
+
+<!-- History drawer -->
+<div id="history-drawer" class="history-drawer" aria-hidden="true">
+  <div class="history-head">
+    <span>HISTORY</span>
+    <button class="close-x" onclick="toggleHistory()" aria-label="Close">×</button>
+  </div>
+  <div id="history-list"></div>
+</div>
+
+<!-- Help modal -->
+<div id="help-modal" class="modal-backdrop" aria-hidden="true" onclick="if(event.target===this)toggleHelp()">
+  <div class="modal">
+    <div class="modal-head">
+      <span>QUICK GUIDE</span>
+      <button class="close-x" onclick="toggleHelp()" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body">
+      <h4>3 STEPS</h4>
+      <ol class="guide-list">
+        <li><b>Describe</b> — チャットにシナリオを自然言語で入力</li>
+        <li><b>Compute</b> — RISU がシナリオを構築し UXsim で実行</li>
+        <li><b>Explore</b> — 可視化・グラフを対話的に操作</li>
+      </ol>
+      <h4>EXAMPLES</h4>
+      <ul class="kbd-list">
+        <li><b>作る</b> — 「単純なボトルネック道路を作って」</li>
+        <li><b>作る</b> — 「3×3 グリッドネットワーク」</li>
+        <li><b>作る</b> — 「東京駅周辺を OSM から取得」</li>
+        <li><b>分析</b> — 「渋滞が発生する条件を教えて」</li>
+        <li><b>分析</b> — 「結果を速度グラフで見せて」</li>
+        <li><b>比較</b> — 「車線を 2 倍にして比較して」</li>
+        <li><b>取込</b> — <a href="/sample_risu.csv" download style="color:var(--accent);border-bottom:1px solid var(--accent)">CSV サンプル をダウンロード</a> して + ボタンで添付</li>
+      </ul>
+      <h4>KEYBOARD</h4>
+      <ul class="kbd-list">
+        <li><kbd>Enter</kbd> 送信 / <kbd>Shift</kbd>+<kbd>Enter</kbd> 改行</li>
+        <li><kbd>Ctrl</kbd>+<kbd>K</kbd> 新しい会話</li>
+        <li><kbd>Esc</kbd> モーダルを閉じる</li>
+      </ul>
+      <h4>CANVAS</h4>
+      <ul class="kbd-list">
+        <li>ドラッグ — パン / ホイール — ズーム</li>
+        <li>右下の <kbd>⟲</kbd> でカメラをリセット</li>
+      </ul>
+      <h4>DRAW MODES</h4>
+      <ul class="kbd-list">
+        <li><b>LINK</b> — 道路を混雑度で色分け（俯瞰）</li>
+        <li><b>VEHICLE</b> — 個車をドットで表示（標準）</li>
+        <li><b>TRAIL</b> — 個車＋過去フレームの軌跡</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- チャット -->
+<div id="chat-col">
+  <div id="messages" aria-live="polite">
+    <div id="empty-state">
+      <div class="es-title">シナリオを入力して始めましょう</div>
+      <div class="es-sub">右上の「?」から例文・キーボード操作を確認できます</div>
+    </div>
+  </div>
+
+  <div id="input-area" style="position:relative">
+    <div id="ai-status"><div class="status-icon"></div><span class="status-msg"></span>
+      <button id="cancel-btn" onclick="cancelSend()" aria-label="Cancel" title="中止">STOP</button>
+    </div>
+    <div id="file-preview"></div>
+    <div id="input-row">
+      <button id="file-btn" title="JSON/CSV/GMNS を添付" aria-label="Attach file" onclick="document.getElementById('file-input').click()">+</button>
+      <input type="file" id="file-input" accept=".json,.csv" multiple onchange="handleFileSelect(event)">
+      <textarea id="user-input" placeholder="シナリオを自然言語で記述…   （⏎ 送信 / Shift+⏎ 改行）" rows="1" aria-label="Prompt input"></textarea>
+      <button id="send-btn" onclick="sendMessage()" aria-label="Send">SEND</button>
+    </div>
+  </div>
+</div>
+
+<!-- Resizable splitter -->
+<div id="splitter" aria-label="Resize panels" role="separator"></div>
+
+<!-- ビジュアライザ -->
+<div id="viz-col">
+  <div class="panel-header">
+    <span class="ph-label">NETWORK</span>
+    <button id="sim-id-label" class="sim-id-btn" title="クリックで ID をコピー" aria-label="Simulation ID (click to copy)">—</button>
+    <span id="link-count-label"></span>
+    <div id="mode-toggle" role="tablist" aria-label="Render mode">
+      <button data-mode="link" onclick="setDrawMode('link')" title="道路を混雑度で色分け" aria-label="Link mode">LINK</button>
+      <button data-mode="vehicle" class="active" onclick="setDrawMode('vehicle')" title="個車をドットで表示（標準）" aria-label="Vehicle mode">VEHICLE</button>
+      <button data-mode="trail" onclick="setDrawMode('trail')" title="個車 + 軌跡を表示" aria-label="Trail mode">TRAIL</button>
+    </div>
+    <button id="dl-scn-btn" onclick="downloadScenario()" title="再現用シナリオのみ（JSON, 軽量）">.json</button>
+    <button id="dl-btn" onclick="downloadResult()" title="シナリオ + 結果データ（完全）">.json+result</button>
+  </div>
+
+  <div id="stats-panel" hidden>
+    <div class="stat-chart" data-metric="active">
+      <div class="sc-head">
+        <span class="sc-label">ACTIVE VEHICLES</span>
+        <span class="sc-value" id="sv-active">—</span>
+      </div>
+      <canvas class="sc-canvas"></canvas>
+    </div>
+    <div class="stat-chart" data-metric="avgSpeed">
+      <div class="sc-head">
+        <span class="sc-label">AVG SPEED <span class="sc-unit">m/s</span></span>
+        <span class="sc-value" id="sv-speed">—</span>
+      </div>
+      <canvas class="sc-canvas"></canvas>
+    </div>
+    <div class="stat-chart" data-metric="completed">
+      <div class="sc-head">
+        <span class="sc-label">COMPLETED</span>
+        <span class="sc-value" id="sv-completed">—<span class="sv-total" id="sv-total-trips"></span></span>
+      </div>
+      <canvas class="sc-canvas"></canvas>
+    </div>
+    <div class="stat-chart" data-metric="inflow">
+      <div class="sc-head">
+        <span class="sc-label">ENTERED</span>
+        <span class="sc-value" id="sv-inflow">—</span>
+      </div>
+      <canvas class="sc-canvas"></canvas>
+    </div>
+    <!-- Hidden legacy IDs for backward compat -->
+    <span hidden><span id="s-trips"></span><span id="s-comp"></span><span id="s-tt"></span><span id="s-calc"></span></span>
+  </div>
+
+  <div id="canvas-wrap">
+    <canvas id="net-canvas" aria-label="Network visualization"></canvas>
+    <div id="canvas-placeholder">
+      <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+        <circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/>
+      </svg>
+      <div class="ph-title">シミュレーションを実行</div>
+      <div class="ph-sub">チャットで指示するか、ファイルをアップロードしてください</div>
+    </div>
+    <!-- Canvas floating controls -->
+    <div id="canvas-controls" hidden>
+      <button class="cc-btn" onclick="zoomCanvas(1.2)" title="Zoom in" aria-label="Zoom in">+</button>
+      <div class="cc-zoom-label" id="cc-zoom">100%</div>
+      <button class="cc-btn" onclick="zoomCanvas(1/1.2)" title="Zoom out" aria-label="Zoom out">−</button>
+      <button class="cc-btn" onclick="resetCamera(); drawFrame();" title="Reset view" aria-label="Reset view">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+      </button>
+    </div>
+    <!-- Canvas usage hint (auto-hide after first interaction) -->
+    <div id="canvas-hint" hidden>ドラッグでパン・ホイールでズーム</div>
+    <!-- ホバー時のツールチップ -->
+    <div id="canvas-tooltip" hidden></div>
+  </div>
+
+  <div id="legend" aria-label="Congestion legend">
+    <span title="速度が自由流より遅い">混雑</span>
+    <div id="legend-bar" aria-hidden="true"></div>
+    <span title="自由流速度">自由流</span>
+  </div>
+
+  <div id="time-control">
+    <div class="time-row">
+      <button id="play-btn" title="再生/停止 (Space)" aria-label="Play/Pause">&#9654;</button>
+      <div id="slider-wrap">
+        <input type="range" id="time-slider" min="0" max="1000" value="0" step="1" aria-label="Time slider">
+        <canvas id="time-sparkline" height="16"></canvas>
+      </div>
+      <select id="speed-select" title="再生速度" aria-label="Playback speed">
+        <option value="0.25">0.25×</option>
+        <option value="0.5">0.5×</option>
+        <option value="1" selected>1×</option>
+        <option value="2">2×</option>
+        <option value="4">4×</option>
+        <option value="8">8×</option>
+        <option value="16">16×</option>
+      </select>
+      <div id="time-label">0s / 0s</div>
+    </div>
+  </div>
+</div>
+
+<!-- Mobile tab switcher -->
+<div id="mobile-tabs" aria-label="Panel switch">
+  <button class="mt-btn active" data-pane="chat-col" onclick="switchPane('chat-col')">CHAT</button>
+  <button class="mt-btn" data-pane="viz-col" onclick="switchPane('viz-col')">VIEW</button>
+</div>
+
+<script>
+const API = '';
+let chatHistory = [];
+let geoData    = null;
+// framesData: {str(t): {n, ids:Uint32, xs:Float32, ys:Float32, vs:Float32, alphas:Float32, li:Uint16}}
+let framesData = null;
+let frameTimes = [];     // sorted float array
+let linkNames  = [];     // li インデックス → リンク名
+let linkFfsByIdx = null; // Float32Array: li → ffs
+let buildingsData = null; // [[x,y], ...] polygons
+let signalsData = [];    // [{node,x,y,phases[],groups:{link_name:phase_idx}}]
+let scenarioData = null; // {nodes:[{name,x,y,signal,...}], links:[...], demands:[...]}
+let nodeByCoord = {};    // "x,y" → node name (高速ルックアップ)
+let simTmax    = 3600;
+let lastSimId  = null;
+// lastResult は廃止（メモリ節約）— ダウンロードはサーバーから直接取得
+
+// 描画モード: "link" | "vehicle" | "trail"
+let drawMode = 'vehicle';
+const TRAIL_LENGTH = 8; // 何フレーム分の軌跡を表示するか
+
+function setDrawMode(mode) {
+  drawMode = mode;
+  document.querySelectorAll('#mode-toggle button').forEach(b => {
+    const active = b.dataset.mode === mode;
+    b.classList.toggle('active', active);
+    b.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+  drawFrame();
+}
+
+// ── Canvas サイズ管理 ──
+const canvasEl   = document.getElementById('net-canvas');
+const canvasWrap = document.getElementById('canvas-wrap');
+let canvasW = 0, canvasH = 0, canvasDirty = true;
+
+function resizeCanvas() {
+  // DPR は 1.5 でキャップ（Retina での過大なバッキングストアを回避）
+  const dpr = Math.min(1.5, window.devicePixelRatio || 1);
+  canvasW = canvasWrap.clientWidth;
+  canvasH = canvasWrap.clientHeight;
+  canvasEl.width  = Math.round(canvasW * dpr);
+  canvasEl.height = Math.round(canvasH * dpr);
+  canvasEl.style.width  = canvasW + 'px';
+  canvasEl.style.height = canvasH + 'px';
+  canvasDirty = false;
+}
+new ResizeObserver(() => { canvasDirty = true; drawFrame(); }).observe(canvasWrap);
+
+// ── カメラ制御（パン・ズーム） ──
+let camZoom = 1, camPanX = 0, camPanY = 0;
+let isDragging = false, dragStartX = 0, dragStartY = 0, dragPanX = 0, dragPanY = 0;
+
+function resetCamera() { camZoom = 1; camPanX = 0; camPanY = 0; }
+
+canvasEl.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const rect = canvasEl.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  // マウス位置を中心にズーム
+  const oldZoom = camZoom;
+  const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+  camZoom = Math.max(0.2, Math.min(20, camZoom * factor));
+  // ズーム時にマウス位置がずれないようパンを補正
+  camPanX = mx - (mx - camPanX) * (camZoom / oldZoom);
+  camPanY = my - (my - camPanY) * (camZoom / oldZoom);
+  drawFrame();
+}, { passive: false });
+
+canvasEl.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  isDragging = true;
+  dragStartX = e.clientX;
+  dragStartY = e.clientY;
+  dragPanX = camPanX;
+  dragPanY = camPanY;
+  canvasEl.style.cursor = 'grabbing';
+});
+
+window.addEventListener('mousemove', (e) => {
+  if (!isDragging) return;
+  camPanX = dragPanX + (e.clientX - dragStartX);
+  camPanY = dragPanY + (e.clientY - dragStartY);
+  drawFrame();
+});
+
+window.addEventListener('mouseup', () => {
+  if (isDragging) {
+    isDragging = false;
+    canvasEl.style.cursor = 'grab';
+  }
+});
+
+// タッチ対応（ピンチズーム + パン）
+let lastTouchDist = 0, lastTouchMid = null;
+canvasEl.addEventListener('touchstart', (e) => {
+  if (e.touches.length === 1) {
+    isDragging = true;
+    dragStartX = e.touches[0].clientX;
+    dragStartY = e.touches[0].clientY;
+    dragPanX = camPanX;
+    dragPanY = camPanY;
+  } else if (e.touches.length === 2) {
+    isDragging = false;
+    const dx = e.touches[1].clientX - e.touches[0].clientX;
+    const dy = e.touches[1].clientY - e.touches[0].clientY;
+    lastTouchDist = Math.hypot(dx, dy);
+    lastTouchMid = { x: (e.touches[0].clientX + e.touches[1].clientX) / 2,
+                     y: (e.touches[0].clientY + e.touches[1].clientY) / 2 };
+  }
+}, { passive: true });
+
+canvasEl.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if (e.touches.length === 1 && isDragging) {
+    camPanX = dragPanX + (e.touches[0].clientX - dragStartX);
+    camPanY = dragPanY + (e.touches[0].clientY - dragStartY);
+    drawFrame();
+  } else if (e.touches.length === 2 && lastTouchDist > 0) {
+    const dx = e.touches[1].clientX - e.touches[0].clientX;
+    const dy = e.touches[1].clientY - e.touches[0].clientY;
+    const dist = Math.hypot(dx, dy);
+    const rect = canvasEl.getBoundingClientRect();
+    const mx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
+    const my = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
+    const oldZoom = camZoom;
+    camZoom = Math.max(0.2, Math.min(20, camZoom * (dist / lastTouchDist)));
+    camPanX = mx - (mx - camPanX) * (camZoom / oldZoom);
+    camPanY = my - (my - camPanY) * (camZoom / oldZoom);
+    lastTouchDist = dist;
+    drawFrame();
+  }
+}, { passive: false });
+
+canvasEl.addEventListener('touchend', () => { isDragging = false; lastTouchDist = 0; });
+
+// ダブルクリックでリセット
+canvasEl.addEventListener('dblclick', () => { resetCamera(); drawFrame(); });
+
+canvasEl.style.cursor = 'grab';
+
+// ── 再生制御 ──
+let playing = false, animStartTime = 0, animStartVal = 0, animFrameId = null;
+let playbackSpeed = 1;            // 1x = PLAY_CYCLE_MS で 1 周
+const PLAY_CYCLE_MS = 10000;      // 1x のとき 1 周にかかる時間 (ms)
+const playBtn      = document.getElementById('play-btn');
+const timeSlider   = document.getElementById('time-slider');
+const timeLabel    = document.getElementById('time-label');
+const speedSelect  = document.getElementById('speed-select');
+
+playBtn.addEventListener('click', togglePlay);
+timeSlider.addEventListener('input', onSliderInput);
+speedSelect.addEventListener('change', onSpeedChange);
+
+function togglePlay() { playing ? stopPlay() : startPlay(); }
+
+function startPlay() {
+  playing = true;
+  playBtn.textContent = '\u23F8';
+  animStartTime = performance.now();
+  animStartVal  = parseFloat(timeSlider.value);
+  if (animFrameId) cancelAnimationFrame(animFrameId);
+  animFrameId = requestAnimationFrame(tick);
+}
+function stopPlay() {
+  playing = false;
+  playBtn.textContent = '\u25B6';
+  if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = null; }
+}
+function tick(now) {
+  if (!playing) return;
+  const cycleMs = PLAY_CYCLE_MS / playbackSpeed;
+  let val = animStartVal + ((now - animStartTime) / cycleMs) * 1000;
+  if (val >= 1000) { val %= 1000; animStartTime = now; animStartVal = val; }
+  timeSlider.value = val;
+  drawFrame();
+  if (typeof drawAllStatCharts === 'function') drawAllStatCharts();
+  if (typeof updateStatValues === 'function') updateStatValues();
+  if (typeof updateTimeLabel === 'function') updateTimeLabel();
+  animFrameId = requestAnimationFrame(tick);
+}
+function onSliderInput() { if (playing) stopPlay(); drawFrame(); }
+function onSpeedChange() {
+  playbackSpeed = parseFloat(speedSelect.value) || 1;
+  // 再生中なら基準点を現在位置にリセットして連続性を保つ
+  if (playing) {
+    animStartTime = performance.now();
+    animStartVal  = parseFloat(timeSlider.value);
+  }
+}
+
+// ── 接続確認 ──
+async function checkHealth() {
+  try {
+    const r = await fetch(`${API}/docs`, { signal: AbortSignal.timeout(3000) });
+    setStatus(r.ok);
+  } catch { setStatus(false); }
+}
+function setStatus(ok) {
+  document.getElementById('status-dot').className = 'status-dot ' + (ok ? 'ok' : 'err');
+  document.getElementById('status-label').textContent = ok ? 'online' : 'offline';
+}
+checkHealth();
+
+// ── ファイル添付管理 ──
+let attachedFiles = [];
+
+function handleFileSelect(event) {
+  const fileList = event.target.files;
+  if (!fileList || fileList.length === 0) return;
+  for (const f of fileList) attachedFiles.push(f);
+  event.target.value = '';
+  renderFilePreview();
+}
+
+function removeAttachedFile(idx) {
+  attachedFiles.splice(idx, 1);
+  renderFilePreview();
+}
+
+function renderFilePreview() {
+  const preview = document.getElementById('file-preview');
+  const fileBtn = document.getElementById('file-btn');
+  preview.innerHTML = '';
+  if (attachedFiles.length === 0) {
+    preview.classList.remove('visible');
+    fileBtn.classList.remove('has-files');
+    return;
+  }
+  preview.classList.add('visible');
+  fileBtn.classList.add('has-files');
+  attachedFiles.forEach((f, i) => {
+    const chip = document.createElement('span');
+    chip.className = 'file-chip';
+    const icon = document.createTextNode('\uD83D\uDCC4 ');
+    const nameSpan = document.createElement('span');
+    nameSpan.textContent = f.name;
+    const rm = document.createElement('span');
+    rm.className = 'remove';
+    rm.textContent = '\u00D7';
+    rm.addEventListener('click', () => removeAttachedFile(i));
+    chip.appendChild(icon);
+    chip.appendChild(nameSpan);
+    chip.appendChild(document.createTextNode(' '));
+    chip.appendChild(rm);
+    preview.appendChild(chip);
+  });
+}
+
+// ── 結果ダウンロード（完全: サーバーから直接ストリーム取得してメモリに載せない） ──
+async function downloadResult() {
+  if (!lastSimId) return;
+  try {
+    const res = await fetch(`${API}/results/${lastSimId}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `risu_full_${lastSimId}.json`; a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    console.error(e);
+    alert('ダウンロードに失敗しました: ' + e.message);
+  }
+}
+
+// ── シナリオのみダウンロード（軽量・再現用） ──
+async function downloadScenario() {
+  if (!lastSimId) return;
+  try {
+    const res = await fetch(`${API}/results/${lastSimId}/scenario`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = `risu_scenario_${lastSimId}.json`; a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    console.error(e);
+    alert('シナリオ取得に失敗しました: ' + e.message);
+  }
+}
+
+// ── メッセージ送信 ──
+async function sendMessage() {
+  const input = document.getElementById('user-input');
+  const text  = input.value.trim();
+  const hasFiles = attachedFiles.length > 0;
+  if (!text && !hasFiles) return;
+
+  // ユーザーメッセージ表示（ファイル名も含める）
+  const fileNames = attachedFiles.map(f => f.name);
+  const displayText = hasFiles
+    ? (text ? `${text}\n📎 ${fileNames.join(', ')}` : `📎 ${fileNames.join(', ')}`)
+    : text;
+  addMsg('user', displayText);
+
+  // チャット履歴にはテキストのみ追加（ファイル内容はサーバー側で処理）
+  const userContent = text || `添付ファイル（${fileNames.join(', ')}）を使ってシミュレーションを実行してください。`;
+  chatHistory.push({ role: 'user', content: userContent });
+  input.value = '';
+  input.style.height = '';
+
+  // ファイルをローカルに保持してクリア
+  const filesToSend = [...attachedFiles];
+  attachedFiles = [];
+  renderFilePreview();
+
+  const btn = document.getElementById('send-btn');
+  btn.disabled = true;
+
+  // ── AI ステータスバー制御 ──
+  const aiStatus = document.getElementById('ai-status');
+  const aiStatusMsg = aiStatus.querySelector('.status-msg');
+  function showStatus(msg) {
+    aiStatusMsg.textContent = msg;
+    aiStatus.classList.add('visible');
+  }
+  function hideStatus() {
+    aiStatus.classList.remove('visible');
+  }
+  showStatus('RISUが考えています...');
+
+  try {
+    // ファイルがある場合はフロントでテキスト読み取りしてメッセージに含める
+    if (filesToSend.length > 0) {
+      const fileParts = [];
+      for (const f of filesToSend) {
+        const text = await f.text();
+        fileParts.push(`[添付ファイル: ${f.name}]\n\`\`\`\n${text}\n\`\`\``);
+      }
+      const last = chatHistory[chatHistory.length - 1];
+      last.content = last.content + '\n\n' + fileParts.join('\n\n');
+    }
+
+    const res = await fetch(`${API}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: chatHistory }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      const detail = err?.detail;
+      const errMsg = typeof detail === 'string' ? detail
+        : Array.isArray(detail) ? detail.map(d => d.msg || JSON.stringify(d)).join('; ')
+        : `HTTP ${res.status}`;
+      throw new Error(errMsg);
+    }
+
+    // SSE ストリーミング対応（text/event-stream の場合）
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('text/event-stream')) {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let data = null;
+      let streamingMsgEl = null;
+      let streamingBody = null;
+      const messagesWrap = document.getElementById('messages');
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop();
+        for (const chunk of lines) {
+          const line = chunk.trim();
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const evt = JSON.parse(line.slice(6));
+            if (evt.type === 'progress') {
+              showStatus(evt.message);
+            } else if (evt.type === 'stream_start') {
+              // ストリーミング開始 → メッセージ要素を作成
+              showStatus('応答を生成中...');
+              if (!streamingMsgEl) {
+                streamingMsgEl = addMsg('assistant', '');
+                streamingBody = streamingMsgEl.querySelector('.body');
+              }
+            } else if (evt.type === 'text_delta' && streamingBody) {
+              streamingBody.textContent += evt.text;
+              messagesWrap.scrollTop = messagesWrap.scrollHeight;
+            } else if (evt.type === 'stream_end_partial') {
+              // 追加ツール実行 → ステータスバー再表示
+              showStatus('追加処理中...');
+              streamingMsgEl = null;
+              streamingBody = null;
+            } else if (evt.type === 'done') {
+              data = evt;
+            } else if (evt.type === 'error') {
+              throw new Error(evt.message);
+            }
+          } catch (parseErr) {
+            if (parseErr.message && !parseErr.message.includes('JSON')) throw parseErr;
+          }
+        }
+      }
+
+      hideStatus();
+      if (!data) throw new Error('サーバーからの応答がありませんでした');
+
+      // ストリーミング中のメッセージをクリーンアップ → 最終版で置き換え
+      if (streamingMsgEl) streamingMsgEl.remove();
+      const msgEl = addMsg('assistant', data.content);
+
+      if (data.sim_id) {
+        const badge = document.createElement('div');
+        badge.className = 'sim-badge';
+        badge.textContent = `\u25B6 結果を表示  ID: ${data.sim_id}`;
+        badge.onclick = () => loadResult(data.sim_id);
+        msgEl.querySelector('.body').appendChild(badge);
+        loadResult(data.sim_id);
+      }
+      if (data.charts && data.charts.length) {
+        for (const chart of data.charts) renderChart(msgEl, chart);
+      } else if (data.chart) {
+        renderChart(msgEl, data.chart);
+      }
+      chatHistory.push({ role: 'assistant', content: data.content });
+
+    } else {
+      // 従来の JSON レスポンス（mock / ollama）
+      hideStatus();
+      const data = await res.json();
+      const msgEl = addMsg('assistant', data.content);
+
+      if (data.sim_id) {
+        const badge = document.createElement('div');
+        badge.className = 'sim-badge';
+        badge.textContent = `\u25B6 結果を表示  ID: ${data.sim_id}`;
+        badge.onclick = () => loadResult(data.sim_id);
+        msgEl.querySelector('.body').appendChild(badge);
+        loadResult(data.sim_id);
+      }
+      if (data.charts && data.charts.length) {
+        for (const chart of data.charts) renderChart(msgEl, chart);
+      } else if (data.chart) {
+        renderChart(msgEl, data.chart);
+      }
+      chatHistory.push({ role: 'assistant', content: data.content });
+    }
+  } catch(e) {
+    hideStatus();
+    if (e.name === 'AbortError' || (e.message || '').toLowerCase().includes('abort')) {
+      addMsg('system', '中止しました');
+    } else {
+      const sysEl = addMsg('system', `エラー: ${e.message}`);
+      // Add retry action on last user message
+      const retryBtn = document.createElement('button');
+      retryBtn.className = 'hdr-btn';
+      retryBtn.style.marginLeft = '10px';
+      retryBtn.textContent = 'RETRY';
+      retryBtn.onclick = () => {
+        const lastUser = [...chatHistory].reverse().find(m => m.role === 'user');
+        if (lastUser) {
+          chatHistory.pop(); // remove failed turn
+          document.getElementById('user-input').value = lastUser.content;
+          sendMessage();
+        }
+      };
+      sysEl.appendChild(retryBtn);
+    }
+  }
+  btn.disabled = false;
+}
+
+function addMsg(role, text, thinking = false) {
+  const wrap = document.getElementById('messages');
+  const div  = document.createElement('div');
+  div.className = `msg ${role}`;
+
+  if (thinking) {
+    const t = document.createElement('div');
+    t.className = 'thinking';
+    t.innerHTML = '<span></span><span></span><span></span>';
+    div.appendChild(t);
+  } else {
+    const body = document.createElement('div');
+    body.className = 'body';
+    body.textContent = text;
+    div.appendChild(body);
+  }
+
+  wrap.appendChild(div);
+  wrap.scrollTop = wrap.scrollHeight;
+  return div;
+}
+
+// ── 結果ロード＆描画 ──
+async function loadResult(simId) {
+  try {
+    // 前回の状態を解放（新規データ構築中のピーク消費を抑える）
+    releasePrevResult();
+
+    const res  = await fetch(`${API}/results/${simId}`);
+    let data = await res.json();
+    // 新スキーマ (risu_schema_version 1.0): { scenario, source, result: {...} }
+    let r = data.result || data;  // 旧形式互換
+    geoData    = r.geojson;
+    buildingsData = r.buildings || null;
+    signalsData = r.signals || [];
+    scenarioData = data.scenario || null;
+    // 座標→ノード名のルックアップを構築
+    nodeByCoord = {};
+    if (scenarioData && scenarioData.nodes) {
+      for (const n of scenarioData.nodes) {
+        nodeByCoord[`${n.x},${n.y}`] = n;
+      }
+    }
+    resetCamera();
+    console.log(`[RISU] features: ${r.geojson?.features?.length}, buildings: ${(r.buildings||[]).length}, signals: ${signalsData.length}`);
+    frameTimes = r.frame_times || [];
+
+    // link_names テーブルとリンクあたりの ffs ルックアップを構築
+    linkNames = r.link_names || (geoData?.features || []).map(f => f.properties.name);
+    linkFfsByIdx = new Float32Array(linkNames.length);
+    {
+      const ffsMap = {};
+      for (const f of (geoData?.features || [])) ffsMap[f.properties.name] = f.properties.free_flow_speed || 0;
+      for (let i = 0; i < linkNames.length; i++) linkFfsByIdx[i] = ffsMap[linkNames[i]] || 0;
+    }
+
+    // フレームを列指向 → TypedArray に変換（大幅なメモリ削減）
+    const rawFrames = r.frames || {};
+    framesData = {};
+    // frame_format が無くても、raw.ids が存在すれば columnar 形式とみなす
+    for (const k of Object.keys(rawFrames)) {
+      const raw = rawFrames[k];
+      let frame;
+      if (raw && typeof raw === 'object' && !Array.isArray(raw) && Array.isArray(raw.ids)) {
+        // v2 コンパクト形式 → 直接 TypedArray にコピー
+        const n = raw.ids.length;
+        frame = {
+          n,
+          ids:    new Uint32Array(raw.ids),
+          xs:     new Float32Array(raw.xs),
+          ys:     new Float32Array(raw.ys),
+          vs:     new Float32Array(raw.vs),
+          alphas: new Float32Array(raw.alphas),
+          li:     new Uint16Array(raw.li),
+        };
+      } else if (Array.isArray(raw)) {
+        // 旧形式（array-of-objects）との互換: TypedArray に正規化
+        const n = raw.length;
+        const ids = new Uint32Array(n), xs = new Float32Array(n), ys = new Float32Array(n);
+        const vs = new Float32Array(n), alphas = new Float32Array(n), li = new Uint16Array(n);
+        const linkIdxMap = {};
+        for (let i = 0; i < linkNames.length; i++) linkIdxMap[linkNames[i]] = i;
+        for (let i = 0; i < n; i++) {
+          const v = raw[i];
+          ids[i] = v.id | 0;
+          xs[i] = v.x; ys[i] = v.y; vs[i] = v.v;
+          alphas[i] = v.alpha != null ? v.alpha : 0;
+          li[i] = linkIdxMap[v.link] | 0;
+        }
+        frame = { n, ids, xs, ys, vs, alphas, li };
+      } else {
+        frame = { n: 0, ids: new Uint32Array(0), xs: new Float32Array(0), ys: new Float32Array(0),
+                  vs: new Float32Array(0), alphas: new Float32Array(0), li: new Uint16Array(0) };
+      }
+      framesData[String(parseFloat(k))] = frame;
+      rawFrames[k] = null; // 外側 JSON への参照を切って GC 対象に
+    }
+    simTmax    = r.tmax;
+    lastSimId  = simId;
+
+    const s = r.stats || {};
+    document.getElementById('s-trips').textContent = s.total_trips ?? '--';
+    document.getElementById('s-comp').textContent  = s.completed_trips ?? '--';
+    document.getElementById('s-tt').textContent    = s.average_travel_time_s ? s.average_travel_time_s + 's' : '--';
+    document.getElementById('s-calc').textContent  = s.simulation_time_s ?? '--';
+    document.getElementById('sim-id-label').textContent = simId;
+    const nFeatures = r.geojson?.features?.length || 0;
+    document.getElementById('link-count-label').textContent = `(${nFeatures} links)`;
+    document.getElementById('dl-btn').style.display = 'inline-block';
+    document.getElementById('dl-scn-btn').style.display = 'inline-block';
+
+    timeSlider.value = 0;
+    document.getElementById('time-control').classList.add('visible');
+    document.getElementById('legend').classList.add('visible');
+    document.getElementById('canvas-placeholder').style.display = 'none';
+
+    canvasDirty = true;
+    drawFrame();
+    if (playing) stopPlay();
+    setTimeout(startPlay, 100);
+
+    // JSON 全体への参照を切る
+    r = null; data = null;
+  } catch(e) {
+    console.error(e);
+  }
+}
+
+// 前回結果を明示解放 — 新規ロード直前に呼ぶことで peak memory を抑える
+function releasePrevResult() {
+  geoData = null;
+  framesData = null;
+  buildingsData = null;
+  frameTimes = [];
+  linkNames = [];
+  linkFfsByIdx = null;
+  signalsData = [];
+  scenarioData = null;
+  nodeByCoord = {};
+  hitTargets = { nodes: [], links: [] };
+  statsSeries = null;
+  if (playing && typeof stopPlay === 'function') stopPlay();
+}
+
+// 現在時刻での信号現示 index を計算
+// sig: 信号オブジェクト全体（phase_log があれば優先使用）
+function currentPhaseIdx(sig, t) {
+  // 互換: 旧シグネチャ (phases, t) で呼ばれた場合
+  const phases = Array.isArray(sig) ? sig : sig.phases;
+  const phaseLog = (sig && sig.phase_log) || null;
+  // UXsim の実 phase ログがあれば最優先（タイミングずれを完全排除）
+  // phase_log の time step は DELTAT(=tmax/log長)。t を比例配分でインデックス化。
+  if (phaseLog && phaseLog.length) {
+    const tmax = simTmax || phaseLog.length;
+    const idx = Math.max(0, Math.min(phaseLog.length - 1,
+      Math.floor(t / tmax * phaseLog.length)));
+    return phaseLog[idx];
+  }
+  if (!phases || !phases.length) return -1;
+  const cycle = phases.reduce((a, b) => a + b, 0);
+  if (cycle <= 0) return -1;
+  let tInCycle = t % cycle;
+  for (let i = 0; i < phases.length; i++) {
+    tInCycle -= phases[i];
+    if (tInCycle < 0) return i;
+  }
+  return phases.length - 1;
+}
+
+// 空フレーム（undefined アクセスのフォールバック用）
+const EMPTY_FRAME = { n: 0, ids: new Uint32Array(0), xs: new Float32Array(0),
+  ys: new Float32Array(0), vs: new Float32Array(0), alphas: new Float32Array(0),
+  li: new Uint16Array(0) };
+
+// ホバー検出用ヒットターゲット（drawFrame ごとに更新）
+let hitTargets = { nodes: [], links: [] };
+
+// TypedArray フレームから i 番目の車両を一時オブジェクトとして取得
+function vehAt(frame, i) {
+  const lIdx = frame.li[i];
+  return {
+    id:    frame.ids[i],
+    x:     frame.xs[i],
+    y:     frame.ys[i],
+    v:     frame.vs[i],
+    alpha: frame.alphas[i],
+    li:    lIdx,
+    link:  linkNames[lIdx],
+    ffs:   linkFfsByIdx ? linkFfsByIdx[lIdx] : 0,
+  };
+}
+
+// ── 速度→色変換 ──
+function speedToColor(speed, ffs) {
+  const ratio = Math.max(0, Math.min(speed / ffs, 1));
+  return `hsl(${ratio * 120}, 85%, ${40 + ratio * 15}%)`;
+}
+
+// ── フレーム時刻の最近傍インデックスを見つける ──
+function findNearestFrameIdx(tCurrent) {
+  if (!frameTimes.length) return -1;
+  let lo = 0, hi = frameTimes.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (frameTimes[mid] <= tCurrent) lo = mid; else hi = mid - 1;
+  }
+  return lo;
+}
+
+// ── 車両のスクリーン座標を計算 ──
+function vehicleScreenPos(veh, linkDrawInfo, px, py) {
+  const info = veh.link ? linkDrawInfo[veh.link] : null;
+  if (!info) return [px(veh.x), py(veh.y)];
+
+  const t = veh.alpha;
+
+  // 多点パス上の位置（OSM 道路形状）
+  if (info.multipoint && info.screenCoords) {
+    const sc = info.screenCoords;
+    // alpha(0~1) をパス全長に沿って補間
+    // まずセグメント長を計算
+    let totalLen = 0;
+    const segLens = [];
+    for (let i = 1; i < sc.length; i++) {
+      const sl = Math.hypot(sc[i][0]-sc[i-1][0], sc[i][1]-sc[i-1][1]);
+      segLens.push(sl);
+      totalLen += sl;
+    }
+    if (totalLen === 0) return [sc[0][0], sc[0][1]];
+    let target = t * totalLen;
+    let acc = 0;
+    for (let i = 0; i < segLens.length; i++) {
+      if (acc + segLens[i] >= target) {
+        const frac = (target - acc) / (segLens[i] || 1);
+        return [
+          sc[i][0] * (1-frac) + sc[i+1][0] * frac,
+          sc[i][1] * (1-frac) + sc[i+1][1] * frac,
+        ];
+      }
+      acc += segLens[i];
+    }
+    return [sc[sc.length-1][0], sc[sc.length-1][1]];
+  }
+
+  // 双方向: ベジェ曲線上
+  if (info.bidir && info.cpx !== undefined) {
+    return [
+      (1-t)*(1-t)*info.ax + 2*(1-t)*t*info.cpx + t*t*info.bx,
+      (1-t)*(1-t)*info.ay + 2*(1-t)*t*info.cpy + t*t*info.by,
+    ];
+  }
+
+  // 直線
+  return [info.ax*(1-t) + info.bx*t, info.ay*(1-t) + info.by*t];
+}
+
+// ── 描画フレーム ──
+function drawFrame() {
+  if (!geoData) return;
+  if (canvasDirty) resizeCanvas();
+
+  const dpr = Math.min(1.5, window.devicePixelRatio || 1);
+  const ctx = canvasEl.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, canvasW, canvasH);
+
+  const tRatio   = timeSlider.value / 1000;
+  const tCurrent = Math.round(simTmax * tRatio);
+  timeLabel.textContent = `t = ${tCurrent} s`;
+
+  const features = geoData.features;
+  if (!features.length) return;
+
+  // 座標バウンド（道路座標のみでスケール決定 — 建物の外れ値でズームアウトしない）
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const f of features) {
+    for (const [x, y] of f.geometry.coordinates) {
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+  }
+  // 少しマージンを追加（道路範囲の10%）
+  const marginX = (maxX - minX) * 0.1 || 100;
+  const marginY = (maxY - minY) * 0.1 || 100;
+  minX -= marginX; maxX += marginX;
+  minY -= marginY; maxY += marginY;
+
+  const pad = 60;
+  const rangeX = maxX - minX || 1, rangeY = maxY - minY || 1;
+  const baseScale = Math.min((canvasW - pad*2) / rangeX, (canvasH - pad*2) / rangeY);
+  const baseOffX = pad + (canvasW - pad*2 - rangeX * baseScale) / 2;
+  const baseOffY = pad + (canvasH - pad*2 - rangeY * baseScale) / 2;
+  // カメラ変換を適用
+  const scaleV = baseScale * camZoom;
+  const offX = baseOffX * camZoom + camPanX;
+  const offY = baseOffY * camZoom + camPanY;
+  const px = x => offX + (x - minX) * scaleV;
+  const py = y => (canvasH - baseOffY) * camZoom + camPanY - (y - minY) * scaleV;
+
+  // ── 地面背景（建物がある場合） ──
+  if (buildingsData && buildingsData.length) {
+    ctx.fillStyle = '#f0f0ec';
+    ctx.fillRect(0, 0, canvasW, canvasH);
+  }
+
+  // ── 建物描画 ──
+  if (buildingsData && buildingsData.length) {
+    ctx.fillStyle = '#d9d5c8';
+    ctx.strokeStyle = '#c5c0b3';
+    ctx.lineWidth = 0.5;
+    for (const poly of buildingsData) {
+      if (poly.length < 3) continue;
+      ctx.beginPath();
+      ctx.moveTo(px(poly[0][0]), py(poly[0][1]));
+      for (let i = 1; i < poly.length; i++) {
+        ctx.lineTo(px(poly[i][0]), py(poly[i][1]));
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+
+  // ヒットターゲットをリセット（このフレームで再構築）
+  hitTargets = { nodes: [], links: [] };
+
+  // 双方向リンク検出（始点・終点で判定）
+  const edgeSet = new Set();
+  for (const f of features) {
+    const c = f.geometry.coordinates;
+    const [x0,y0] = c[0], [x1,y1] = c[c.length - 1];
+    edgeSet.add(`${x0},${y0}->${x1},${y1}`);
+  }
+
+  const ARC_OFFSET = 18;
+  const linkDrawInfo = {};
+  const isLinkMode = drawMode === 'link';
+  const hasMap = !!(buildingsData && buildingsData.length);
+  const denseNetwork = features.length > 30; // OSM等の密なネットワーク
+
+  // ── パスを描く汎用関数（多点 LineString 対応）──
+  function traceLinkPath(coords) {
+    ctx.beginPath();
+    ctx.moveTo(px(coords[0][0]), py(coords[0][1]));
+    for (let i = 1; i < coords.length; i++) {
+      ctx.lineTo(px(coords[i][0]), py(coords[i][1]));
+    }
+  }
+
+  // ── 道路縁取り（建物マップモード時、先に太い線を引く） ──
+  if (hasMap && !isLinkMode) {
+    ctx.strokeStyle = '#b8b4a8';
+    ctx.lineWidth = 6;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (const f of features) {
+      traceLinkPath(f.geometry.coordinates);
+      ctx.stroke();
+    }
+  }
+
+  // ── リンク描画 ──
+  for (const f of features) {
+    const coords = f.geometry.coordinates;
+    const linkName = f.properties.name;
+    const ffs = f.properties.free_flow_speed || 20;
+    // 始点・終点のスクリーン座標
+    const ax = px(coords[0][0]), ay = py(coords[0][1]);
+    const bx = px(coords[coords.length-1][0]), by = py(coords[coords.length-1][1]);
+    const isMultiPoint = coords.length > 2;
+
+    // LINKモード: 速度で色分け / それ以外: グレー（建物あり時は白い道路）
+    let color = hasMap ? '#ffffff' : '#d0d4dc';
+    if (isLinkMode) {
+      const tl = f.properties.timeline;
+      let speed = ffs;
+      if (tl && tl.length) {
+        let lo = 0, hi = tl.length - 1;
+        while (lo < hi) { const m = (lo+hi+1)>>1; tl[m].t <= tCurrent ? lo=m : hi=m-1; }
+        speed = tl[lo].speed ?? ffs;
+      }
+      color = speedToColor(speed, ffs);
+    }
+
+    const [x0,y0] = coords[0], [x1,y1] = coords[coords.length - 1];
+    const bidir = edgeSet.has(`${x1},${y1}->${x0},${y0}`);
+
+    if (isMultiPoint || denseNetwork) {
+      // 多点パス描画（OSM道路形状、または密なネットワーク）
+      traceLinkPath(coords);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = isLinkMode ? (hasMap ? 4 : 5) : (hasMap ? 3 : 4);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.stroke();
+
+      if (!denseNetwork) {
+        // ラベル（中間点付近）
+        const midIdx = Math.floor(coords.length / 2);
+        const mx = px(coords[midIdx][0]), my = py(coords[midIdx][1]);
+        ctx.fillStyle = 'rgba(100,110,130,0.4)';
+        ctx.font = '9px "IBM Plex Mono"';
+        ctx.textAlign = 'center';
+        ctx.fillText(linkName, mx, my - 8);
+      }
+
+      // linkDrawInfo: 多点パスのスクリーン座標を保存（車両描画用）
+      const screenCoords = coords.map(([cx,cy]) => [px(cx), py(cy)]);
+      linkDrawInfo[linkName] = { bidir, multipoint: true, screenCoords, ax, ay, bx, by };
+    } else if (bidir) {
+      // 2点 + 双方向: 円弧描画
+      const dx = bx - ax, dy = by - ay;
+      const len = Math.hypot(dx, dy) || 1;
+      const nx = -dy / len, ny = dx / len;
+      const cpx = (ax+bx)/2 + nx*ARC_OFFSET, cpy = (ay+by)/2 + ny*ARC_OFFSET;
+
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.quadraticCurveTo(cpx, cpy, bx, by);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = isLinkMode ? 5 : 4;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+
+      // 矢頭
+      const t2 = 0.6;
+      const mx = (1-t2)*(1-t2)*ax + 2*(1-t2)*t2*cpx + t2*t2*bx;
+      const my = (1-t2)*(1-t2)*ay + 2*(1-t2)*t2*cpy + t2*t2*by;
+      const tdx = 2*(1-t2)*(cpx-ax) + 2*t2*(bx-cpx);
+      const tdy = 2*(1-t2)*(cpy-ay) + 2*t2*(by-cpy);
+      const ang = Math.atan2(tdy, tdx);
+      ctx.beginPath();
+      ctx.moveTo(mx+Math.cos(ang)*6,     my+Math.sin(ang)*6);
+      ctx.lineTo(mx+Math.cos(ang-2.5)*5, my+Math.sin(ang-2.5)*5);
+      ctx.lineTo(mx+Math.cos(ang+2.5)*5, my+Math.sin(ang+2.5)*5);
+      ctx.closePath();
+      ctx.fillStyle = isLinkMode ? color : '#bbc0ca';
+      ctx.fill();
+
+      // ラベル
+      const lmx = 0.25*ax + 0.5*cpx + 0.25*bx;
+      const lmy = 0.25*ay + 0.5*cpy + 0.25*by;
+      ctx.fillStyle = 'rgba(100,110,130,0.4)';
+      ctx.font = '9px "IBM Plex Mono"';
+      ctx.textAlign = 'center';
+      ctx.fillText(linkName, lmx + nx*10, lmy + ny*10);
+
+      linkDrawInfo[linkName] = { bidir: true, ax, ay, bx, by, cpx, cpy };
+    } else {
+      // 2点 + 一方向: 直線描画
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(bx, by);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = isLinkMode ? 7 : 5;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+
+      const ang = Math.atan2(by-ay, bx-ax);
+      const mx = (ax+bx)/2, my = (ay+by)/2;
+      ctx.beginPath();
+      ctx.moveTo(mx+Math.cos(ang)*7,     my+Math.sin(ang)*7);
+      ctx.lineTo(mx+Math.cos(ang-2.5)*6, my+Math.sin(ang-2.5)*6);
+      ctx.lineTo(mx+Math.cos(ang+2.5)*6, my+Math.sin(ang+2.5)*6);
+      ctx.closePath();
+      ctx.fillStyle = isLinkMode ? color : '#bbc0ca';
+      ctx.fill();
+
+      ctx.fillStyle = 'rgba(100,110,130,0.4)';
+      ctx.font = '10px "IBM Plex Mono"';
+      ctx.textAlign = 'center';
+      ctx.fillText(linkName, mx, my - 10);
+
+      linkDrawInfo[linkName] = { bidir: false, ax, ay, bx, by };
+    }
+  }
+
+  // ── ヒットターゲット蓄積（リンク） ──
+  for (const f of features) {
+    const linkName = f.properties.name;
+    const info = linkDrawInfo[linkName];
+    if (!info) continue;
+    hitTargets.links.push({
+      name: linkName,
+      properties: f.properties,
+      info,  // ax/ay/bx/by/cpx/cpy/multipoint/screenCoords
+    });
+  }
+
+  // ── ノード描画 ──
+  if (!denseNetwork) {
+    // 座標 → 元ノード情報の辞書（nodeByCoord は元シナリオ座標で構築済）
+    const nodes = {};
+    for (const f of features) {
+      const c = f.geometry.coordinates;
+      const [x0,y0] = c[0], [x1,y1] = c[c.length - 1];
+      nodes[`${x0},${y0}`] = { sx: px(x0), sy: py(y0), x0, y0 };
+      nodes[`${x1},${y1}`] = { sx: px(x1), sy: py(y1), x0: x1, y0: y1 };
+    }
+    // ヒットターゲットに登録（元ノード情報があれば名前と signal も）
+    for (const np of Object.values(nodes)) {
+      const meta = nodeByCoord[`${np.x0},${np.y0}`];
+      hitTargets.nodes.push({
+        sx: np.sx, sy: np.sy,
+        name: meta ? meta.name : null,
+        x: np.x0, y: np.y0,
+        signal: meta && meta.signal ? meta.signal : null,
+      });
+    }
+    for (const np of Object.values(nodes)) {
+      const nx = np.sx, ny = np.sy;
+      ctx.beginPath();
+      ctx.arc(nx, ny, 6, 0, Math.PI*2);
+      ctx.fillStyle = '#ffffff';
+      ctx.strokeStyle = '#0d9668';
+      ctx.lineWidth = 2;
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+
+  // ── 車両描画 (vehicle / trail モード) ── フレーム間線形補間で滑らかに描画 ──
+  if ((drawMode === 'vehicle' || drawMode === 'trail') && framesData && frameTimes.length) {
+    const curIdx = findNearestFrameIdx(tCurrent);
+    if (curIdx < 0) return;
+
+    // ── 補間された現在フレームの車両リストを生成（TypedArray フレーム対応） ──
+    function interpolateVehicles(tNow) {
+      const idxA = findNearestFrameIdx(tNow);
+      if (idxA < 0) return [];
+      const tA = frameTimes[idxA];
+      const frameA = framesData[String(tA)] || EMPTY_FRAME;
+
+      // フレーム末尾 or 厳密一致 → 補間不要
+      if (tA >= tNow || idxA >= frameTimes.length - 1) {
+        const result = new Array(frameA.n);
+        for (let i = 0; i < frameA.n; i++) {
+          const v = vehAt(frameA, i);
+          const [sx, sy] = vehicleScreenPos(v, linkDrawInfo, px, py);
+          result[i] = { id: v.id, sx, sy, v: v.v, ffs: v.ffs };
+        }
+        return result;
+      }
+
+      const tB = frameTimes[idxA + 1];
+      const frameB = framesData[String(tB)] || EMPTY_FRAME;
+      const frac = (tNow - tA) / (tB - tA);
+
+      // フレーム B を ID で索引
+      const mapB = new Map();
+      for (let i = 0; i < frameB.n; i++) {
+        const id = frameB.ids[i];
+        const v = vehAt(frameB, i);
+        const [sx, sy] = vehicleScreenPos(v, linkDrawInfo, px, py);
+        mapB.set(id, { sx, sy, v: v.v, ffs: v.ffs });
+      }
+
+      const result = [];
+      const seen = new Set();
+      for (let i = 0; i < frameA.n; i++) {
+        const vA = vehAt(frameA, i);
+        const [sxA, syA] = vehicleScreenPos(vA, linkDrawInfo, px, py);
+        if (mapB.has(vA.id)) {
+          const b = mapB.get(vA.id);
+          seen.add(vA.id);
+          result.push({
+            id: vA.id,
+            sx: sxA + (b.sx - sxA) * frac,
+            sy: syA + (b.sy - syA) * frac,
+            v:  vA.v + (b.v - vA.v) * frac,
+            ffs: vA.ffs,
+          });
+        } else {
+          result.push({ id: vA.id, sx: sxA, sy: syA, v: vA.v, ffs: vA.ffs });
+        }
+      }
+      for (let i = 0; i < frameB.n; i++) {
+        const id = frameB.ids[i];
+        if (!seen.has(id) && frac > 0.5) {
+          const vB = vehAt(frameB, i);
+          const [sx, sy] = vehicleScreenPos(vB, linkDrawInfo, px, py);
+          result.push({ id, sx, sy, v: vB.v, ffs: vB.ffs });
+        }
+      }
+      return result;
+    }
+
+    // TRAIL モード: 過去フレームの軌跡を描画（TypedArray フレーム対応）
+    if (drawMode === 'trail') {
+      const startIdx = Math.max(0, curIdx - TRAIL_LENGTH);
+      const trailMap = new Map();
+
+      for (let fi = startIdx; fi <= curIdx; fi++) {
+        const tKey = String(frameTimes[fi]);
+        const frame = framesData[tKey];
+        if (!frame || frame.n === 0) continue;
+        for (let i = 0; i < frame.n; i++) {
+          const veh = vehAt(frame, i);
+          if (!trailMap.has(veh.id)) trailMap.set(veh.id, []);
+          const [sx, sy] = vehicleScreenPos(veh, linkDrawInfo, px, py);
+          trailMap.get(veh.id).push({ sx, sy, v: veh.v, ffs: veh.ffs });
+        }
+      }
+
+      // 現在の補間位置もトレイル末尾に追加
+      const interpNow = interpolateVehicles(tCurrent);
+      for (const iv of interpNow) {
+        if (iv.id === undefined) continue;
+        if (!trailMap.has(iv.id)) trailMap.set(iv.id, []);
+        trailMap.get(iv.id).push(iv);
+      }
+
+      for (const [vid, trail] of trailMap) {
+        if (trail.length < 2) continue;
+        const last = trail[trail.length - 1];
+        const baseColor = speedToColor(last.v, last.ffs);
+
+        for (let i = 1; i < trail.length; i++) {
+          const opacity = (i / trail.length) * 0.6 + 0.1;
+          const width = (i / trail.length) * 2.5 + 0.5;
+          ctx.beginPath();
+          ctx.moveTo(trail[i-1].sx, trail[i-1].sy);
+          ctx.lineTo(trail[i].sx, trail[i].sy);
+          ctx.strokeStyle = baseColor;
+          ctx.globalAlpha = opacity;
+          ctx.lineWidth = width;
+          ctx.lineCap = 'round';
+          ctx.stroke();
+        }
+      }
+      ctx.globalAlpha = 1.0;
+    }
+
+    // 現在位置の車両ドット（補間済み）
+    const interpVehs = interpolateVehicles(tCurrent);
+    if (interpVehs.length) {
+      for (const veh of interpVehs) {
+        const color = speedToColor(veh.v, veh.ffs);
+        ctx.beginPath();
+        ctx.arc(veh.sx, veh.sy, drawMode === 'trail' ? 3.5 : 4, 0, Math.PI*2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    }
+  }
+
+  // ── 信号現示の可視化 ──
+  if (signalsData && signalsData.length) {
+    for (const sig of signalsData) {
+      const activePhase = currentPhaseIdx(sig, tCurrent);
+      if (activePhase < 0) continue;
+      const cycle = sig.phases.reduce((a, b) => a + b, 0);
+      const tInCycle = tCurrent % cycle;
+      // 現在のフェーズの残り時間（黄色警告用）
+      let phaseStart = 0;
+      for (let i = 0; i < activePhase; i++) phaseStart += sig.phases[i];
+      const phaseElapsed = tInCycle - phaseStart;
+      const phaseLen = sig.phases[activePhase];
+      const remaining = phaseLen - phaseElapsed;
+      const isYellow = remaining < Math.min(3, phaseLen * 0.15);  // 残り 3s or 15% で黄
+
+      // 各流入リンクの停止位置（= 終端ノード）に信号機を描画
+      // 進行方向に対して垂直にハウジングを配置（2 灯横並びが道路を横切る形）
+      for (const [linkName, groupIdx] of Object.entries(sig.groups || {})) {
+        const info = linkDrawInfo[linkName];
+        if (!info) continue;
+        const isActive = groupIdx === activePhase;
+
+        // リンク末端（停止位置）と進行方向ベクトル
+        let endX, endY, dx, dy;
+        if (info.multipoint && info.screenCoords) {
+          const sc = info.screenCoords;
+          const p1 = sc[sc.length - 2];
+          const p2 = sc[sc.length - 1];
+          endX = p2[0]; endY = p2[1];
+          dx = p2[0] - p1[0];
+          dy = p2[1] - p1[1];
+        } else if (info.bidir && info.cpx !== undefined) {
+          endX = info.bx; endY = info.by;
+          // 終点での接線ベクトル（t=1）
+          dx = 2 * (info.bx - info.cpx);
+          dy = 2 * (info.by - info.cpy);
+        } else {
+          endX = info.bx; endY = info.by;
+          dx = info.bx - info.ax;
+          dy = info.by - info.ay;
+        }
+        const dlen = Math.hypot(dx, dy) || 1;
+        const tx = dx / dlen, ty = dy / dlen;       // 進行方向
+        // 停止位置から少し手前にオフセット（交差点円と重ならないように）
+        const backOff = 10;
+        const cx = endX - tx * backOff;
+        const cy = endY - ty * backOff;
+
+        // 信号機ハウジング（進行方向に垂直に配置）
+        const lampR  = 3.6;
+        const gap    = 4;
+        const hw     = lampR * 2 + gap * 2 + lampR * 2 + 5;  // 横幅（道路を横切る側）
+        const hh     = lampR * 2 + 5;                         // 高さ（進行方向側）
+        const housingColor = '#1a1a1a';
+        const lampOff = '#3a3a3a';
+        const redOn   = '#dc3545';
+        const grnOn   = '#2d9a4a';
+        const ylwOn   = '#e8a31c';
+
+        ctx.save();
+        ctx.translate(cx, cy);
+        // ハウジングを進行方向に垂直にするため、進行方向 + 90° で回転
+        ctx.rotate(Math.atan2(ty, tx) + Math.PI / 2);
+        // ハウジング（角丸長方形）
+        ctx.fillStyle = housingColor;
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 0.8;
+        const r = 2;
+        ctx.beginPath();
+        ctx.moveTo(-hw/2 + r, -hh/2);
+        ctx.lineTo( hw/2 - r, -hh/2);
+        ctx.arcTo( hw/2, -hh/2,  hw/2, -hh/2 + r, r);
+        ctx.lineTo( hw/2,  hh/2 - r);
+        ctx.arcTo( hw/2,  hh/2,  hw/2 - r,  hh/2, r);
+        ctx.lineTo(-hw/2 + r,  hh/2);
+        ctx.arcTo(-hw/2,  hh/2, -hw/2,  hh/2 - r, r);
+        ctx.lineTo(-hw/2, -hh/2 + r);
+        ctx.arcTo(-hw/2, -hh/2, -hw/2 + r, -hh/2, r);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // ランプ: 赤 (左) / 緑 (右) の 2 灯
+        const lampPositions = [
+          { dx: -lampR - gap/2, color: !isActive ? redOn : (isYellow ? ylwOn : lampOff), glow: !isActive || isYellow },
+          { dx:  lampR + gap/2, color: isActive && !isYellow ? grnOn : lampOff,          glow: isActive && !isYellow },
+        ];
+        for (const lp of lampPositions) {
+          if (lp.glow) {
+            const grad = ctx.createRadialGradient(lp.dx, 0, 0, lp.dx, 0, lampR * 2.5);
+            grad.addColorStop(0, lp.color);
+            grad.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(lp.dx, 0, lampR * 2.5, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.fillStyle = lp.color;
+          ctx.beginPath();
+          ctx.arc(lp.dx, 0, lampR, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = '#000';
+          ctx.lineWidth = 0.5;
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+    }
+  }
+}
+
+// ── インラインチャート描画 ──
+function renderChart(msgEl, chartSpec) {
+  const body = msgEl.querySelector('.body');
+  if (!body) { console.warn('[RISU] renderChart: .body not found'); return; }
+  if (!chartSpec) { console.warn('[RISU] renderChart: chartSpec is empty'); return; }
+
+  // Chart.js が読み込まれているか確認
+  if (typeof Chart === 'undefined') {
+    console.error('[RISU] renderChart: Chart.js が読み込まれていません（CDN/ネットワーク/CSP を確認）');
+    const err = document.createElement('div');
+    err.className = 'chart-wrap';
+    err.textContent = 'グラフ描画ライブラリが読み込まれていません';
+    body.appendChild(err);
+    return;
+  }
+
+  // LLM が data ラッパーを忘れて {type, labels, datasets} と書くことがあるので救済
+  if (!chartSpec.data && (chartSpec.labels || chartSpec.datasets)) {
+    chartSpec = { ...chartSpec, data: { labels: chartSpec.labels, datasets: chartSpec.datasets } };
+  }
+  if (!chartSpec.data || !chartSpec.data.datasets) {
+    console.warn('[RISU] renderChart: chartSpec.data.datasets が無い', chartSpec);
+    return;
+  }
+
+  const wrap = document.createElement('div');
+  wrap.className = 'chart-wrap';
+
+  // タイトル（chartSpec.options.plugins.title.text または chartSpec.title）
+  const titleText = chartSpec.title
+    || (chartSpec.options && chartSpec.options.plugins && chartSpec.options.plugins.title && chartSpec.options.plugins.title.text)
+    || '';
+  if (titleText) {
+    const title = document.createElement('div');
+    title.className = 'chart-title';
+    title.textContent = titleText;
+    wrap.appendChild(title);
+  }
+
+  // canvas は専用の高さ固定ボックスに入れる（responsive 描画の高さ 0 問題を回避）
+  const canvasBox = document.createElement('div');
+  canvasBox.className = 'chart-canvas-box';
+  const canvas = document.createElement('canvas');
+  canvasBox.appendChild(canvas);
+  wrap.appendChild(canvasBox);
+  body.appendChild(wrap);
+
+  // デフォルトオプション（LLM のオプションとマージ）
+  const defaultOpts = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: {
+        display: chartSpec.data.datasets && chartSpec.data.datasets.length > 1,
+        position: 'top',
+        labels: { font: { size: 10, family: "'IBM Plex Mono', monospace" } },
+      },
+      title: { display: false },
+    },
+    scales: {
+      x: { ticks: { font: { size: 9 }, maxTicksLimit: 12 } },
+      y: { ticks: { font: { size: 9 } }, beginAtZero: true },
+    },
+  };
+
+  // LLM が指定した options をマージ
+  const userOpts = chartSpec.options || {};
+  const mergedOpts = deepMerge(defaultOpts, userOpts);
+
+  let chartInstance;
+  try {
+    chartInstance = new Chart(canvas.getContext('2d'), {
+      type: chartSpec.type || 'line',
+      data: chartSpec.data,
+      options: mergedOpts,
+    });
+  } catch (err) {
+    console.error('[RISU] renderChart: Chart.js 初期化エラー', err, chartSpec);
+    canvasBox.remove();
+    const errEl = document.createElement('div');
+    errEl.style.fontSize = '11px';
+    errEl.style.color = 'var(--accent)';
+    errEl.textContent = 'グラフ描画エラー: ' + (err && err.message ? err.message : String(err));
+    wrap.appendChild(errEl);
+    return;
+  }
+  // 後で newChat() でまとめて破棄できるよう参照を保持
+  if (!window._chartInstances) window._chartInstances = [];
+  window._chartInstances.push(chartInstance);
+
+  const messages = document.getElementById('messages');
+  messages.scrollTop = messages.scrollHeight;
+}
+
+// 深いマージ（LLM のオプションでデフォルトを上書き）
+function deepMerge(target, source) {
+  const out = { ...target };
+  for (const key of Object.keys(source)) {
+    if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])
+        && target[key] && typeof target[key] === 'object') {
+      out[key] = deepMerge(target[key], source[key]);
+    } else {
+      out[key] = source[key];
+    }
+  }
+  return out;
+}
+
+// ── ユーティリティ ──
+function setExample(el) {
+  document.getElementById('user-input').value = el.textContent;
+  document.getElementById('user-input').focus();
+}
+document.getElementById('user-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+document.getElementById('user-input').addEventListener('input', function() {
+  this.style.height = '';
+  this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+});
+
+// ══════════════════════════════════════════════════════════════════
+// Canvas ホバーツールチップ
+// ══════════════════════════════════════════════════════════════════
+(function setupCanvasHover() {
+  const tooltip = document.getElementById('canvas-tooltip');
+  if (!tooltip) return;
+  let hoverTimer = null;
+  let lastTarget = null;
+
+  function pointToSegmentDist(px, py, ax, ay, bx, by) {
+    const dx = bx - ax, dy = by - ay;
+    const len2 = dx*dx + dy*dy;
+    if (len2 === 0) return Math.hypot(px - ax, py - ay);
+    let t = ((px - ax) * dx + (py - ay) * dy) / len2;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(px - (ax + t*dx), py - (ay + t*dy));
+  }
+
+  function pointToLinkDist(mx, my, info) {
+    if (info.multipoint && info.screenCoords) {
+      let best = Infinity;
+      const sc = info.screenCoords;
+      for (let i = 1; i < sc.length; i++) {
+        const d = pointToSegmentDist(mx, my, sc[i-1][0], sc[i-1][1], sc[i][0], sc[i][1]);
+        if (d < best) best = d;
+      }
+      return best;
+    }
+    if (info.bidir && info.cpx !== undefined) {
+      // ベジェ曲線を 8 分割で近似してセグメント距離を取る
+      let best = Infinity;
+      const N = 8;
+      let prev = [info.ax, info.ay];
+      for (let i = 1; i <= N; i++) {
+        const t = i / N;
+        const x = (1-t)*(1-t)*info.ax + 2*(1-t)*t*info.cpx + t*t*info.bx;
+        const y = (1-t)*(1-t)*info.ay + 2*(1-t)*t*info.cpy + t*t*info.by;
+        const d = pointToSegmentDist(mx, my, prev[0], prev[1], x, y);
+        if (d < best) best = d;
+        prev = [x, y];
+      }
+      return best;
+    }
+    return pointToSegmentDist(mx, my, info.ax, info.ay, info.bx, info.by);
+  }
+
+  function findHover(mx, my) {
+    // ノード優先（半径 12px 以内）
+    let bestNode = null, bestNodeDist = 12;
+    for (const n of hitTargets.nodes) {
+      const d = Math.hypot(mx - n.sx, my - n.sy);
+      if (d < bestNodeDist) { bestNodeDist = d; bestNode = n; }
+    }
+    if (bestNode) return { type: 'node', target: bestNode };
+    // リンク（距離 6px 以内）
+    let bestLink = null, bestLinkDist = 6;
+    for (const lk of hitTargets.links) {
+      const d = pointToLinkDist(mx, my, lk.info);
+      if (d < bestLinkDist) { bestLinkDist = d; bestLink = lk; }
+    }
+    if (bestLink) return { type: 'link', target: bestLink };
+    return null;
+  }
+
+  function buildTooltipHTML(hit) {
+    if (hit.type === 'node') {
+      const n = hit.target;
+      const name = n.name || '(unnamed)';
+      let html = `<div class="tt-kind">NODE</div>`;
+      html += `<div class="tt-id">${escapeHtml(name)}</div>`;
+      html += `<div class="tt-meta">`;
+      html += `位置: <b>(${n.x.toFixed(0)}, ${n.y.toFixed(0)})</b>`;
+      if (n.signal) {
+        html += `<br>信号: <b>[${n.signal.join(', ')}]</b> 秒`;
+        html += `<br>サイクル: <b>${n.signal.reduce((a,b)=>a+b,0)}</b> 秒 / ${n.signal.length} 現示`;
+      }
+      html += `</div>`;
+      html += `<div class="tt-hint">チャットで「ノード <b>${escapeHtml(name)}</b>」と参照</div>`;
+      return html;
+    } else {
+      const lk = hit.target;
+      const p = lk.properties || {};
+      let html = `<div class="tt-kind">LINK</div>`;
+      html += `<div class="tt-id">${escapeHtml(lk.name)}</div>`;
+      html += `<div class="tt-meta">`;
+      if (p.length) html += `延長: <b>${Math.round(p.length)} m</b><br>`;
+      if (p.free_flow_speed) html += `自由流速度: <b>${p.free_flow_speed} m/s</b><br>`;
+      if (p.number_of_lanes) html += `車線数: <b>${p.number_of_lanes}</b><br>`;
+      // 該当 link が信号制御下なら group を表示
+      for (const sig of signalsData) {
+        if (sig.groups && sig.groups[lk.name] !== undefined) {
+          html += `信号 group: <b>${sig.groups[lk.name]}</b> @ ノード <b>${escapeHtml(sig.node)}</b><br>`;
+          break;
+        }
+      }
+      html += `</div>`;
+      html += `<div class="tt-hint">チャットで「リンク <b>${escapeHtml(lk.name)}</b>」と参照</div>`;
+      return html;
+    }
+  }
+
+  function escapeHtml(s) {
+    if (s == null) return '';
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function showTooltip(hit, mx, my) {
+    tooltip.innerHTML = buildTooltipHTML(hit);
+    tooltip.hidden = false;
+    // 位置調整: カーソル右下、ただし画面端を回避
+    const rect = canvasWrap.getBoundingClientRect();
+    let left = mx + 14, top = my + 14;
+    requestAnimationFrame(() => {
+      const tw = tooltip.offsetWidth, th = tooltip.offsetHeight;
+      if (left + tw > rect.width)  left = mx - tw - 14;
+      if (top + th > rect.height)  top  = my - th - 14;
+      tooltip.style.left = Math.max(4, left) + 'px';
+      tooltip.style.top  = Math.max(4, top)  + 'px';
+      tooltip.classList.add('visible');
+    });
+  }
+
+  function hideTooltip() {
+    tooltip.classList.remove('visible');
+    setTimeout(() => { if (!tooltip.classList.contains('visible')) tooltip.hidden = true; }, 200);
+  }
+
+  canvasEl.addEventListener('mousemove', (e) => {
+    if (isDragging) { hideTooltip(); return; }
+    const rect = canvasEl.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const hit = findHover(mx, my);
+    if (!hit) {
+      if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
+      hideTooltip();
+      lastTarget = null;
+      return;
+    }
+    const targetKey = hit.type + ':' + (hit.type === 'node' ? hit.target.name + '@' + hit.target.x + ',' + hit.target.y : hit.target.name);
+    if (targetKey === lastTarget) {
+      // 同じ対象上で動いているだけ → 位置だけ更新
+      if (!tooltip.hidden) {
+        tooltip.style.left = (mx + 14) + 'px';
+        tooltip.style.top  = (my + 14) + 'px';
+      }
+      return;
+    }
+    lastTarget = targetKey;
+    if (hoverTimer) clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(() => showTooltip(hit, mx, my), 350);
+  });
+
+  canvasEl.addEventListener('mouseleave', () => {
+    if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
+    hideTooltip();
+    lastTarget = null;
+  });
+})();
+
+// 起動時のヘルスチェックとステータス更新
+setTimeout(async () => {
+  await checkHealth();
+  const dot = document.getElementById('status-dot');
+  const label = document.getElementById('status-label');
+  if (dot.classList.contains('ok')) {
+    label.textContent = 'CONNECTED';
+  } else {
+    label.textContent = 'OFFLINE';
+    addMsg('system', 'API に接続できません。server.py を起動してください: python server.py');
+  }
+}, 500);
+
+// ══════════════════════════════════════════════════════════════════
+// Toast 通知
+// ══════════════════════════════════════════════════════════════════
+(function () {
+  let _toastTimer = null;
+  window.showToast = function (msg, kind = "", ms = 3000) {
+    const t = document.getElementById('toast');
+    if (!t) return;
+    t.textContent = msg;
+    t.className = 'visible' + (kind ? ' ' + kind : '');
+    clearTimeout(_toastTimer);
+    _toastTimer = setTimeout(() => { t.classList.remove('visible'); }, ms);
+  };
+})();
+
+// ══════════════════════════════════════════════════════════════════
+// UI 拡張機能
+// ══════════════════════════════════════════════════════════════════
+
+// ── Empty-state 管理 ──
+const emptyState = document.getElementById('empty-state');
+function hideEmptyState() { if (emptyState) emptyState.style.display = 'none'; }
+function showEmptyState() { if (emptyState && !document.querySelectorAll('#messages .msg').length) emptyState.style.display = ''; }
+
+// addMsg をラップして empty-state を自動で隠す
+const _origAddMsg = addMsg;
+addMsg = function(role, text, thinking = false) {
+  hideEmptyState();
+  return _origAddMsg(role, text, thinking);
+};
+
+// ── New Chat / Clear history ──
+function newChat() {
+  if (chatHistory.length > 0) {
+    saveHistoryEntry();
+  }
+  // Chart.js インスタンスを確実に破棄（メモリリーク防止）
+  if (window._chartInstances) {
+    for (const c of window._chartInstances) {
+      try { c.destroy(); } catch {}
+    }
+    window._chartInstances = [];
+  }
+  chatHistory = [];
+  document.getElementById('messages').innerHTML = '';
+  document.getElementById('messages').appendChild(emptyState);
+  emptyState.style.display = '';
+  // reset viz
+  releasePrevResult();
+  lastSimId = null;
+  document.getElementById('stats-panel').hidden = true;
+  document.getElementById('canvas-controls').hidden = true;
+  document.getElementById('dl-btn').style.display = 'none';
+  document.getElementById('dl-scn-btn').style.display = 'none';
+  document.getElementById('time-control').classList.remove('visible');
+  document.getElementById('legend').classList.remove('visible');
+  document.getElementById('canvas-placeholder').style.display = '';
+  document.getElementById('sim-id-label').textContent = '—';
+  document.getElementById('link-count-label').textContent = '';
+  resetCamera(); drawFrame();
+  if (typeof stopPlay === 'function' && playing) stopPlay();
+}
+document.getElementById('new-chat-btn').addEventListener('click', () => {
+  if (chatHistory.length > 0 && !confirm('現在の会話をリセットしますか？')) return;
+  newChat();
+});
+
+// ── Cancel (AbortController) ──
+let currentAbortController = null;
+function cancelSend() {
+  if (currentAbortController) currentAbortController.abort();
+}
+
+// sendMessage を拡張してキャンセル対応
+const _origSendMessage = sendMessage;
+sendMessage = async function() {
+  currentAbortController = new AbortController();
+  const origFetch = window.fetch;
+  window.fetch = (url, opts = {}) => origFetch(url, { ...opts, signal: currentAbortController.signal });
+  try {
+    await _origSendMessage();
+    saveHistoryEntry();
+  } finally {
+    window.fetch = origFetch;
+    currentAbortController = null;
+  }
+};
+
+// ── sim-id クリックでコピー ──
+document.getElementById('sim-id-label').addEventListener('click', () => {
+  if (!lastSimId) return;
+  navigator.clipboard.writeText(lastSimId).then(() => {
+    const el = document.getElementById('sim-id-label');
+    el.classList.add('copied');
+    const orig = el.textContent;
+    el.textContent = 'COPIED';
+    setTimeout(() => { el.classList.remove('copied'); el.textContent = orig; }, 1200);
+    if (window.showToast) showToast(`sim_id をコピーしました: ${lastSimId}`);
+  }).catch(() => {
+    if (window.showToast) showToast('コピーに失敗しました', 'error');
+  });
+});
+
+// ── Canvas ズームコントロール ──
+function zoomCanvas(factor) {
+  const rect = canvasEl.getBoundingClientRect();
+  const mx = rect.width / 2, my = rect.height / 2;
+  const oldZoom = camZoom;
+  camZoom = Math.max(0.2, Math.min(20, camZoom * factor));
+  camPanX = mx - (mx - camPanX) * (camZoom / oldZoom);
+  camPanY = my - (my - camPanY) * (camZoom / oldZoom);
+  updateZoomLabel();
+  drawFrame();
+}
+function updateZoomLabel() {
+  const el = document.getElementById('cc-zoom');
+  if (el) el.textContent = Math.round(camZoom * 100) + '%';
+}
+// ホイール/ドラッグ後にもラベル更新
+(function wrapDrawFrame() {
+  const _orig = drawFrame;
+  window.drawFrame = function() { updateZoomLabel(); return _orig.apply(this, arguments); };
+})();
+
+// ── Canvas hint (初回表示, 3 秒で消える) ──
+(function showCanvasHint() {
+  const h = document.getElementById('canvas-hint');
+  canvasEl.addEventListener('mouseenter', () => {
+    if (!geoData) return;
+    if (sessionStorage.getItem('canvas-hint-dismissed')) return;
+    h.hidden = false;
+    h.classList.add('visible');
+    setTimeout(() => { h.classList.remove('visible'); setTimeout(() => h.hidden = true, 400); sessionStorage.setItem('canvas-hint-dismissed', '1'); }, 3000);
+  }, { once: true });
+})();
+
+// ── Help / History モーダル ──
+function toggleHelp() {
+  const m = document.getElementById('help-modal');
+  m.classList.toggle('visible');
+}
+function toggleHistory() {
+  const d = document.getElementById('history-drawer');
+  d.classList.toggle('visible');
+  if (d.classList.contains('visible')) renderHistoryList();
+}
+document.getElementById('help-btn').addEventListener('click', toggleHelp);
+document.getElementById('history-btn').addEventListener('click', toggleHistory);
+
+// ── キーボードショートカット ──
+document.addEventListener('keydown', e => {
+  // Esc = close modal / drawer
+  if (e.key === 'Escape') {
+    document.getElementById('help-modal').classList.remove('visible');
+    document.getElementById('history-drawer').classList.remove('visible');
+  }
+  // Ctrl+K = new chat
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    if (chatHistory.length === 0 || confirm('現在の会話をリセットしますか？')) newChat();
+  }
+  // Space = play/pause (フォーカスが textarea 以外)
+  if (e.code === 'Space' && document.activeElement.tagName !== 'TEXTAREA' && document.activeElement.tagName !== 'INPUT') {
+    if (frameTimes.length) { e.preventDefault(); document.getElementById('play-btn').click(); }
+  }
+});
+
+// ── LocalStorage 履歴 ──
+const HISTORY_KEY = 'risu_history_v1';
+function loadHistoryIndex() {
+  try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'); }
+  catch { return []; }
+}
+function saveHistoryEntry() {
+  if (chatHistory.length === 0) return;
+  const idx = loadHistoryIndex();
+  const firstUser = chatHistory.find(m => m.role === 'user');
+  const title = firstUser ? firstUser.content.slice(0, 80) : 'untitled';
+  const id = 'h_' + Date.now();
+  // Avoid dup of very recent save
+  if (idx.length && idx[0].title === title && Date.now() - idx[0].ts < 5000) return;
+  idx.unshift({ id, title, ts: Date.now(), history: chatHistory, simId: lastSimId });
+  const trimmed = idx.slice(0, 30);
+  try { localStorage.setItem(HISTORY_KEY, JSON.stringify(trimmed)); } catch {}
+}
+function renderHistoryList() {
+  const list = document.getElementById('history-list');
+  const items = loadHistoryIndex();
+  if (!items.length) {
+    list.innerHTML = '<div class="hist-empty">履歴はまだありません</div>';
+    return;
+  }
+  list.innerHTML = '';
+  for (const it of items) {
+    const el = document.createElement('div');
+    el.className = 'hist-item';
+    const d = new Date(it.ts);
+    const dateStr = `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+    el.innerHTML = `<div class="t">${dateStr}${it.simId ? ' · ' + it.simId : ''}</div><div class="q"></div>`;
+    el.querySelector('.q').textContent = it.title;
+    el.addEventListener('click', () => restoreHistory(it));
+    list.appendChild(el);
+  }
+}
+function restoreHistory(entry) {
+  chatHistory = [...entry.history];
+  document.getElementById('messages').innerHTML = '';
+  document.getElementById('messages').appendChild(emptyState);
+  emptyState.style.display = 'none';
+  for (const m of chatHistory) {
+    if (m.role === 'user' || m.role === 'assistant') addMsg(m.role, m.content);
+  }
+  if (entry.simId) loadResult(entry.simId);
+  toggleHistory();
+}
+
+// ── Splitter ドラッグ ──
+(function enableSplitter() {
+  const sp = document.getElementById('splitter');
+  let dragging = false;
+  sp.addEventListener('mousedown', (e) => {
+    dragging = true;
+    document.body.classList.add('resizing');
+    sp.classList.add('dragging');
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const w = window.innerWidth;
+    const min = 280, max = w - 320;
+    const x = Math.max(min, Math.min(max, e.clientX));
+    document.body.style.setProperty('--split', x + 'px');
+    canvasDirty = true; drawFrame();
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove('resizing');
+    sp.classList.remove('dragging');
+  });
+})();
+
+// ── モバイルタブ切替 ──
+function switchPane(paneId) {
+  document.querySelectorAll('#mobile-tabs .mt-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.pane === paneId);
+  });
+  document.getElementById('chat-col').classList.toggle('hidden-pane', paneId !== 'chat-col');
+  document.getElementById('viz-col').classList.toggle('hidden-pane', paneId !== 'viz-col');
+  canvasDirty = true; drawFrame();
+}
+
+// ── チャートにダウンロード/拡大ボタンを追加 ──
+const _origRenderChart = renderChart;
+renderChart = function(msgEl, chartSpec) {
+  _origRenderChart(msgEl, chartSpec);
+  const wraps = msgEl.querySelectorAll('.chart-wrap');
+  const wrap = wraps[wraps.length - 1];
+  if (!wrap || wrap.querySelector('.chart-actions')) return;
+  const actions = document.createElement('div');
+  actions.className = 'chart-actions';
+  const btnDl = document.createElement('button');
+  btnDl.textContent = 'PNG';
+  btnDl.title = 'PNG をダウンロード';
+  btnDl.onclick = () => {
+    const canvas = wrap.querySelector('canvas');
+    const link = document.createElement('a');
+    link.download = 'risu_chart.png';
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+  };
+  const btnExpand = document.createElement('button');
+  btnExpand.textContent = 'OPEN';
+  btnExpand.title = '新しいタブで開く';
+  btnExpand.onclick = () => {
+    const canvas = wrap.querySelector('canvas');
+    const w = window.open();
+    w.document.write('<img src="' + canvas.toDataURL('image/png') + '" style="max-width:100%">');
+  };
+  actions.appendChild(btnDl);
+  actions.appendChild(btnExpand);
+  wrap.appendChild(actions);
+};
+
+// ── loadResult ラップ: stats-panel / canvas-controls を表示 ──
+const _origLoadResult = loadResult;
+loadResult = async function(simId) {
+  await _origLoadResult(simId);
+  document.getElementById('stats-panel').hidden = false;
+  document.getElementById('canvas-controls').hidden = false;
+  updateZoomLabel();
+  drawSparkline();
+  computeStatsSeries();
+  drawAllStatCharts();
+  updateStatValues();
+  updateTimeLabel();
+};
+
+// ══════════════════════════════════════════════════════════════════
+// Progressive stat charts
+// ══════════════════════════════════════════════════════════════════
+let statsSeries = null; // { active[], avgSpeed[], completed[], started[], totalTrips }
+
+function computeStatsSeries() {
+  if (!framesData || !frameTimes.length) { statsSeries = null; return; }
+  const N = frameTimes.length;
+  const active = new Array(N);
+  const started = new Array(N);
+  const completed = new Array(N);
+  const avgSpeed = new Array(N);
+  const lastSeen = new Map();
+  // First pass: find last seen time for each vehicle
+  for (const t of frameTimes) {
+    const frame = framesData[String(t)] || EMPTY_FRAME;
+    for (let i = 0; i < frame.n; i++) lastSeen.set(frame.ids[i], t);
+  }
+  // Second pass: per-frame metrics
+  const runningSet = new Set();
+  const features = (geoData && geoData.features) || [];
+  for (let i = 0; i < N; i++) {
+    const t = frameTimes[i];
+    const frame = framesData[String(t)] || EMPTY_FRAME;
+    active[i] = frame.n;
+    for (let j = 0; j < frame.n; j++) runningSet.add(frame.ids[j]);
+    started[i] = runningSet.size;
+    let c = 0;
+    for (const id of runningSet) if (lastSeen.get(id) < t) c++;
+    completed[i] = c;
+    // avg speed from link timelines
+    let sum = 0, cnt = 0;
+    for (const f of features) {
+      const tl = f.properties.timeline || [];
+      let s = null;
+      for (let j = tl.length - 1; j >= 0; j--) {
+        if (tl[j].t <= t) { s = tl[j].speed; break; }
+      }
+      if (s != null) { sum += s; cnt++; }
+    }
+    avgSpeed[i] = cnt ? sum / cnt : 0;
+  }
+  const totalTrips = lastSeen.size;
+  statsSeries = { active, avgSpeed, completed, started, totalTrips,
+    maxActive: Math.max(1, ...active),
+    maxSpeed: Math.max(1, ...avgSpeed),
+    maxCompleted: Math.max(1, ...completed),
+    maxStarted: Math.max(1, ...started),
+  };
+  // Also expose static numbers on hidden legacy ids (for any external code reading them)
+  const totalLabel = document.getElementById('sv-total-trips');
+  if (totalLabel) totalLabel.textContent = totalTrips;
+}
+
+function currentFrameIdx() {
+  if (!frameTimes.length) return 0;
+  const slider = document.getElementById('time-slider');
+  const ratio = (parseFloat(slider.value) || 0) / 1000;
+  const t = (simTmax || frameTimes[frameTimes.length - 1] || 0) * ratio;
+  return findNearestFrameIdx(t);
+}
+
+function drawStatChart(canvas, series, maxY, idx) {
+  if (!canvas || !series || !series.length) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || canvas.offsetWidth || 100;
+  const h = canvas.clientHeight || canvas.offsetHeight || 32;
+  if (w < 1 || h < 1) return;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+
+  const N = series.length;
+  if (N < 2) return;
+  const accent = (getComputedStyle(document.documentElement).getPropertyValue('--accent') || '#dc4a1c').trim();
+  const soft = (getComputedStyle(document.documentElement).getPropertyValue('--line-soft') || '#d4d4d0').trim();
+  const ink = (getComputedStyle(document.documentElement).getPropertyValue('--ink') || '#171717').trim();
+  const pad = 2;
+  const innerH = h - pad * 2;
+  const x = (i) => i * (w / (N - 1));
+  const y = (v) => pad + innerH - (Math.max(0, v) / maxY) * innerH;
+
+  // Future portion (light outline of full trajectory)
+  ctx.strokeStyle = soft;
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  for (let i = 0; i < N; i++) {
+    if (i === 0) ctx.moveTo(x(i), y(series[i]));
+    else ctx.lineTo(x(i), y(series[i]));
+  }
+  ctx.stroke();
+
+  // Past portion (accent filled area + solid line)
+  const fillEnd = Math.min(idx, N - 1);
+  if (fillEnd >= 1) {
+    ctx.fillStyle = accent + '22';
+    ctx.beginPath();
+    ctx.moveTo(x(0), y(0));
+    for (let i = 0; i <= fillEnd; i++) ctx.lineTo(x(i), y(series[i]));
+    ctx.lineTo(x(fillEnd), y(0));
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    for (let i = 0; i <= fillEnd; i++) {
+      if (i === 0) ctx.moveTo(x(i), y(series[i]));
+      else ctx.lineTo(x(i), y(series[i]));
+    }
+    ctx.stroke();
+  }
+
+  // Cursor dot
+  if (idx >= 0 && idx < N) {
+    const cx = x(idx);
+    const cy = y(series[idx]);
+    ctx.fillStyle = ink;
+    ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI * 2); ctx.stroke();
+  }
+}
+
+function drawAllStatCharts() {
+  if (!statsSeries) return;
+  const idx = currentFrameIdx();
+  const canvases = document.querySelectorAll('#stats-panel .stat-chart');
+  canvases.forEach(card => {
+    const metric = card.dataset.metric;
+    const canvas = card.querySelector('.sc-canvas');
+    if (metric === 'active') drawStatChart(canvas, statsSeries.active, statsSeries.maxActive, idx);
+    else if (metric === 'avgSpeed') drawStatChart(canvas, statsSeries.avgSpeed, statsSeries.maxSpeed, idx);
+    else if (metric === 'completed') drawStatChart(canvas, statsSeries.completed, statsSeries.maxCompleted, idx);
+    else if (metric === 'inflow') drawStatChart(canvas, statsSeries.started, statsSeries.maxStarted, idx);
+  });
+}
+
+function updateStatValues() {
+  if (!statsSeries) return;
+  const idx = currentFrameIdx();
+  const fmt = (v) => Number.isFinite(v) ? (v >= 100 ? Math.round(v) : v.toFixed(1)) : '—';
+  const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  setText('sv-active', fmt(statsSeries.active[idx] || 0));
+  setText('sv-speed', fmt(statsSeries.avgSpeed[idx] || 0));
+  setText('sv-completed', fmt(statsSeries.completed[idx] || 0));
+  setText('sv-inflow', fmt(statsSeries.started[idx] || 0));
+  const totalEl = document.getElementById('sv-total-trips');
+  if (totalEl && statsSeries.totalTrips) totalEl.textContent = statsSeries.totalTrips;
+}
+
+// Slider → update charts & values
+document.getElementById('time-slider').addEventListener('input', () => {
+  drawAllStatCharts();
+  updateStatValues();
+});
+// Resize
+window.addEventListener('resize', () => {
+  drawAllStatCharts();
+  drawSparkline();
+});
+
+// ── Time label をトータル時間含めて更新 ──
+function updateTimeLabel() {
+  const slider = document.getElementById('time-slider');
+  const label = document.getElementById('time-label');
+  if (!label || !frameTimes.length) return;
+  const maxT = simTmax || frameTimes[frameTimes.length - 1] || 0;
+  const ratio = (parseFloat(slider.value) || 0) / 1000;
+  const curT = Math.round(maxT * ratio);
+  const pct = maxT ? Math.round(ratio * 100) : 0;
+  label.textContent = `${curT}s / ${Math.round(maxT)}s · ${pct}%`;
+}
+document.getElementById('time-slider').addEventListener('input', updateTimeLabel);
+
+// ── Sparkline: 各時刻のネットワーク平均速度 ──
+function drawSparkline() {
+  const c = document.getElementById('time-sparkline');
+  if (!c || !geoData) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth || c.offsetWidth;
+  const h = 16;
+  c.width = w * dpr; c.height = h * dpr;
+  const ctx = c.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+  // Aggregate: for each frame time, compute avg link speed from timelines
+  const features = geoData.features || [];
+  if (!features.length || !frameTimes.length) return;
+  // Build per-time avg speed
+  const N = Math.min(120, frameTimes.length);
+  const step = Math.max(1, Math.floor(frameTimes.length / N));
+  const pts = [];
+  for (let i = 0; i < frameTimes.length; i += step) {
+    const t = frameTimes[i];
+    let sum = 0, count = 0;
+    for (const f of features) {
+      const tl = f.properties.timeline || [];
+      // find nearest timeline entry to t
+      let speed = null;
+      for (let j = tl.length - 1; j >= 0; j--) {
+        if (tl[j].t <= t) { speed = tl[j].speed; break; }
+      }
+      if (speed != null && f.properties.free_flow_speed) {
+        sum += Math.max(0, Math.min(1, speed / f.properties.free_flow_speed));
+        count++;
+      }
+    }
+    pts.push(count ? sum / count : 0);
+  }
+  if (!pts.length) return;
+  // Draw as bars (congestion height = 1 - ratio)
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#dc4a1c';
+  const bw = w / pts.length;
+  for (let i = 0; i < pts.length; i++) {
+    const congestion = 1 - pts[i]; // 0=free, 1=jam
+    const bh = congestion * h;
+    ctx.fillRect(i * bw, h - bh, Math.max(1, bw - .5), bh);
+  }
+}
+window.addEventListener('resize', drawSparkline);
+
+// ── 起動時: 履歴からの復元オプションは表示しない。手動のみ ──
+
+</script>
+</body>
+</html>

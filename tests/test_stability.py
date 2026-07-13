@@ -1,0 +1,724 @@
+"""
+RISU 安定性テスト
+================
+これまでの開発で発見・修正した問題をテストとして記録。
+新機能追加時にこのテストが全て通ることを確認すること。
+
+テスト実行:
+    cd risu-local
+    .venv/Scripts/activate
+    pip install pytest httpx
+    pytest tests/ -v
+
+注意: サーバー (python server.py) が起動している必要があるテストは
+      test_api_* で始まるもの。それ以外はサーバー不要。
+"""
+
+import json
+import pytest
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+from server import (
+    SimulationInput,
+    _run_uxsim,
+    _parse_csv_scenario,
+    _get_simulation_data,
+    results_store,
+)
+
+
+# ============================================================
+# テスト用シナリオ
+# ============================================================
+
+BOTTLENECK_SCENARIO = SimulationInput(
+    name="test_bottleneck",
+    tmax=1000,
+    deltan=5,
+    nodes=[
+        {"name": "A", "x": 0, "y": 0},
+        {"name": "B", "x": 5000, "y": 0, "flow_capacity": 0.4},
+        {"name": "C", "x": 7500, "y": 0},
+    ],
+    links=[
+        {"name": "r1", "start": "A", "end": "B", "length": 5000},
+        {"name": "r2", "start": "B", "end": "C", "length": 2500, "free_flow_speed": 10},
+    ],
+    demands=[
+        {"orig": "A", "dest": "C", "t_start": 0, "t_end": 600, "flow": 0.8},
+    ],
+)
+
+GRID_BIDIRECTIONAL_SCENARIO = SimulationInput(
+    name="test_grid",
+    tmax=1000,
+    deltan=5,
+    nodes=[
+        {"name": "n00", "x": 0, "y": 0},
+        {"name": "n10", "x": 2000, "y": 0},
+        {"name": "n01", "x": 0, "y": 2000},
+        {"name": "n11", "x": 2000, "y": 2000},
+    ],
+    links=[
+        {"name": "h0", "start": "n00", "end": "n10", "length": 2000},
+        {"name": "h0r", "start": "n10", "end": "n00", "length": 2000},
+        {"name": "v0", "start": "n00", "end": "n01", "length": 2000},
+        {"name": "v0r", "start": "n01", "end": "n00", "length": 2000},
+        {"name": "h1", "start": "n01", "end": "n11", "length": 2000},
+        {"name": "h1r", "start": "n11", "end": "n01", "length": 2000},
+        {"name": "v1", "start": "n10", "end": "n11", "length": 2000},
+        {"name": "v1r", "start": "n11", "end": "n10", "length": 2000},
+    ],
+    demands=[
+        {"orig": "n00", "dest": "n11", "t_start": 0, "t_end": 500, "flow": 0.4},
+        {"orig": "n11", "dest": "n00", "t_start": 0, "t_end": 500, "flow": 0.3},
+    ],
+)
+
+
+# ============================================================
+# 1. UXsim 実行結果の構造テスト
+# ============================================================
+
+class TestUXsimOutput:
+    """_run_uxsim() の出力データ構造が正しいことを検証"""
+
+    @pytest.fixture(scope="class")
+    def result(self):
+        return _run_uxsim(BOTTLENECK_SCENARIO)
+
+    def test_top_level_keys(self, result):
+        """必須キーが全て存在する"""
+        assert "geojson" in result
+        assert "frames" in result
+        assert "frame_times" in result
+        assert "stats" in result
+        assert "tmax" in result
+
+    def test_geojson_structure(self, result):
+        """GeoJSON が FeatureCollection 形式"""
+        geo = result["geojson"]
+        assert geo["type"] == "FeatureCollection"
+        assert len(geo["features"]) > 0
+
+    def test_link_properties(self, result):
+        """各リンクに必須プロパティが存在する"""
+        for f in result["geojson"]["features"]:
+            props = f["properties"]
+            assert "name" in props
+            assert "length" in props
+            assert "free_flow_speed" in props
+            assert "number_of_lanes" in props
+            # タイムラインが存在する (リンクレベル描画用)
+            assert "timeline" in props
+            assert isinstance(props["timeline"], list)
+
+    def test_link_timeline_format(self, result):
+        """
+        タイムラインの各エントリに t と speed が含まれる。
+        [修正履歴] タイムラインを一度削除してしまい LINK モードが壊れた。
+        """
+        for f in result["geojson"]["features"]:
+            tl = f["properties"]["timeline"]
+            if len(tl) > 0:
+                assert "t" in tl[0]
+                assert "speed" in tl[0]
+
+    def test_link_coordinates(self, result):
+        """リンクが2点の LineString である"""
+        for f in result["geojson"]["features"]:
+            assert f["geometry"]["type"] == "LineString"
+            coords = f["geometry"]["coordinates"]
+            assert len(coords) == 2
+            assert len(coords[0]) == 2  # [x, y]
+
+    def test_frames_exist(self, result):
+        """フレームデータが空でない"""
+        assert len(result["frames"]) > 0
+        assert len(result["frame_times"]) > 0
+
+    def test_frame_times_sorted(self, result):
+        """frame_times がソート済み"""
+        ft = result["frame_times"]
+        assert ft == sorted(ft)
+
+    def test_frame_key_consistency(self, result):
+        """
+        frame_times の各値を str() したものが frames のキーに存在する。
+        [修正履歴] Python は "25.0" をキーにするが、
+        JS の String(25.0) は "25" になりマッチしなかった。
+        → フロントエンドで parseFloat 正規化で対処。
+        このテストはサーバー側のキー形式を記録する。
+        """
+        frames = result["frames"]
+        for t in result["frame_times"]:
+            key = str(round(t, 1))
+            assert key in frames, f"frame_times の {t} に対応するキー '{key}' が frames にない"
+
+    def test_vehicle_data_fields(self, result):
+        """
+        各車両データに必須フィールドが存在する。
+        [修正履歴] id, link, alpha を後から追加した。
+        """
+        found_vehicle = False
+        for key, vehicles in result["frames"].items():
+            for v in vehicles:
+                found_vehicle = True
+                assert "id" in v, "車両IDが必要（軌跡追跡用）"
+                assert "x" in v
+                assert "y" in v
+                assert "v" in v, "速度が必要"
+                assert "ffs" in v, "自由流速度が必要（色分け用）"
+                assert "link" in v, "リンク名が必要（双方向円弧上の配置用）"
+                assert "alpha" in v, "リンク上の位置比率が必要（円弧上の配置用）"
+                # alpha は 0〜1 の範囲
+                assert 0 <= v["alpha"] <= 1, f"alpha が範囲外: {v['alpha']}"
+                break
+            if found_vehicle:
+                break
+        assert found_vehicle, "走行中の車両が1台も見つからない"
+
+    def test_vehicle_speed_reasonable(self, result):
+        """車両速度が非負で、自由流速度の2倍以内"""
+        for key, vehicles in result["frames"].items():
+            for v in vehicles:
+                assert v["v"] >= 0, f"速度が負: {v['v']}"
+                assert v["v"] <= v["ffs"] * 2, f"速度が異常に高い: {v['v']} > {v['ffs']*2}"
+
+    def test_stats_fields(self, result):
+        """統計情報の必須フィールド"""
+        s = result["stats"]
+        assert "total_trips" in s
+        assert "completed_trips" in s
+        assert "average_travel_time_s" in s
+        assert "simulation_time_s" in s
+        assert s["total_trips"] >= s["completed_trips"]
+
+
+# ============================================================
+# 2. 双方向道路テスト
+# ============================================================
+
+class TestBidirectionalLinks:
+    """
+    [修正履歴] 双方向リンクが存在しないとフロントエンドで
+    円弧表示にならない。逆方向リンクの存在確認。
+    """
+
+    @pytest.fixture(scope="class")
+    def result(self):
+        return _run_uxsim(GRID_BIDIRECTIONAL_SCENARIO)
+
+    def test_bidirectional_pairs_exist(self, result):
+        """A→B があれば B→A も存在する（双方向リンクの場合）"""
+        features = result["geojson"]["features"]
+        edges = set()
+        for f in features:
+            coords = f["geometry"]["coordinates"]
+            key = (tuple(coords[0]), tuple(coords[1]))
+            edges.add(key)
+
+        for f in features:
+            coords = f["geometry"]["coordinates"]
+            forward = (tuple(coords[0]), tuple(coords[1]))
+            reverse = (tuple(coords[1]), tuple(coords[0]))
+            if "r" in f["properties"]["name"]:
+                # 逆方向リンクには対応する順方向がある
+                assert reverse in edges, f"逆方向リンク {f['properties']['name']} の順方向が見つからない"
+
+    def test_both_directions_have_vehicles(self, result):
+        """双方向需要がある場合、両方向にリンクに車両がいる"""
+        link_names_with_vehicles = set()
+        for key, vehicles in result["frames"].items():
+            for v in vehicles:
+                link_names_with_vehicles.add(v["link"])
+
+        # 順方向・逆方向の両方に車両がいるはず
+        assert any(not n.endswith("r") for n in link_names_with_vehicles), "順方向リンクに車両がいない"
+        assert any(n.endswith("r") for n in link_names_with_vehicles), "逆方向リンクに車両がいない"
+
+
+# ============================================================
+# 3. CSV パーサーテスト
+# ============================================================
+
+class TestCSVParser:
+    """
+    [修正履歴] 空セルで float("") エラーが発生した。
+    _f() / _i() ヘルパーで対処済み。
+    """
+
+    def test_risu_csv_basic(self):
+        """RISU CSV 形式の基本パース"""
+        csv = (
+            "type,name,x,y,start,end,length,free_flow_speed,number_of_lanes,orig,dest,t_start,t_end,flow\n"
+            "node,A,0,0,,,,,,,,,,\n"
+            "node,B,5000,0,,,,,,,,,,\n"
+            "link,r1,,,A,B,5000,20,1,,,,,\n"
+            "demand,,,,,,,,,A,B,0,600,0.5\n"
+        )
+        result = _parse_csv_scenario(csv)
+        assert result["format"] == "risu_csv"
+        assert len(result["nodes"]) == 2
+        assert len(result["links"]) == 1
+        assert len(result["demands"]) == 1
+
+    def test_risu_csv_empty_cells(self):
+        """
+        空セルが含まれる RISU CSV でエラーにならない。
+        [修正履歴] float("") で ValueError が発生した。
+        """
+        csv = (
+            "type,name,x,y,start,end,length,free_flow_speed,number_of_lanes,orig,dest,t_start,t_end,flow\n"
+            "node,start,0,0,,,,,,,,,,\n"
+            "node,goal,5000,0,,,,,,,,,,\n"
+            "link,road,,,start,goal,5000,,,,,,,,\n"
+            "demand,,,,,,,,,start,goal,0,600,0.8\n"
+        )
+        result = _parse_csv_scenario(csv)
+        assert result["format"] == "risu_csv"
+        # 空の free_flow_speed はデフォルト値 20 になる
+        assert result["links"][0]["free_flow_speed"] == 20
+
+    def test_gmns_node_csv(self):
+        """GMNS node.csv 形式"""
+        csv = "node_id,x_coord,y_coord,zone_id\n1,0,0,1\n2,5000,0,2\n"
+        result = _parse_csv_scenario(csv)
+        assert result["format"] in ("gmns_node", "node_csv")
+        assert len(result["nodes"]) == 2
+
+    def test_gmns_link_csv(self):
+        """GMNS link.csv 形式"""
+        csv = "link_id,from_node_id,to_node_id,length,free_speed,lanes\n1,1,2,5000,60,2\n"
+        result = _parse_csv_scenario(csv)
+        assert result["format"] in ("gmns_link", "link_csv")
+        assert len(result["links"]) == 1
+
+    def test_gmns_demand_csv(self):
+        """GMNS demand.csv 形式"""
+        csv = "o_zone_id,d_zone_id,volume\n1,2,500\n2,1,300\n"
+        result = _parse_csv_scenario(csv)
+        assert result["format"] in ("gmns_demand", "demand_csv")
+        assert len(result["demands"]) == 2
+
+    def test_flexible_node_csv(self):
+        """柔軟なカラム名のノード CSV"""
+        csv = "name,lon,lat\nA,139.7,35.6\nB,139.71,35.61\n"
+        result = _parse_csv_scenario(csv)
+        assert result["format"] == "node_csv"
+        assert len(result["nodes"]) == 2
+
+    def test_flexible_link_csv(self):
+        """柔軟なカラム名のリンク CSV"""
+        csv = "id,from,to,distance,speed_limit\n1,A,B,5000,60\n2,B,C,3000,40\n"
+        result = _parse_csv_scenario(csv)
+        assert result["format"] == "link_csv"
+        assert len(result["links"]) == 2
+        assert result["links"][0]["start"] == "A"
+        assert result["links"][0]["end"] == "B"
+
+    def test_unknown_csv_raises(self):
+        """認識できない CSV はエラー"""
+        csv = "col_a,col_b\n1,2\n"
+        with pytest.raises(ValueError, match="CSV 形式を認識できません"):
+            _parse_csv_scenario(csv)
+
+
+# ============================================================
+# 4. シミュレーションデータ集計テスト
+# ============================================================
+
+class TestSimulationDataAggregation:
+    """
+    _get_simulation_data() がグラフ生成に十分なデータを返すことを検証。
+    [修正履歴] LLM がチャート生成するにはデータが必要。
+    """
+
+    @pytest.fixture(scope="class")
+    def sim_data(self):
+        result = _run_uxsim(BOTTLENECK_SCENARIO)
+        sid = "test_aggregation"
+        results_store[sid] = result
+        return _get_simulation_data(sid)
+
+    def test_not_none(self, sim_data):
+        assert sim_data is not None
+
+    def test_required_fields(self, sim_data):
+        """チャート生成に必要な全フィールドが存在する"""
+        assert "sim_id" in sim_data
+        assert "tmax" in sim_data
+        assert "stats" in sim_data
+        assert "time_labels" in sim_data
+        assert "network_avg_speed" in sim_data
+        assert "network_vehicle_count" in sim_data
+        assert "link_names" in sim_data
+        assert "link_speeds" in sim_data
+        assert "speed_histogram" in sim_data
+
+    def test_time_labels_reasonable(self, sim_data):
+        """時間ラベルが0から始まりtmax以下"""
+        labels = sim_data["time_labels"]
+        assert len(labels) > 0
+        assert labels[0] >= 0
+        assert labels[-1] <= sim_data["tmax"]
+
+    def test_arrays_same_length(self, sim_data):
+        """時系列データが全て同じ長さ"""
+        n = len(sim_data["time_labels"])
+        assert len(sim_data["network_avg_speed"]) == n
+        assert len(sim_data["network_vehicle_count"]) == n
+        for speeds in sim_data["link_speeds"].values():
+            assert len(speeds) == n
+
+    def test_speed_histogram_structure(self, sim_data):
+        """速度分布ヒストグラムの構造"""
+        hist = sim_data["speed_histogram"]
+        assert "labels" in hist
+        assert "counts" in hist
+        assert len(hist["labels"]) == len(hist["counts"])
+
+    def test_nonexistent_sim_returns_none(self):
+        """存在しない sim_id は None を返す"""
+        assert _get_simulation_data("nonexistent_id_12345") is None
+
+    def test_data_not_too_large(self, sim_data):
+        """
+        JSON サイズが LLM のコンテキストに収まるサイズ。
+        間引きが機能していることを確認。
+        """
+        json_str = json.dumps(sim_data)
+        # 100KB 以下であること（LLM に渡せるサイズ）
+        assert len(json_str) < 100_000, f"データが大きすぎる: {len(json_str)} bytes"
+
+
+# ============================================================
+# 5. フレームキー正規化テスト（フロントエンド互換性）
+# ============================================================
+
+class TestFrameKeyCompatibility:
+    """
+    [修正履歴] Python の str(round(25.0, 1)) = "25.0" だが
+    JavaScript の String(25.0) = "25"。
+    フロントエンドで parseFloat 正規化しているため、
+    サーバー側のキーが一貫していることを確認。
+    """
+
+    @pytest.fixture(scope="class")
+    def result(self):
+        return _run_uxsim(BOTTLENECK_SCENARIO)
+
+    def test_frame_keys_are_strings(self, result):
+        """フレームキーが文字列"""
+        for key in result["frames"].keys():
+            assert isinstance(key, str)
+
+    def test_frame_keys_parseable_as_float(self, result):
+        """フレームキーが float に変換可能"""
+        for key in result["frames"].keys():
+            float(key)  # 例外が出なければOK
+
+    def test_js_string_conversion_mismatch_documented(self, result):
+        """
+        Python の "25.0" と JS の "25" の不一致を文書化。
+        フロントエンドの loadResult() で正規化している:
+            framesData[String(parseFloat(k))] = v
+        サーバー側は "25.0" 形式を返す。
+        """
+        has_decimal_key = any("." in k for k in result["frames"].keys())
+        assert has_decimal_key, (
+            "フレームキーが小数点を含んでいない。"
+            "フロントエンドの正規化ロジックとの整合性を確認すること。"
+        )
+
+
+# ============================================================
+# 6. LLM ツール定義の整合性テスト
+# ============================================================
+
+class TestToolDefinitions:
+    """LLM ツール定義がサーバー実装と整合していることを検証"""
+
+    def test_claude_tools_defined(self):
+        from server import CLAUDE_TOOLS
+        tool_names = [t["name"] for t in CLAUDE_TOOLS]
+        assert "run_simulation" in tool_names
+        assert "get_simulation_data" in tool_names
+
+    def test_run_simulation_schema(self):
+        from server import CLAUDE_TOOLS
+        tool = next(t for t in CLAUDE_TOOLS if t["name"] == "run_simulation")
+        schema = tool["input_schema"]
+        assert "nodes" in schema["properties"]
+        assert "links" in schema["properties"]
+        assert "demands" in schema["properties"]
+
+    def test_get_simulation_data_schema(self):
+        from server import CLAUDE_TOOLS
+        tool = next(t for t in CLAUDE_TOOLS if t["name"] == "get_simulation_data")
+        schema = tool["input_schema"]
+        assert "sim_id" in schema["properties"]
+
+    def test_system_prompt_contains_risu(self):
+        """
+        [修正履歴] AI の一人称を RISU に変更した。
+        """
+        from server import SYSTEM_PROMPT
+        assert "RISU" in SYSTEM_PROMPT
+        assert "一人称" in SYSTEM_PROMPT or "RISU" in SYSTEM_PROMPT
+
+    def test_system_prompt_chart_instructions(self):
+        """
+        [修正履歴] チャート生成の指示がシステムプロンプトに含まれる。
+        """
+        from server import SYSTEM_PROMPT
+        assert "chart" in SYSTEM_PROMPT.lower() or "チャート" in SYSTEM_PROMPT or "グラフ" in SYSTEM_PROMPT
+
+
+# ============================================================
+# 7. API エンドポイントテスト（サーバー起動が必要）
+# ============================================================
+
+class TestAPIEndpoints:
+    """
+    サーバーが起動している場合のみ実行。
+    pytest tests/ -v -k "api" で選択実行可。
+    """
+
+    API = "http://localhost:8001"
+
+    @pytest.fixture(scope="class")
+    def client(self):
+        import httpx
+        try:
+            r = httpx.get(f"{self.API}/docs", timeout=3)
+            if r.status_code != 200:
+                pytest.skip("サーバー未起動")
+        except Exception:
+            pytest.skip("サーバー未起動")
+        return httpx.Client(base_url=self.API, timeout=60)
+
+    @pytest.fixture(scope="class")
+    def sim_id(self, client):
+        """テスト用シミュレーションを実行"""
+        resp = client.post("/simulate", json={
+            "nodes": [
+                {"name": "A", "x": 0, "y": 0},
+                {"name": "B", "x": 5000, "y": 0},
+            ],
+            "links": [
+                {"name": "r1", "start": "A", "end": "B", "length": 5000},
+            ],
+            "demands": [
+                {"orig": "A", "dest": "B", "t_start": 0, "t_end": 300, "flow": 0.5},
+            ],
+            "tmax": 800,
+        })
+        assert resp.status_code == 200
+        return resp.json()["id"]
+
+    def test_simulate_returns_id_and_stats(self, client):
+        resp = client.post("/simulate", json={
+            "nodes": [{"name": "X", "x": 0, "y": 0}, {"name": "Y", "x": 1000, "y": 0}],
+            "links": [{"name": "xy", "start": "X", "end": "Y", "length": 1000}],
+            "demands": [{"orig": "X", "dest": "Y", "t_start": 0, "t_end": 100, "flow": 0.3}],
+            "tmax": 500,
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "id" in data
+        assert "stats" in data
+
+    def test_results_endpoint(self, client, sim_id):
+        resp = client.get(f"/results/{sim_id}")
+        assert resp.status_code == 200
+        data = resp.json()
+        # 新スキーマ (risu_schema_version 1.0): result が入れ子
+        assert data.get("risu_schema_version") == "1.0"
+        assert "scenario" in data
+        assert "source" in data
+        assert "result" in data
+        r = data["result"]
+        assert "geojson" in r
+        assert "frames" in r
+        assert "frame_times" in r
+        assert "stats" in r
+        assert "tmax" in r
+
+    def test_results_scenario_endpoint(self, client, sim_id):
+        """軽量シナリオ DL エンドポイントは result を含まない"""
+        resp = client.get(f"/results/{sim_id}/scenario")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("risu_schema_version") == "1.0"
+        assert "scenario" in data
+        scn = data["scenario"]
+        assert "nodes" in scn and "links" in scn and "demands" in scn
+        assert "result" not in data  # 結果データは含まない
+
+    def test_roundtrip_scenario_dl(self, client, sim_id):
+        """シナリオ DL → /upload で再現できることを確認"""
+        # 1. シナリオ取得
+        resp = client.get(f"/results/{sim_id}/scenario")
+        scenario_dl = resp.json()
+        # 2. オリジナルの統計
+        orig = client.get(f"/results/{sim_id}").json()["result"]["stats"]
+        # 3. 復元アップロード
+        import json as _json
+        resp = client.post(
+            "/upload",
+            files={"files": ("scn.json", _json.dumps(scenario_dl), "application/json")},
+            data={"tmax": "500"},
+        )
+        assert resp.status_code == 200
+        new_stats = resp.json()["stats"]
+        # 4. 主要統計の一致
+        for k in ("total_trips", "completed_trips", "average_travel_time_s"):
+            assert orig.get(k) == new_stats.get(k), f"{k} differs: {orig.get(k)} vs {new_stats.get(k)}"
+
+    def test_results_404(self, client):
+        resp = client.get("/results/nonexistent_12345")
+        assert resp.status_code == 404
+
+    def test_upload_risu_csv(self, client):
+        """RISU CSV のアップロード"""
+        csv_content = (
+            "type,name,x,y,start,end,length,free_flow_speed,number_of_lanes,orig,dest,t_start,t_end,flow\n"
+            "node,A,0,0,,,,,,,,,,\n"
+            "node,B,3000,0,,,,,,,,,,\n"
+            "link,r1,,,A,B,3000,20,1,,,,,\n"
+            "demand,,,,,,,,,A,B,0,300,0.4\n"
+        )
+        resp = client.post("/upload", data={"tmax": "800"}, files={
+            "files": ("test.csv", csv_content, "text/csv"),
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "id" in data
+        assert "stats" in data
+
+    def test_docs_endpoint(self, client):
+        resp = client.get("/docs")
+        assert resp.status_code == 200
+
+    def test_static_index(self, client):
+        """index.html が配信される"""
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert "RISU" in resp.text
+
+    def test_static_sample_csv(self, client):
+        """サンプル CSV がダウンロードできる"""
+        resp = client.get("/sample_risu.csv")
+        assert resp.status_code == 200
+        assert "type,name" in resp.text
+
+
+# ============================================================
+# 8. チャートブロック抽出テスト
+# ============================================================
+
+class TestChartExtraction:
+    """
+    LLM レスポンスからの ```chart ブロック抽出をテスト。
+    """
+
+    def test_single_chart_extraction(self):
+        import re
+        chart_pattern = re.compile(r'```chart\s*\n(.*?)\n```', re.DOTALL)
+        text = 'テキスト\n```chart\n{"type":"line","data":{"labels":[1,2],"datasets":[]}}\n```\n続き'
+        matches = chart_pattern.findall(text)
+        assert len(matches) == 1
+        parsed = json.loads(matches[0])
+        assert parsed["type"] == "line"
+
+    def test_multiple_chart_extraction(self):
+        import re
+        chart_pattern = re.compile(r'```chart\s*\n(.*?)\n```', re.DOTALL)
+        text = (
+            '説明\n```chart\n{"type":"line","data":{"labels":[],"datasets":[]}}\n```\n'
+            '別の説明\n```chart\n{"type":"bar","data":{"labels":[],"datasets":[]}}\n```\n'
+        )
+        matches = chart_pattern.findall(text)
+        assert len(matches) == 2
+        assert json.loads(matches[0])["type"] == "line"
+        assert json.loads(matches[1])["type"] == "bar"
+
+    def test_chart_block_removal(self):
+        import re
+        chart_pattern = re.compile(r'```chart\s*\n(.*?)\n```', re.DOTALL)
+        text = '前文\n```chart\n{"type":"line"}\n```\n後文'
+        clean = chart_pattern.sub('', text).strip()
+        assert "chart" not in clean
+        assert "前文" in clean
+        assert "後文" in clean
+
+    def test_invalid_json_ignored(self):
+        import re
+        chart_pattern = re.compile(r'```chart\s*\n(.*?)\n```', re.DOTALL)
+        text = '```chart\nnot valid json\n```'
+        matches = chart_pattern.findall(text)
+        charts = []
+        for m in matches:
+            try:
+                charts.append(json.loads(m))
+            except json.JSONDecodeError:
+                pass
+        assert len(charts) == 0
+
+
+# ============================================================
+# 9. エッジケーステスト
+# ============================================================
+
+class TestEdgeCases:
+    """境界値・異常系のテスト"""
+
+    def test_zero_demand(self):
+        """需要ゼロでもエラーにならない"""
+        scenario = SimulationInput(
+            name="zero_demand",
+            tmax=100,
+            deltan=5,
+            nodes=[{"name": "A", "x": 0, "y": 0}, {"name": "B", "x": 1000, "y": 0}],
+            links=[{"name": "r", "start": "A", "end": "B", "length": 1000}],
+            demands=[{"orig": "A", "dest": "B", "t_start": 0, "t_end": 10, "flow": 0.0}],
+        )
+        result = _run_uxsim(scenario)
+        assert result["stats"]["total_trips"] == 0
+
+    def test_single_link(self):
+        """最小構成（1リンク）でエラーにならない"""
+        scenario = SimulationInput(
+            name="minimal",
+            tmax=200,
+            deltan=5,
+            nodes=[{"name": "A", "x": 0, "y": 0}, {"name": "B", "x": 500, "y": 0}],
+            links=[{"name": "r", "start": "A", "end": "B", "length": 500}],
+            demands=[{"orig": "A", "dest": "B", "t_start": 0, "t_end": 50, "flow": 0.3}],
+        )
+        result = _run_uxsim(scenario)
+        assert "geojson" in result
+        assert "frames" in result
+
+    def test_frame_count_reasonable(self):
+        """
+        フレーム数がtmaxに対して妥当な範囲にある。
+        _run_uxsim はフレームを間引きしない（全ステップを返す）。
+        間引きは _get_simulation_data で行われる（最大40点サンプリング）。
+        """
+        scenario = SimulationInput(
+            name="long_sim",
+            tmax=5000,
+            deltan=5,
+            nodes=[{"name": "A", "x": 0, "y": 0}, {"name": "B", "x": 5000, "y": 0}],
+            links=[{"name": "r", "start": "A", "end": "B", "length": 5000}],
+            demands=[{"orig": "A", "dest": "B", "t_start": 0, "t_end": 2000, "flow": 0.5}],
+        )
+        result = _run_uxsim(scenario)
+        n_frames = len(result["frame_times"])
+        # フレーム数はtmax / recording_interval 程度（100〜500の範囲）
+        assert 50 <= n_frames <= 600, f"Unexpected frame count: {n_frames}"
