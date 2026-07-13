@@ -180,7 +180,6 @@ class NodeInput(BaseModel):
     x: float
     y: float
     flow_capacity: float | None = None
-    node_type: str | None = None  # "ordinary" | "centroid" など。None=ordinary 扱い
     signal: list[float] | None = None  # 信号現示の青時間リスト（秒）。例: [60,60] → 2現示各60秒
 
 class LinkInput(BaseModel):
@@ -191,7 +190,6 @@ class LinkInput(BaseModel):
     free_flow_speed: float = 20.0
     jam_density: float = 0.2
     number_of_lanes: int = 1
-    oneway: bool = False  # True = 一方通行、False = 双方向道路（自動ミラーリングの対象）
     signal_group: int | None = None  # この進入リンクが青になる信号現示番号（0始まり）
 
 class DemandInput(BaseModel):
@@ -208,7 +206,6 @@ class SimulationInput(BaseModel):
     nodes: list[NodeInput]
     links: list[LinkInput]
     demands: list[DemandInput]
-    expand_intersections: bool = False
 
 class ChatMessage(BaseModel):
     role: str
@@ -216,118 +213,6 @@ class ChatMessage(BaseModel):
 
 class ChatInput(BaseModel):
     messages: list[ChatMessage]
-
-# ──────────────────────────────────────────────
-# 交差点展開（intersection-expander パッケージへ委譲）
-# ──────────────────────────────────────────────
-# RISU_Work/intersection-expander の純粋実装に展開ロジックを委譲する。
-# 設計と手計算は intersection-expander/DESIGN.md および
-# intersection-expander/examples/01_4way_worked.md を参照。
-from intersection_expander import (
-    Demand as _IxDemand,
-    ExpandConfig as _IxExpandConfig,
-    Link as _IxLink,
-    Network as _IxNetwork,
-    Node as _IxNode,
-    expand as _ix_expand,
-)
-
-
-def _scenario_to_ix_network(scenario: SimulationInput) -> _IxNetwork:
-    """SimulationInput → intersection_expander.Network"""
-    nodes = []
-    for n in scenario.nodes:
-        nt = (n.node_type or "ordinary").strip() or "ordinary"
-        nodes.append(_IxNode(id=n.name, x=n.x, y=n.y, node_type=nt))  # type: ignore[arg-type]
-    links = []
-    for lk in scenario.links:
-        links.append(_IxLink(
-            id=lk.name,
-            from_node=lk.start,
-            to_node=lk.end,
-            length=lk.length,
-            free_flow_speed=lk.free_flow_speed,
-            jam_density=lk.jam_density,
-            number_of_lanes=lk.number_of_lanes,
-            oneway=lk.oneway,
-        ))
-    demands = [
-        _IxDemand(orig=d.orig, dest=d.dest, t_start=d.t_start, t_end=d.t_end, flow=d.flow)
-        for d in scenario.demands
-    ]
-    return _IxNetwork(nodes=nodes, links=links, demands=demands)
-
-
-def _ix_network_to_scenario(net: _IxNetwork, base: SimulationInput) -> SimulationInput:
-    """intersection_expander.Network → SimulationInput
-
-    base: 元の SimulationInput（name, tmax, deltan, NodeInput.flow_capacity の保持に使う）
-    """
-    flow_cap_by_name = {n.name: n.flow_capacity for n in base.nodes if n.flow_capacity is not None}
-    signal_by_name = {n.name: n.signal for n in base.nodes if n.signal is not None}
-    sig_group_by_name = {lk.name: lk.signal_group for lk in base.links if lk.signal_group is not None}
-
-    def _resolve_signal(n) -> list | None:
-        """展開されたノードに元交差点の signal を継承する。
-        - n.id が元ノード名と一致: その signal
-        - n は entry サブノード: parent_intersection_id の signal を継承
-        （UXsim の信号制御は各 entry サブノードに設定することで、
-          外部流入リンクの signal_group が正しく機能する）
-        """
-        sig = signal_by_name.get(n.id)
-        if sig is not None:
-            return sig
-        # entry サブノードの場合、親交差点の信号を引き継ぐ
-        if n.node_type == "entry" and n.parent_intersection_id:
-            return signal_by_name.get(n.parent_intersection_id)
-        return None
-
-    new_nodes = [
-        NodeInput(
-            name=n.id,
-            x=n.x,
-            y=n.y,
-            flow_capacity=flow_cap_by_name.get(n.id),
-            node_type=n.node_type,
-            signal=_resolve_signal(n),
-        )
-        for n in net.nodes
-    ]
-    new_links = [
-        LinkInput(
-            name=lk.id,
-            start=lk.from_node,
-            end=lk.to_node,
-            length=lk.length,
-            free_flow_speed=lk.free_flow_speed,
-            jam_density=lk.jam_density,
-            number_of_lanes=lk.number_of_lanes,
-            oneway=lk.oneway,
-            signal_group=sig_group_by_name.get(lk.id),
-        )
-        for lk in net.links
-    ]
-    new_demands = [
-        DemandInput(orig=d.orig, dest=d.dest, t_start=d.t_start, t_end=d.t_end, flow=d.flow)
-        for d in net.demands
-    ]
-    return SimulationInput(
-        name=base.name,
-        tmax=base.tmax,
-        deltan=base.deltan,
-        nodes=new_nodes,
-        links=new_links,
-        demands=new_demands,
-        expand_intersections=False,
-    )
-
-
-def _expand_intersections(scenario: SimulationInput) -> SimulationInput:
-    """SimulationInput を展開する。intersection-expander パッケージへの薄いラッパー。"""
-    ix_net = _scenario_to_ix_network(scenario)
-    expanded = _ix_expand(ix_net, _IxExpandConfig(traffic_side="left"))
-    return _ix_network_to_scenario(expanded, base=scenario)
-
 
 # ──────────────────────────────────────────────
 # UXsim 実行（同期 → Executor で非同期化）
@@ -339,8 +224,7 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
     except NameError:
         # _validate_scenario_size 定義前に呼ばれた場合（起動順序保険）は素通し
         pass
-    # 信号メタデータを expand_intersections の前に元シナリオから抽出
-    # （展開後はノード名が変わって signal 情報が失われるため）
+    # 信号メタデータをシナリオから抽出（結果の signals メタデータ用）
     _orig_signal_nodes = [
         {"name": n.name, "x": float(n.x), "y": float(n.y),
          "signal": [float(p) for p in n.signal]}
@@ -350,8 +234,6 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
         lk.name: int(lk.signal_group)
         for lk in scenario.links if lk.signal_group is not None
     }
-    if scenario.expand_intersections:
-        scenario = _expand_intersections(scenario)
 
     from uxsim import World
 
@@ -586,36 +468,24 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
     }
 
     # 信号現示メタデータ（可視化用）
-    # expand_intersections 前に抽出した元シナリオの信号情報を使う
-    # （展開後のノード名は変わっており、signal は一部の内部ノードに移動済）
     # phase_log は UXsim の実シミュレーション結果（signal_log）を採用し、
     # クライアント表示と内部挙動のタイミングずれをなくす。
     signals = []
     try:
-        # 展開後のリンク名集合（元の link 名が残っているかチェック）
-        expanded_link_names = {lk.name for lk in scenario.links}
-        # 元交差点 ID → entry サブノードの signal_log を 1 つ採用
-        # (entry サブノードは全て同一サイクルなのでどれでも良い)
+        link_names_set = {lk.name for lk in scenario.links}
+        # 信号ノード ID → signal_log
         log_by_orig_id = {}
         for w_node in W.NODES:
             sl = getattr(w_node, "signal_log", None)
             if sl is None or len(sl) == 0:
                 continue
-            # 元 ID 自身（展開なしの場合）
             if w_node.name in {n["name"] for n in _orig_signal_nodes}:
                 log_by_orig_id[w_node.name] = list(sl)
-                continue
-            # entry サブノード（展開後）: parent_intersection_id 相当
-            # ノード ID パターン: "{orig_id}__entry_{nb_id}"
-            if "__entry_" in w_node.name:
-                orig_id = w_node.name.split("__entry_")[0]
-                if orig_id not in log_by_orig_id:
-                    log_by_orig_id[orig_id] = list(sl)
 
         for orig_node in _orig_signal_nodes:
             groups = {
                 lk_name: g for lk_name, g in _orig_signal_groups.items()
-                if lk_name in expanded_link_names
+                if lk_name in link_names_set
             }
             phase_log = log_by_orig_id.get(orig_node["name"], [])
             signals.append({
@@ -703,7 +573,6 @@ async def list_tools() -> list[Tool]:
                                 "free_flow_speed":  {"type": "number"},
                                 "jam_density":      {"type": "number"},
                                 "number_of_lanes":  {"type": "integer"},
-                                "oneway":           {"type": "boolean", "description": "true=一方通行"},
                                 "signal_group":     {"type": "integer", "description": "信号現示番号（0始まり）"},
                             },
                             "required": ["name", "start", "end", "length"],
@@ -722,10 +591,6 @@ async def list_tools() -> list[Tool]:
                             },
                             "required": ["orig", "dest", "t_start", "t_end", "flow"],
                         },
-                    },
-                    "expand_intersections": {
-                        "type": "boolean",
-                        "description": "true にすると degree>=3 のノードを左折/直進/右折別の局所サブグラフへ自動展開する",
                     },
                 },
                 "required": ["nodes", "links", "demands"],
@@ -914,50 +779,7 @@ SYSTEM_PROMPT = """私はRISUです。交通流シミュレーター UXsim を�
 - すべての link は有向リンク（start → end の一方向）として扱われる
 - 双方向道路は必ず "2 本の並行有向リンク" として表現すること
 - 推奨: A→B と B→A を両方明示的に作成する
-- 省力法: 片方だけ書いて oneway: false（デフォルト）にしておけば、expand_intersections=true 時に
-  サーバー側で逆向きリンクが自動生成される
-- 一方通行を表現したい場合のみ oneway: true をセットして片方だけ作る
-
-【交差点展開（仮想街路ネットワーク作成時）】
-仮想的な街路ネットワーク（grid, 十字, T字, Y字, 多枝交差点など）を自分で構築する場合は、
-交差点を単一ノードのまま記述し、run_simulation の `expand_intersections` を必ず true にすること。
-サーバー側で各交差点を自動的に「進入端点・退出端点・movement(左折/直進/右折)内部リンク」
-からなる局所サブグラフへ展開する。
-
-LLM 側がやるべきこと:
-- 交差点 1 つ = ノード 1 つ で記述する（端点や内部リンクは生成しない）
-- 道路は交差点ノード間を結ぶ普通のリンクとして双方向に記述する
-- demand の orig / dest は交差点ノード名をそのまま使ってよい（自動で spawn/sink に張り替わる）
-- expand_intersections: true を指定する
-
-LLM 側がやらなくていいこと:
-- 端点座標の計算
-- 左右オフセットや角度判定
-- u_turn 除外
-- 内部リンクの生成
-
-OSM や CSV から取り込んだ実ネットワーク、もしくは単純な直線道路（degree<3）の場合は
-expand_intersections は false（または省略）でよい。
-
-■ movement 種別
-- 4枝交差点では進入方向に対し: 対向側 = through / 左側 = left_turn / 右側 = right_turn / 同方向折返し = u_turn
-- 原則として u_turn は生成しない（ユーザーが明示的に求めた場合のみ生成）
-- 禁止 movement（中央分離帯, 右折禁止 等）に対応する内部リンクは生成しない（"欠落"で表現）
-- リンク名やコメントで movement_type が分かるようにしておく
-
-■ 外部リンクとの接続関係（必須）
-  外部道路 ─→ 進入端点 ─→ 内部リンク ─→ 退出端点 ─→ 外部道路
-- 外部道路リンクは 1本 を 2分割し、交差点手前で進入端点に終端、交差点直後で退出端点から始端する
-- 進入リンク数と進入端点数、退出リンク数と退出端点数は一致すること
-
-■ 適用対象外（展開しない）
-- 立体交差・単なる形状点・movement 区別の不要な単純2リンク連結点
-- ラウンドアバウト（環状リンク+流入流出として別途表現）
-
-■ 最小実装要件（必ず満たす）
-- 進入端点・退出端点の生成
-- movement 単位の内部リンク生成
-- 禁止 movement (デフォルトで u_turn) は未生成
+- 一方通行を表現したい場合のみ片方向のリンクだけを作る
 
 【信号制御】
 UXsim は交差点ノードに信号制御を設定できる。2 つのパラメータで記述する:
@@ -988,13 +810,6 @@ UXsim は交差点ノードに信号制御を設定できる。2 つのパラメ
     {"name": "NI", "start": "N", "end": "I", "signal_group": 1}  ← phase 1 で青
     {"name": "IE", "start": "I", "end": "E"}  ← 退出: signal_group なし
     {"name": "IW", "start": "I", "end": "W"}  ← 退出: signal_group なし
-
-■ 交差点展開 (expand_intersections=true) との併用
-  - 展開前のノードに signal を、展開前の進入リンクに signal_group を設定する
-  - 展開後、進入リンクは内部チェーンに分割されるが、signal_group は
-    展開された entry ノードが属する交差点ノードに引き継がれる
-  - ユーザーが signal_group を指定しない場合でも、expand_intersections 時に
-    方向別のデフォルト signal_group を自動付与することも可能（将来拡張）
 
 ■ ユーザーが「信号をつけて」「信号制御して」と言った場合
   - まず交差点ノードに signal パラメータを追加する
@@ -1367,7 +1182,6 @@ CLAUDE_TOOLS = [
                             "free_flow_speed":  {"type": "number", "description": "自由流速度（m/s）。デフォルト20"},
                             "jam_density":      {"type": "number", "description": "渋滞密度（台/m）。デフォルト0.2"},
                             "number_of_lanes":  {"type": "integer", "description": "車線数。デフォルト1"},
-                            "oneway":           {"type": "boolean", "description": "true=一方通行。false(デフォルト)の場合、expand_intersections時に逆向きリンクが自動生成される。"},
                             "signal_group":     {"type": "integer", "description": "この進入リンクが青になる信号現示番号（0始まり）。退出リンクには不要。省略=常時通行可能"},
                         },
                         "required": ["name", "start", "end", "length"],
@@ -1387,17 +1201,6 @@ CLAUDE_TOOLS = [
                         },
                         "required": ["orig", "dest", "t_start", "t_end", "flow"],
                     },
-                },
-                "expand_intersections": {
-                    "type": "boolean",
-                    "description": (
-                        "true にすると、サーバー側で degree>=3 の各ノードを "
-                        "進入端点・退出端点・movement(左折/直進/右折)内部リンク "
-                        "からなる局所サブグラフへ自動展開する。"
-                        "仮想街路ネットワーク（grid, 十字, T字, 多枝交差点）を "
-                        "自分で組み立てる場合は必ず true にすること。"
-                        "OSM や CSV から取り込んだ実ネットワークでは false でよい。"
-                    ),
                 },
             },
             "required": ["nodes", "links", "demands"],
