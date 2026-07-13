@@ -163,7 +163,6 @@ def _build_envelope(sim_id: str, *, include_result: bool = True) -> dict:
             "frames":       raw.get("frames"),
             "frame_times":  raw.get("frame_times"),
             "tmax":         raw.get("tmax"),
-            "buildings":    raw.get("buildings"),
             # コンパクト列指向フレーム用メタ
             "link_names":   raw.get("link_names"),
             "frame_format": raw.get("frame_format"),
@@ -819,12 +818,12 @@ UXsim は交差点ノードに信号制御を設定できる。2 つのパラメ
 【OSM（OpenStreetMap）連携】
 - ユーザーが実在の地名・場所・駅名・ランドマーク等を言及した場合、import_osm_network ツールを使う
   例: 「東京駅周辺」「渋谷の道路」「大阪城公園あたり」「新宿駅」
-- import_osm_network は地名を自動でジオコーディングし、道路ネットワークと建物データをダウンロードする
+- import_osm_network は地名を自動でジオコーディングし、道路ネットワークをダウンロードする
 - distance_m パラメータで範囲を制御する（デフォルト500m）。ユーザーの要望に応じて調整する
   - 「広い範囲」→ 1000〜2000m、「狭い範囲」「駅前だけ」→ 200〜300m
 - 取得後は自動的にダミー需要でシミュレーションが実行される
 - ユーザーが範囲や需要を調整したい場合は対話的にヒアリングしてよい
-- 結果は建物付きの地図として表示される
+- 結果は地図として表示される
 
 【グラフ機能】
 - ユーザーがグラフ・チャート・分析・可視化を求めた場合、get_simulation_data ツールを呼んでデータを取得する
@@ -1227,10 +1226,10 @@ CLAUDE_TOOLS = [
         "name": "import_osm_network",
         "description": (
             "OpenStreetMap から実在の道路ネットワークをダウンロードしてシミュレーションを実行する。"
-            "地名・ランドマーク名を指定すると、自動でジオコーディングし、周辺の道路と建物を取得する。"
+            "地名・ランドマーク名を指定すると、自動でジオコーディングし、周辺の道路を取得する。"
             "例: '東京駅', 'Shibuya Station', '大阪城公園', 'Times Square, New York' など。"
             "取得後、自動的にダミー需要を設定してシミュレーションを実行する。"
-            "結果はブラウザ上に建物付きの地図として表示される。"
+            "結果はブラウザ上に地図として表示される。"
         ),
         "input_schema": {
             "type": "object",
@@ -1458,7 +1457,6 @@ async def _chat_claude_stream(body: ChatInput):
                             executor, _run_osm_import, place, dist
                         )
                         scenario = dict(osm_result)
-                        buildings = scenario.pop("buildings", [])
                         link_geometries = scenario.pop("link_geometries", {})
                         scenario.pop("center", None)
                         scenario.pop("distance_m", None)
@@ -1473,7 +1471,6 @@ async def _chat_claude_stream(body: ChatInput):
                         yield _sse_event({"type": "progress", "message": "Step 2/3: UXsim でシミュレーション実行中..."})
                         sim_input = SimulationInput(**scenario)
                         result = await _run_uxsim_async(sim_input)
-                        result["buildings"] = buildings
                         _apply_link_geometries(result, link_geometries)
                         sim_id = str(uuid.uuid4())[:8]
                         _store_sim(sim_id, result, {
@@ -1494,7 +1491,6 @@ async def _chat_claude_stream(body: ChatInput):
                                 "summary": summary,
                                 "node_count": len(scenario["nodes"]),
                                 "link_count": len(scenario["links"]),
-                                "building_count": len(buildings),
                             }, ensure_ascii=False),
                         })
                     except Exception as e:
@@ -1640,7 +1636,6 @@ async def _chat_claude_stream(body: ChatInput):
                             loop = asyncio.get_event_loop()
                             osm_r = await loop.run_in_executor(executor, _run_osm_import, _place, _dist)
                             _scenario = dict(osm_r)
-                            _buildings = _scenario.pop("buildings", [])
                             _link_geoms = _scenario.pop("link_geometries", {})
                             _scenario.pop("center", None)
                             _scenario.pop("distance_m", None)
@@ -1652,7 +1647,6 @@ async def _chat_claude_stream(body: ChatInput):
                                 )
                             si = SimulationInput(**_scenario)
                             r = await _run_uxsim_async(si)
-                            r["buildings"] = _buildings
                             _apply_link_geometries(r, _link_geoms)
                             new_id = str(uuid.uuid4())[:8]
                             _store_sim(new_id, r, {
@@ -1673,7 +1667,6 @@ async def _chat_claude_stream(body: ChatInput):
                                     "summary": _summary,
                                     "node_count": len(_scenario["nodes"]),
                                     "link_count": len(_scenario["links"]),
-                                    "building_count": len(_buildings),
                                 }, ensure_ascii=False),
                             })
                         except Exception as e:
@@ -1853,7 +1846,6 @@ async def _chat_claude(body: ChatInput):
                     )
                     # シナリオ構築（ダミー需要追加）
                     scenario = dict(osm_result)
-                    buildings = scenario.pop("buildings", [])
                     link_geometries = scenario.pop("link_geometries", {})
                     scenario.pop("center", None)
                     scenario.pop("distance_m", None)
@@ -1867,8 +1859,7 @@ async def _chat_claude(body: ChatInput):
 
                     sim_input = SimulationInput(**scenario)
                     result = await _run_uxsim_async(sim_input)
-                    # 建物・道路形状データを結果に追加
-                    result["buildings"] = buildings
+                    # 道路形状データを結果に追加
                     _apply_link_geometries(result, link_geometries)
                     sim_id = str(uuid.uuid4())[:8]
                     _store_sim(sim_id, result, {
@@ -1889,7 +1880,6 @@ async def _chat_claude(body: ChatInput):
                             "summary": summary,
                             "node_count": len(scenario["nodes"]),
                             "link_count": len(scenario["links"]),
-                            "building_count": len(buildings),
                         }, ensure_ascii=False),
                     })
                 except Exception as e:
@@ -1980,7 +1970,6 @@ async def _chat_claude(body: ChatInput):
                             executor, _run_osm_import, _place, _dist
                         )
                         _scenario = dict(osm_r)
-                        _buildings = _scenario.pop("buildings", [])
                         _link_geoms = _scenario.pop("link_geometries", {})
                         _scenario.pop("center", None)
                         _scenario.pop("distance_m", None)
@@ -1992,7 +1981,6 @@ async def _chat_claude(body: ChatInput):
                             )
                         si = SimulationInput(**_scenario)
                         r = await _run_uxsim_async(si)
-                        r["buildings"] = _buildings
                         _apply_link_geometries(r, _link_geoms)
                         new_id = str(uuid.uuid4())[:8]
                         _store_sim(new_id, r, {
@@ -2013,7 +2001,6 @@ async def _chat_claude(body: ChatInput):
                                 "summary": _summary,
                                 "node_count": len(_scenario["nodes"]),
                                 "link_count": len(_scenario["links"]),
-                                "building_count": len(_buildings),
                             }, ensure_ascii=False),
                         })
                     except Exception as e:
@@ -2444,11 +2431,10 @@ def _gmns_to_scenario(
 
 
 def _run_osm_import(place: str, distance_m: int = 1000) -> dict:
-    """OSM からネットワーク＋建物を取得して UXsim シナリオに変換。
+    """OSM から道路ネットワークを取得して UXsim シナリオに変換。
     OSMnx のグラフを直接活用し、道路形状・速度推定・車線数を取得する。
     """
     import osmnx as ox
-    from pyproj import Transformer
 
     # ── ジオコーディング: 自然言語 → (lat, lon) ──
     center = ox.geocode(place)  # (lat, lon)
@@ -2461,13 +2447,6 @@ def _run_osm_import(place: str, distance_m: int = 1000) -> dict:
 
     # メートル座標に投影
     Gp = ox.project_graph(G)
-    crs = Gp.graph.get("crs", None)
-
-    # ── 投影座標系の Transformer（建物座標変換用）──
-    # Gp.graph["crs"] は pyproj CRS (例: "EPSG:32654")
-    transformer = None
-    if crs:
-        transformer = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
 
     # ── ノード抽出 ──
     scenario_nodes = []
@@ -2528,34 +2507,6 @@ def _run_osm_import(place: str, distance_m: int = 1000) -> dict:
             ]
         link_geometries[link_name] = coords
 
-    # ── 建物フットプリント取得 ──
-    buildings = []
-    try:
-        bldg_gdf = ox.features_from_point(center, tags={"building": True}, dist=distance_m)
-        for _, row in bldg_gdf.iterrows():
-            geom = row.geometry
-            polys = []
-            if geom.geom_type == "Polygon":
-                polys = [geom]
-            elif geom.geom_type == "MultiPolygon":
-                polys = list(geom.geoms)
-            for poly in polys:
-                if transformer:
-                    coords = []
-                    for lon, lat in poly.exterior.coords:
-                        mx, my = transformer.transform(lon, lat)
-                        coords.append([round(mx, 2), round(my, 2)])
-                    buildings.append(coords)
-                else:
-                    # フォールバック: 簡易変換
-                    coords = [
-                        [round(lon * 111000, 2), round(lat * 111000, 2)]
-                        for lon, lat in poly.exterior.coords
-                    ]
-                    buildings.append(coords)
-    except Exception:
-        pass  # 建物データなしでも続行
-
     return {
         "name": f"osm_{place[:30]}",
         "tmax": 3600,
@@ -2563,13 +2514,12 @@ def _run_osm_import(place: str, distance_m: int = 1000) -> dict:
         "nodes": scenario_nodes,
         "links": scenario_links,
         "demands": [],
-        "buildings": buildings,
         "link_geometries": link_geometries,
         "center": {"lat": center_lat, "lon": center_lon},
         "distance_m": distance_m,
         "summary": (
             f"OSM から「{place}」周辺（半径{distance_m}m）の道路ネットワークを取得しました。"
-            f"{len(scenario_nodes)} ノード、{len(scenario_links)} リンク、{len(buildings)} 棟の建物。"
+            f"{len(scenario_nodes)} ノード、{len(scenario_links)} リンク。"
         ),
     }
 
@@ -2898,7 +2848,6 @@ async def import_osm(place: str = Form(...), tmax: int = Form(3600),
 
     # 需要なしでも可視化用にダミー需要を追加してシミュレーション実行
     scenario = dict(result)
-    buildings = scenario.pop("buildings", [])
     link_geometries = scenario.pop("link_geometries", {})
     scenario.pop("center", None)
     scenario.pop("distance_m", None)
@@ -2912,7 +2861,6 @@ async def import_osm(place: str = Form(...), tmax: int = Form(3600),
 
     sim_input = SimulationInput(**scenario)
     sim_result = await _run_uxsim_async(sim_input)
-    sim_result["buildings"] = buildings
     _apply_link_geometries(sim_result, link_geometries)
     sim_id = str(uuid.uuid4())[:8]
     _store_sim(sim_id, sim_result, {

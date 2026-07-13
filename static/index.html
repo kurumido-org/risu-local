@@ -1335,7 +1335,6 @@ let framesData = null;
 let frameTimes = [];     // sorted float array
 let linkNames  = [];     // li インデックス → リンク名
 let linkFfsByIdx = null; // Float32Array: li → ffs
-let buildingsData = null; // [[x,y], ...] polygons
 let signalsData = [];    // [{node,x,y,phases[],groups:{link_name:phase_idx}}]
 let scenarioData = null; // {nodes:[{name,x,y,signal,...}], links:[...], demands:[...]}
 let nodeByCoord = {};    // "x,y" → node name (高速ルックアップ)
@@ -1830,7 +1829,6 @@ async function loadResult(simId) {
     // 新スキーマ (risu_schema_version 1.0): { scenario, source, result: {...} }
     let r = data.result || data;  // 旧形式互換
     geoData    = r.geojson;
-    buildingsData = r.buildings || null;
     signalsData = r.signals || [];
     scenarioData = data.scenario || null;
     // 座標→ノード名のルックアップを構築
@@ -1841,7 +1839,7 @@ async function loadResult(simId) {
       }
     }
     resetCamera();
-    console.log(`[RISU] features: ${r.geojson?.features?.length}, buildings: ${(r.buildings||[]).length}, signals: ${signalsData.length}`);
+    console.log(`[RISU] features: ${r.geojson?.features?.length}, signals: ${signalsData.length}`);
     frameTimes = r.frame_times || [];
 
     // link_names テーブルとリンクあたりの ffs ルックアップを構築
@@ -1929,7 +1927,6 @@ async function loadResult(simId) {
 function releasePrevResult() {
   geoData = null;
   framesData = null;
-  buildingsData = null;
   frameTimes = [];
   linkNames = [];
   linkFfsByIdx = null;
@@ -2096,30 +2093,6 @@ function drawFrame() {
   const px = x => offX + (x - minX) * scaleV;
   const py = y => (canvasH - baseOffY) * camZoom + camPanY - (y - minY) * scaleV;
 
-  // ── 地面背景（建物がある場合） ──
-  if (buildingsData && buildingsData.length) {
-    ctx.fillStyle = '#f0f0ec';
-    ctx.fillRect(0, 0, canvasW, canvasH);
-  }
-
-  // ── 建物描画 ──
-  if (buildingsData && buildingsData.length) {
-    ctx.fillStyle = '#d9d5c8';
-    ctx.strokeStyle = '#c5c0b3';
-    ctx.lineWidth = 0.5;
-    for (const poly of buildingsData) {
-      if (poly.length < 3) continue;
-      ctx.beginPath();
-      ctx.moveTo(px(poly[0][0]), py(poly[0][1]));
-      for (let i = 1; i < poly.length; i++) {
-        ctx.lineTo(px(poly[i][0]), py(poly[i][1]));
-      }
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-    }
-  }
-
   // ヒットターゲットをリセット（このフレームで再構築）
   hitTargets = { nodes: [], links: [] };
 
@@ -2134,7 +2107,6 @@ function drawFrame() {
   const ARC_OFFSET = 18;
   const linkDrawInfo = {};
   const isLinkMode = drawMode === 'link';
-  const hasMap = !!(buildingsData && buildingsData.length);
   const denseNetwork = features.length > 30; // OSM等の密なネットワーク
 
   // ── パスを描く汎用関数（多点 LineString 対応）──
@@ -2143,18 +2115,6 @@ function drawFrame() {
     ctx.moveTo(px(coords[0][0]), py(coords[0][1]));
     for (let i = 1; i < coords.length; i++) {
       ctx.lineTo(px(coords[i][0]), py(coords[i][1]));
-    }
-  }
-
-  // ── 道路縁取り（建物マップモード時、先に太い線を引く） ──
-  if (hasMap && !isLinkMode) {
-    ctx.strokeStyle = '#b8b4a8';
-    ctx.lineWidth = 6;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    for (const f of features) {
-      traceLinkPath(f.geometry.coordinates);
-      ctx.stroke();
     }
   }
 
@@ -2169,7 +2129,7 @@ function drawFrame() {
     const isMultiPoint = coords.length > 2;
 
     // LINKモード: 速度で色分け / それ以外: グレー（建物あり時は白い道路）
-    let color = hasMap ? '#ffffff' : '#d0d4dc';
+    let color = '#d0d4dc';
     if (isLinkMode) {
       const tl = f.properties.timeline;
       let speed = ffs;
@@ -2188,7 +2148,7 @@ function drawFrame() {
       // 多点パス描画（OSM道路形状、または密なネットワーク）
       traceLinkPath(coords);
       ctx.strokeStyle = color;
-      ctx.lineWidth = isLinkMode ? (hasMap ? 4 : 5) : (hasMap ? 3 : 4);
+      ctx.lineWidth = isLinkMode ? 5 : 4;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       ctx.stroke();
