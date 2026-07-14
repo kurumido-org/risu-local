@@ -41,6 +41,10 @@ python server.py       # http://localhost:8001
 LLM ツール: `run_simulation` / `get_simulation_data`。
 チャートは LLM が ````chart```` ブロックで Chart.js 設定を出力 → フロントで描画。
 
+フロントの GUI ネットワークエディタ（index.html「EDIT」ボタン）: `editNet` を
+編集して `/simulate` に POST する。編集モード中は `drawFrame` が `drawEditFrame`
+に委譲され、キャンバスの mousedown / hover も editMode で分岐する。
+
 ## テスト
 
 ```powershell
