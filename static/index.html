@@ -2051,6 +2051,29 @@ function vehicleScreenPos(veh, linkDrawInfo, px, py) {
 }
 
 // ── 描画フレーム ──
+// geoData ごとに不変な計算（座標バウンド・双方向判定）のキャッシュ。
+// 再生中は drawFrame が 60fps で呼ばれるため、毎フレームの全リンク走査を避ける。
+let _geoStaticCache = { ref: null, bbox: null, edgeSet: null };
+function _getGeoStatic(features) {
+  if (_geoStaticCache.ref !== geoData) {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const f of features) {
+      for (const [x, y] of f.geometry.coordinates) {
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+    }
+    const edgeSet = new Set();
+    for (const f of features) {
+      const c = f.geometry.coordinates;
+      const [x0,y0] = c[0], [x1,y1] = c[c.length - 1];
+      edgeSet.add(`${x0},${y0}->${x1},${y1}`);
+    }
+    _geoStaticCache = { ref: geoData, bbox: { minX, maxX, minY, maxY }, edgeSet };
+  }
+  return _geoStaticCache;
+}
+
 function drawFrame() {
   if (!geoData) return;
   if (canvasDirty) resizeCanvas();
@@ -2067,14 +2090,10 @@ function drawFrame() {
   const features = geoData.features;
   if (!features.length) return;
 
-  // 座標バウンド（道路座標のみでスケール決定 — 建物の外れ値でズームアウトしない）
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (const f of features) {
-    for (const [x, y] of f.geometry.coordinates) {
-      if (x < minX) minX = x; if (x > maxX) maxX = x;
-      if (y < minY) minY = y; if (y > maxY) maxY = y;
-    }
-  }
+  const _geoStatic = _getGeoStatic(features);
+
+  // 座標バウンド（道路座標のみでスケール決定）
+  let { minX, maxX, minY, maxY } = _geoStatic.bbox;
   // 少しマージンを追加（道路範囲の10%）
   const marginX = (maxX - minX) * 0.1 || 100;
   const marginY = (maxY - minY) * 0.1 || 100;
@@ -2096,13 +2115,8 @@ function drawFrame() {
   // ヒットターゲットをリセット（このフレームで再構築）
   hitTargets = { nodes: [], links: [] };
 
-  // 双方向リンク検出（始点・終点で判定）
-  const edgeSet = new Set();
-  for (const f of features) {
-    const c = f.geometry.coordinates;
-    const [x0,y0] = c[0], [x1,y1] = c[c.length - 1];
-    edgeSet.add(`${x0},${y0}->${x1},${y1}`);
-  }
+  // 双方向リンク検出（キャッシュ済み）
+  const edgeSet = _geoStatic.edgeSet;
 
   const ARC_OFFSET = 18;
   const linkDrawInfo = {};
@@ -3171,22 +3185,41 @@ function currentFrameIdx() {
   return findNearestFrameIdx(t);
 }
 
+// テーマ色のキャッシュ（getComputedStyle は 60fps 描画では高コスト）。
+// テーマ切替（data-theme 変更）で自動的に再取得する。
+let _themeColorCache = { key: null, accent: '#dc4a1c', soft: '#d4d4d0', ink: '#171717' };
+function _getThemeColors() {
+  const key = document.documentElement.dataset.theme || '';
+  if (_themeColorCache.key !== key) {
+    const cs = getComputedStyle(document.documentElement);
+    _themeColorCache = {
+      key,
+      accent: (cs.getPropertyValue('--accent') || '#dc4a1c').trim(),
+      soft:   (cs.getPropertyValue('--line-soft') || '#d4d4d0').trim(),
+      ink:    (cs.getPropertyValue('--ink') || '#171717').trim(),
+    };
+  }
+  return _themeColorCache;
+}
+
 function drawStatChart(canvas, series, maxY, idx) {
   if (!canvas || !series || !series.length) return;
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth || canvas.offsetWidth || 100;
   const h = canvas.clientHeight || canvas.offsetHeight || 32;
   if (w < 1 || h < 1) return;
-  canvas.width = w * dpr; canvas.height = h * dpr;
+  // バッファ再確保はサイズ変更時のみ（width 代入は毎回フルリセットになる）
+  const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+  if (canvas.width !== bw || canvas.height !== bh) {
+    canvas.width = bw; canvas.height = bh;
+  }
   const ctx = canvas.getContext('2d');
-  ctx.scale(dpr, dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
 
   const N = series.length;
   if (N < 2) return;
-  const accent = (getComputedStyle(document.documentElement).getPropertyValue('--accent') || '#dc4a1c').trim();
-  const soft = (getComputedStyle(document.documentElement).getPropertyValue('--line-soft') || '#d4d4d0').trim();
-  const ink = (getComputedStyle(document.documentElement).getPropertyValue('--ink') || '#171717').trim();
+  const { accent, soft, ink } = _getThemeColors();
   const pad = 2;
   const innerH = h - pad * 2;
   const x = (i) => i * (w / (N - 1));
