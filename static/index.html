@@ -1119,6 +1119,11 @@
   #edit-btn:hover { border-color: var(--accent); color: var(--accent); }
   #edit-btn.active { background: var(--accent); color: var(--paper); border-color: var(--accent); }
 
+  /* hidden 属性を CSS の display 指定より優先させる（display:flex が UA の
+     hidden→display:none を上書きしてツールバーが常時表示されるのを防ぐ） */
+  #edit-toolbar[hidden], #edit-props[hidden], #edit-demands[hidden], #edit-hint[hidden] {
+    display: none !important;
+  }
   #edit-toolbar {
     position: absolute; top: 10px; left: 10px; z-index: 30;
     display: flex; align-items: center; gap: 4px;

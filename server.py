@@ -811,6 +811,17 @@ from starlette.middleware.gzip import GZipMiddleware
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
 # ──────────────────────────────────────────────
+# HTML はキャッシュさせない（UI 更新時にブラウザが古い画面を出さないように。
+# ETag 再検証で 304 が返るので転送コストはほぼゼロ）
+# ──────────────────────────────────────────────
+@app.middleware("http")
+async def no_cache_html_mw(request, call_next):
+    response = await call_next(request)
+    if "text/html" in response.headers.get("content-type", ""):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+# ──────────────────────────────────────────────
 # アップロードサイズ上限（DoS 防止）
 # ──────────────────────────────────────────────
 MAX_UPLOAD_BYTES = int(os.getenv("RISU_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))  # 10MB
