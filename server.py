@@ -2650,6 +2650,11 @@ def _run_osm_import(place: str, distance_m: int = 1000, road_types: str = "drive
     """
     import osmnx as ox
 
+    # OSM キャッシュ先の上書き（Docker 等で永続ボリュームに向ける用）
+    _cache_dir = os.getenv("RISU_OSM_CACHE_DIR")
+    if _cache_dir:
+        ox.settings.cache_folder = _cache_dir
+
     road_types = (road_types or "drive").strip().lower()
     if road_types not in _OSM_ROAD_PRESETS:
         raise ValueError(
