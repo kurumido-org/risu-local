@@ -97,6 +97,22 @@ python server.py
 | `RISU_MAX_TOOL_ROUNDS` | `3` | LLM tool_use ループ最大回数 |
 | `RISU_MAX_UPLOAD_BYTES` | `10485760` | アップロード上限（バイト） |
 
+## 高速化（推奨）
+
+UXsim 1.14 系（beta）は C++ バックエンドを搭載しており、シミュレーション実行が
+純 Python 実装の 10〜20 倍高速になります。RISU はどちらでも動作しますが、
+大きなネットワークを扱う場合はインストールを推奨します：
+
+```powershell
+pip install --pre "uxsim>=1.14.0b7"
+```
+
+そのほかの高速化はデフォルトで有効です：
+
+- 結果 API（`/results/{id}`）は orjson + gzip 圧縮で配信（転送量 ~96% 削減）
+- シミュレーション後処理は numpy でベクトル化済み
+- OSM インポートは `./cache` にキャッシュされ、同じ地名の 2 回目以降は高速
+
 ## テスト
 
 ```powershell

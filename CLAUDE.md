@@ -52,3 +52,14 @@ pytest tests/ -v
 - 結果ストアは in-memory dict（`results_store`）。再起動で消える。
 - 双方向道路は A→B / B→A の 2 リンクで表現（描画は円弧）。
 - このリポジトリには認証・課金コードを追加しないこと（サーバー版と分離）。
+
+## パフォーマンス上の前提（変更時に壊さないこと）
+
+- uxsim は C++ バックエンド（1.14 beta, `World(cpp=True)`）優先、TypeError で純 Python にフォールバック。
+- `_run_uxsim` の後処理は numpy ベクトル化済み。cpp バックエンドでは `veh._log_cache` の
+  生 int 配列（state コード / リンク index）を直接読む fast path がある。
+  uxsim 更新時はこの内部構造（`_LOG_STATE_MAP`, `_log_cache`）の互換性を確認すること。
+- フレームは列指向 `columnar_v2`（{ids, xs, ys, vs, alphas, li}、li は `link_names` への index）。
+  `_get_simulation_data`・フロントの描画・テストすべてがこの形式に依存。
+- `/results` は ORJSONResponse を直接返して jsonable_encoder を回避 + GZip 圧縮。
+- `drawFrame`（60fps）はバウンディングボックス・双方向判定を geoData 単位でキャッシュ。
