@@ -577,7 +577,8 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
     # クライアント表示と内部挙動のタイミングずれをなくす。
     signals = []
     try:
-        link_names_set = {lk.name for lk in scenario.links}
+        # リンク名 → 終端ノード名（信号機は「その交差点に流入するリンク」だけに描く）
+        link_end_map = {lk.name: lk.end for lk in scenario.links}
         # 信号ノード ID → signal_log
         log_by_orig_id = {}
         for w_node in W.NODES:
@@ -588,9 +589,12 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
                 log_by_orig_id[w_node.name] = list(sl)
 
         for orig_node in _orig_signal_nodes:
+            # この交差点に流入する signal_group 付きリンクのみ。
+            # （全 signal_group リンクを渡すと、複数の信号交差点があるとき
+            #   同じ信号機が交差点の数だけ重複描画されてしまう）
             groups = {
                 lk_name: g for lk_name, g in _orig_signal_groups.items()
-                if lk_name in link_names_set
+                if link_end_map.get(lk_name) == orig_node["name"]
             }
             phase_log = log_by_orig_id.get(orig_node["name"], [])
             signals.append({

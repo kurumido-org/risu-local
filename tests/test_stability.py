@@ -249,6 +249,58 @@ class TestBidirectionalLinks:
 
 
 # ============================================================
+# 2b. 信号メタデータテスト
+# ============================================================
+
+class TestSignalMetadata:
+    """
+    [修正履歴] signals[].groups が交差点ごとにフィルタされておらず、
+    複数の信号交差点があると同じ信号機が交差点の数だけ重複描画された。
+    groups は「その交差点に流入する signal_group 付きリンク」のみを含むこと。
+    """
+
+    @pytest.fixture(scope="class")
+    def result(self):
+        # 信号交差点を 2 つ持つ直線ネットワーク: W → I1 → I2 → E
+        scenario = SimulationInput(
+            name="two_signals",
+            tmax=600,
+            deltan=5,
+            nodes=[
+                {"name": "W",  "x": 0,    "y": 0},
+                {"name": "I1", "x": 1000, "y": 0, "signal": [30, 30]},
+                {"name": "I2", "x": 2000, "y": 0, "signal": [40, 20]},
+                {"name": "E",  "x": 3000, "y": 0},
+            ],
+            links=[
+                {"name": "W_I1",  "start": "W",  "end": "I1", "length": 1000, "signal_group": 0},
+                {"name": "I1_I2", "start": "I1", "end": "I2", "length": 1000, "signal_group": 0},
+                {"name": "I2_E",  "start": "I2", "end": "E",  "length": 1000},
+            ],
+            demands=[{"orig": "W", "dest": "E", "t_start": 0, "t_end": 300, "flow": 0.4}],
+        )
+        return _run_uxsim(scenario)
+
+    def test_signals_present(self, result):
+        """信号ノードごとに 1 エントリ"""
+        names = sorted(s["node"] for s in result["signals"])
+        assert names == ["I1", "I2"]
+
+    def test_groups_scoped_to_intersection(self, result):
+        """groups はその交差点への流入リンクのみ（重複描画バグの回帰テスト）"""
+        by_node = {s["node"]: s for s in result["signals"]}
+        assert set(by_node["I1"]["groups"].keys()) == {"W_I1"}, \
+            "I1 の groups に他交差点のリンクが混入している"
+        assert set(by_node["I2"]["groups"].keys()) == {"I1_I2"}, \
+            "I2 の groups に他交差点のリンクが混入している"
+
+    def test_phases_match_scenario(self, result):
+        by_node = {s["node"]: s for s in result["signals"]}
+        assert by_node["I1"]["phases"] == [30, 30]
+        assert by_node["I2"]["phases"] == [40, 20]
+
+
+# ============================================================
 # 3. CSV パーサーテスト
 # ============================================================
 
