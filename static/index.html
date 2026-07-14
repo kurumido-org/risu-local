@@ -2083,7 +2083,13 @@ document.getElementById('et-run').addEventListener('click', async () => {
       body: JSON.stringify(scenario),
     });
     const d = await r.json();
-    if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+    if (!r.ok) {
+      const det = d.detail;
+      const msg = typeof det === 'string' ? det
+        : Array.isArray(det) ? det.map(x => (x.msg || JSON.stringify(x)).replace(/^Value error, /, '')).join('; ')
+        : `HTTP ${r.status}`;
+      throw new Error(msg);
+    }
     showToast(`シミュレーション完了 (${d.id})`);
     exitEditMode();
     await loadResult(d.id);

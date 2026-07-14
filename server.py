@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp.types import TextContent, Tool
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from starlette.requests import Request
 from starlette.routing import Route
 
@@ -212,6 +212,85 @@ class SimulationInput(BaseModel):
     nodes: list[NodeInput]
     links: list[LinkInput]
     demands: list[DemandInput]
+
+    @model_validator(mode="after")
+    def _normalize_and_validate(self):
+        """重複・参照切れを UXsim に渡す前に検出する。
+
+        - 完全一致の重複ノード/リンク（全属性が同じ）は黙って統合
+          （「リンクごとにノード行を繰り返す」形式の CSV 等でよくあるため）
+        - 同名で属性が異なる場合は、どの名前が問題かを列挙してエラー
+        - リンク・需要が存在しないノードを参照している場合もエラー
+          （UXsim の KeyError より分かりやすいメッセージにする）
+        """
+        # ── ノード重複 ──
+        seen_nodes: dict[str, NodeInput] = {}
+        uniq_nodes = []
+        conflicts = []
+        for n in self.nodes:
+            prev = seen_nodes.get(n.name)
+            if prev is None:
+                seen_nodes[n.name] = n
+                uniq_nodes.append(n)
+            elif prev.model_dump() != n.model_dump():
+                conflicts.append(n.name)
+        if conflicts:
+            raise ValueError(
+                f"ノード名が重複しています（属性が異なるため自動統合できません）: "
+                f"{sorted(set(conflicts))[:10]}。名前を一意にしてください。")
+        self.nodes = uniq_nodes
+
+        # ── リンク重複 ──
+        seen_links: dict[str, LinkInput] = {}
+        uniq_links = []
+        conflicts = []
+        for lk in self.links:
+            prev = seen_links.get(lk.name)
+            if prev is None:
+                seen_links[lk.name] = lk
+                uniq_links.append(lk)
+            elif prev.model_dump() != lk.model_dump():
+                conflicts.append(lk.name)
+        if conflicts:
+            raise ValueError(
+                f"リンク名が重複しています（属性が異なるため自動統合できません）: "
+                f"{sorted(set(conflicts))[:10]}。名前を一意にしてください。")
+        self.links = uniq_links
+
+        # ── 参照整合性 ──
+        node_names = set(seen_nodes)
+        missing = sorted({e for lk in self.links for e in (lk.start, lk.end)
+                          if e not in node_names})
+        if missing:
+            raise ValueError(
+                f"リンクが存在しないノードを参照しています: {missing[:10]}。"
+                f"ノード定義を追加するか、リンクの start/end を修正してください。")
+        missing_d = sorted({e for d in self.demands for e in (d.orig, d.dest)
+                            if e not in node_names})
+        if missing_d:
+            raise ValueError(
+                f"需要が存在しないノードを参照しています: {missing_d[:10]}。")
+        return self
+
+def _scenario_to_input(scenario: dict) -> SimulationInput:
+    """dict → SimulationInput。Pydantic 検証エラーを 422 の平易なメッセージに変換する。
+
+    （変換しないと global handler が 500「予期しないエラー」にしてしまい、
+    重複ノード名など修正可能な問題がユーザーに伝わらない）
+    """
+    from pydantic import ValidationError
+    try:
+        return SimulationInput(**scenario)
+    except ValidationError as e:
+        msgs = []
+        for err in e.errors():
+            m = str(err.get("msg", ""))
+            if m.startswith("Value error, "):
+                m = m[len("Value error, "):]
+            loc = ".".join(str(x) for x in err.get("loc", ()))
+            msgs.append(f"{m}" + (f"（{loc}）" if loc else ""))
+        raise HTTPException(422, detail="シナリオが不正です: " + " / ".join(msgs[:3]))
+
 
 class ChatMessage(BaseModel):
     role: str
@@ -3269,7 +3348,7 @@ async def import_gmns(dataset: str = Form(...), tmax: int = Form(3600)):
 
     scenario["name"] = dataset
 
-    sim_input = SimulationInput(**scenario)
+    sim_input = _scenario_to_input(scenario)
     loop = asyncio.get_event_loop()
     result = await _run_uxsim_async(sim_input)
     sim_id = str(uuid.uuid4())[:8]
@@ -3313,7 +3392,7 @@ async def upload_files(
             imported_from = payload.get("sim_id")
         else:
             scenario_dict = payload
-        sim_input = SimulationInput(**scenario_dict)
+        sim_input = _scenario_to_input(scenario_dict)
         loop = asyncio.get_event_loop()
         result = await _run_uxsim_async(sim_input)
         sim_id = str(uuid.uuid4())[:8]
@@ -3348,7 +3427,7 @@ async def upload_files(
                 "links": parsed["links"],
                 "demands": parsed["demands"],
             }
-            sim_input = SimulationInput(**scenario)
+            sim_input = _scenario_to_input(scenario)
             loop = asyncio.get_event_loop()
             result = await _run_uxsim_async(sim_input)
             sim_id = str(uuid.uuid4())[:8]
@@ -3403,7 +3482,7 @@ async def upload_files(
             "flow": 0.3,
         }]
 
-    sim_input = SimulationInput(**scenario)
+    sim_input = _scenario_to_input(scenario)
     loop = asyncio.get_event_loop()
     result = await _run_uxsim_async(sim_input)
     sim_id = str(uuid.uuid4())[:8]
@@ -3461,7 +3540,7 @@ async def import_osm(place: str = Form(...), tmax: int = Form(3600),
             scenario["nodes"], scenario["links"], tmax
         )
 
-    sim_input = SimulationInput(**scenario)
+    sim_input = _scenario_to_input(scenario)
     sim_result = await _run_uxsim_async(sim_input)
     _apply_link_geometries(sim_result, link_geometries)
     sim_id = str(uuid.uuid4())[:8]

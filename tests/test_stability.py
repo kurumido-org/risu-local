@@ -249,6 +249,79 @@ class TestBidirectionalLinks:
 
 
 # ============================================================
+# 2y. シナリオ検証（重複・参照切れ）
+# ============================================================
+
+class TestScenarioValidation:
+    """
+    [修正履歴] 重複ノード名が UXsim の生エラー
+    「Node name X already used by another node」のまま 400 で返り、
+    どこを直せばいいか分からなかった。SimulationInput で事前検証する。
+    """
+
+    def _nodes(self):
+        return [{"name": "A", "x": 0, "y": 0}, {"name": "B", "x": 1000, "y": 0}]
+
+    def test_exact_duplicate_nodes_merged(self):
+        """完全一致の重複ノードは黙って統合される（CSV でよくある形式）"""
+        si = SimulationInput(
+            name="t", tmax=600, deltan=5,
+            nodes=self._nodes() + [{"name": "A", "x": 0, "y": 0}],
+            links=[{"name": "r", "start": "A", "end": "B", "length": 1000}],
+            demands=[],
+        )
+        assert len(si.nodes) == 2
+
+    def test_conflicting_duplicate_nodes_rejected(self):
+        """同名で座標が異なるノードは名前を列挙してエラー"""
+        with pytest.raises(ValueError, match="東京高速道路-IN"):
+            SimulationInput(
+                name="t", tmax=600, deltan=5,
+                nodes=[{"name": "東京高速道路-IN", "x": 0, "y": 0},
+                       {"name": "東京高速道路-IN", "x": 500, "y": 0}],
+                links=[], demands=[],
+            )
+
+    def test_exact_duplicate_links_merged(self):
+        si = SimulationInput(
+            name="t", tmax=600, deltan=5,
+            nodes=self._nodes(),
+            links=[{"name": "r", "start": "A", "end": "B", "length": 1000},
+                   {"name": "r", "start": "A", "end": "B", "length": 1000}],
+            demands=[],
+        )
+        assert len(si.links) == 1
+
+    def test_conflicting_duplicate_links_rejected(self):
+        with pytest.raises(ValueError, match="リンク名が重複"):
+            SimulationInput(
+                name="t", tmax=600, deltan=5,
+                nodes=self._nodes(),
+                links=[{"name": "r", "start": "A", "end": "B", "length": 1000},
+                       {"name": "r", "start": "B", "end": "A", "length": 1000}],
+                demands=[],
+            )
+
+    def test_link_referencing_missing_node_rejected(self):
+        with pytest.raises(ValueError, match="存在しないノード"):
+            SimulationInput(
+                name="t", tmax=600, deltan=5,
+                nodes=self._nodes(),
+                links=[{"name": "r", "start": "A", "end": "X", "length": 1000}],
+                demands=[],
+            )
+
+    def test_demand_referencing_missing_node_rejected(self):
+        with pytest.raises(ValueError, match="需要が存在しないノード"):
+            SimulationInput(
+                name="t", tmax=600, deltan=5,
+                nodes=self._nodes(),
+                links=[{"name": "r", "start": "A", "end": "B", "length": 1000}],
+                demands=[{"orig": "A", "dest": "Z", "t_start": 0, "t_end": 100, "flow": 0.1}],
+            )
+
+
+# ============================================================
 # 2z. シナリオパッチエンジン（rerun_simulation）
 # ============================================================
 
