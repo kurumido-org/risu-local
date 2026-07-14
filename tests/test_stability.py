@@ -160,33 +160,39 @@ class TestUXsimOutput:
 
     def test_vehicle_data_fields(self, result):
         """
-        各車両データに必須フィールドが存在する。
-        [修正履歴] id, link, alpha を後から追加した。
+        フレームがコンパクト列指向フォーマット（columnar_v2）である。
+        各フレームは {ids, xs, ys, vs, alphas, li} の同じ長さの列を持つ。
+        [修正履歴] 旧形式は車両ごとの dict のリスト。ペイロード削減のため
+        列指向に移行した（li はリンク index、名前は link_names で解決）。
         """
+        assert result.get("frame_format") == "columnar_v2"
+        assert "link_names" in result
         found_vehicle = False
-        for key, vehicles in result["frames"].items():
-            for v in vehicles:
+        for key, cols in result["frames"].items():
+            for col in ("ids", "xs", "ys", "vs", "alphas", "li"):
+                assert col in cols, f"列 {col} が必要"
+            n = len(cols["ids"])
+            assert all(len(cols[c]) == n for c in ("xs", "ys", "vs", "alphas", "li")), \
+                "全列の長さが一致すること"
+            if n > 0:
                 found_vehicle = True
-                assert "id" in v, "車両IDが必要（軌跡追跡用）"
-                assert "x" in v
-                assert "y" in v
-                assert "v" in v, "速度が必要"
-                assert "ffs" in v, "自由流速度が必要（色分け用）"
-                assert "link" in v, "リンク名が必要（双方向円弧上の配置用）"
-                assert "alpha" in v, "リンク上の位置比率が必要（円弧上の配置用）"
-                # alpha は 0〜1 の範囲
-                assert 0 <= v["alpha"] <= 1, f"alpha が範囲外: {v['alpha']}"
-                break
-            if found_vehicle:
-                break
+                assert all(0 <= a <= 1 for a in cols["alphas"]), "alpha が範囲外"
+                n_links = len(result["link_names"])
+                assert all(0 <= li < n_links for li in cols["li"]), "li が範囲外"
         assert found_vehicle, "走行中の車両が1台も見つからない"
 
     def test_vehicle_speed_reasonable(self, result):
-        """車両速度が非負で、自由流速度の2倍以内"""
-        for key, vehicles in result["frames"].items():
-            for v in vehicles:
-                assert v["v"] >= 0, f"速度が負: {v['v']}"
-                assert v["v"] <= v["ffs"] * 2, f"速度が異常に高い: {v['v']} > {v['ffs']*2}"
+        """車両速度が非負で、リンク自由流速度の2倍以内"""
+        ffs_by_name = {
+            f["properties"]["name"]: f["properties"]["free_flow_speed"]
+            for f in result["geojson"]["features"]
+        }
+        link_names = result["link_names"]
+        for key, cols in result["frames"].items():
+            for spd, li in zip(cols["vs"], cols["li"]):
+                assert spd >= 0, f"速度が負: {spd}"
+                ffs = ffs_by_name[link_names[li]]
+                assert spd <= ffs * 2, f"速度が異常に高い: {spd} > {ffs*2}"
 
     def test_stats_fields(self, result):
         """統計情報の必須フィールド"""
@@ -231,10 +237,11 @@ class TestBidirectionalLinks:
 
     def test_both_directions_have_vehicles(self, result):
         """双方向需要がある場合、両方向にリンクに車両がいる"""
+        link_names = result["link_names"]
         link_names_with_vehicles = set()
-        for key, vehicles in result["frames"].items():
-            for v in vehicles:
-                link_names_with_vehicles.add(v["link"])
+        for key, cols in result["frames"].items():
+            for li in cols["li"]:
+                link_names_with_vehicles.add(link_names[li])
 
         # 順方向・逆方向の両方に車両がいるはず
         assert any(not n.endswith("r") for n in link_names_with_vehicles), "順方向リンクに車両がいない"

@@ -360,68 +360,136 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
     # 車両ユニーク ID
     veh_id_map = {id(veh): i for i, veh in enumerate(W.VEHICLES.values())}
 
-    # 1パス目: 全車両のログを舐めながら (t -> columns) と (t -> link -> speeds) を構築
-    # コンパクト列指向フォーマット: 各 tk に対し {ids:[], xs:[], ys:[], vs:[], alphas:[], li:[]}
-    # - ffs は出力しない（link index から client 側で解決）
-    # - link は名前文字列でなく整数 index
+    # ── ベクトル化集計 ──
+    # uxsim (cpp) の log_t/log_x/log_v は numpy 配列。Python ループでの要素アクセスは
+    # numpy スカラー生成が支配的なボトルネックになるため、車両ごとに
+    # 「run 状態かつ有効リンク」のマスクだけ Python で作り、残りは numpy 一括処理する。
+    import numpy as np
+
+    # リンク幾何を index 順の配列としてまとめる（li から np.take で参照）
+    _n_links = len(W.LINKS)
+    _sx = np.empty(_n_links); _sy = np.empty(_n_links)
+    _ex = np.empty(_n_links); _ey = np.empty(_n_links)
+    _ll = np.empty(_n_links)
+    for lk_name, i in link_idx_map.items():
+        sx0, sy0, ex0, ey0, llen0 = link_coord_map[lk_name]
+        _sx[i] = sx0; _sy[i] = sy0; _ex[i] = ex0; _ey[i] = ey0; _ll[i] = llen0
+
+    # 車両ごとに有効点を抽出して列を蓄積
+    tk_parts, vid_parts, li_parts, x_parts, v_parts = [], [], [], [], []
+    for veh in W.VEHICLES.values():
+        # fast path (uxsim cpp backend): 生ログ配列を直接使う。
+        # _log_cache['log_state'] は int コード（"run" など状態名への index）、
+        # _log_cache['log_link'] は W.LINKS への int index。変換プロパティ
+        # (log_state / log_link) は呼ぶたびに Python リストを構築して
+        # コストが大きいため回避する。
+        cache = getattr(veh, "_log_cache", None)
+        if cache is None and hasattr(veh, "_ensure_log_raw"):
+            veh._ensure_log_raw()
+            cache = veh._log_cache
+        if cache is not None and "log_state" in cache and "log_link" in cache:
+            state_map = getattr(type(veh), "_LOG_STATE_MAP", None)
+            run_code = state_map.index("run") if state_map else 2
+            state_raw = np.asarray(cache["log_state"])
+            link_raw = np.asarray(cache["log_link"], dtype=np.int64)
+            sel = np.nonzero(
+                (state_raw == run_code) & (link_raw >= 0) & (link_raw < _n_links)
+            )[0]
+            if sel.size == 0:
+                continue
+            li_sel = link_raw[sel]
+        else:
+            # fallback (pure-Python uxsim): run 状態かつ Link オブジェクトの点のみ、
+            # リンク index に変換（他は -1）
+            log_state = veh.log_state
+            log_link  = veh.log_link
+            li = np.fromiter(
+                (
+                    link_idx_map.get(lk.name, -1)
+                    if (s == "run" and hasattr(lk, "name")) else -1
+                    for s, lk in zip(log_state, log_link)
+                ),
+                dtype=np.int64, count=len(log_state),
+            )
+            sel = np.nonzero(li >= 0)[0]
+            if sel.size == 0:
+                continue
+            li_sel = li[sel]
+        log_t = np.asarray(veh.log_t, dtype=np.float64)
+        tk = np.rint(log_t[sel] * 10.0).astype(np.int64)  # 0.1 秒精度
+        tk_parts.append(tk)
+        li_parts.append(li_sel)
+        vid_parts.append(np.full(sel.size, veh_id_map[id(veh)], dtype=np.int64))
+        x_parts.append(np.asarray(veh.log_x, dtype=np.float64)[sel])
+        v_parts.append(np.asarray(veh.log_v, dtype=np.float64)[sel])
+
     frames_by_tk = {}            # int_t_key(×10) -> column dict
     link_speeds_by_tk = {}       # int_t_key -> {link_name: [speeds]}
+    sorted_tks = []
 
-    for veh in W.VEHICLES.values():
-        vid = veh_id_map[id(veh)]
-        log_t     = veh.log_t
-        log_x     = veh.log_x
-        log_v     = veh.log_v
-        log_link  = veh.log_link
-        log_state = veh.log_state
-        n = len(log_t)
-        for i in range(n):
-            # state == "run" のみ採用（旧実装と同条件）
-            if str(log_state[i]) != "run":
-                continue
-            lk_obj = log_link[i]
-            if lk_obj == -1 or not hasattr(lk_obj, "name"):
-                continue
-            lk_name = lk_obj.name
-            lc = link_coord_map.get(lk_name)
-            if lc is None:
-                continue
-            sx, sy, ex, ey, llen = lc
+    if tk_parts:
+        tk_all  = np.concatenate(tk_parts)
+        li_all  = np.concatenate(li_parts)
+        vid_all = np.concatenate(vid_parts)
+        x_all   = np.concatenate(x_parts)
+        v_all   = np.concatenate(v_parts)
 
-            t_val = float(log_t[i])
-            tk = int(round(t_val * 10))  # 0.1 秒精度
+        # 間引き: ユニーク時刻キーが 200 を超える場合のみ（len // 200 が 1 のときは間引かない）
+        uniq_tks = np.unique(tk_all)
+        kept = uniq_tks
+        if uniq_tks.size > 200:
+            step = max(1, uniq_tks.size // 200)
+            kept = uniq_tks[::step]
+            mask = np.isin(tk_all, kept)
+            tk_all, li_all, vid_all = tk_all[mask], li_all[mask], vid_all[mask]
+            x_all, v_all = x_all[mask], v_all[mask]
 
-            pos = float(log_x[i])
-            alpha = min(max(pos / llen, 0.0), 1.0) if llen > 0 else 0.0
-            vx = sx * (1.0 - alpha) + ex * alpha
-            vy = sy * (1.0 - alpha) + ey * alpha
-            spd = float(log_v[i])
+        # 座標・alpha を一括計算
+        llen = _ll[li_all]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            alpha = np.where(llen > 0, np.clip(x_all / llen, 0.0, 1.0), 0.0)
+        vx = _sx[li_all] * (1.0 - alpha) + _ex[li_all] * alpha
+        vy = _sy[li_all] * (1.0 - alpha) + _ey[li_all] * alpha
 
-            cols = frames_by_tk.get(tk)
-            if cols is None:
-                cols = {"ids": [], "xs": [], "ys": [], "vs": [], "alphas": [], "li": []}
-                frames_by_tk[tk] = cols
-                link_speeds_by_tk[tk] = {}
-            cols["ids"].append(vid)
-            cols["xs"].append(round(vx, 2))
-            cols["ys"].append(round(vy, 2))
-            cols["vs"].append(round(spd, 2))
-            cols["alphas"].append(round(alpha, 4))
-            cols["li"].append(link_idx_map[lk_name])
-            ls = link_speeds_by_tk[tk]
-            sl = ls.get(lk_name)
-            if sl is None:
-                ls[lk_name] = [spd]
-            else:
-                sl.append(spd)
+        # tk 順に整列し、フレーム境界で分割（stable sort で車両順を保持）
+        order = np.argsort(tk_all, kind="stable")
+        tk_s  = tk_all[order]
+        boundaries = np.nonzero(np.diff(tk_s))[0] + 1
+        starts = np.concatenate(([0], boundaries))
+        ends   = np.concatenate((boundaries, [tk_s.size]))
 
-    # 全 t キー（昇順）
-    sorted_tks = sorted(frames_by_tk.keys())
+        ids_s    = vid_all[order].tolist()
+        xs_s     = np.round(vx[order], 2).tolist()
+        ys_s     = np.round(vy[order], 2).tolist()
+        vs_s     = np.round(v_all[order], 2).tolist()
+        alphas_s = np.round(alpha[order], 4).tolist()
+        li_s     = li_all[order].tolist()
+        v_raw_s  = v_all[order]  # link_timeline 用（丸め前）
 
-    # 間引き: 最大 200 フレーム。len // 200 が 1 のときは間引かない。
-    if len(sorted_tks) > 200:
-        step = max(1, len(sorted_tks) // 200)
-        sorted_tks = sorted_tks[::step]
+        link_names_by_idx = [lk.name for lk in W.LINKS]
+        for st, en in zip(starts.tolist(), ends.tolist()):
+            tk = int(tk_s[st])
+            sorted_tks.append(tk)
+            frames_by_tk[tk] = {
+                "ids":    ids_s[st:en],
+                "xs":     xs_s[st:en],
+                "ys":     ys_s[st:en],
+                "vs":     vs_s[st:en],
+                "alphas": alphas_s[st:en],
+                "li":     li_s[st:en],
+            }
+            # リンク別速度集計（保持フレームの点のみなので軽量）
+            ls = {}
+            seg_li = li_s[st:en]
+            seg_v  = v_raw_s[st:en]
+            for j in range(en - st):
+                ln = link_names_by_idx[seg_li[j]]
+                sl = ls.get(ln)
+                if sl is None:
+                    ls[ln] = [float(seg_v[j])]
+                else:
+                    sl.append(float(seg_v[j]))
+            link_speeds_by_tk[tk] = ls
 
     # 出力 frames（旧フォーマット維持: キーは "12.3" のような小数文字列）
     frames = {}
@@ -648,7 +716,14 @@ async def lifespan(app: FastAPI):
     yield
     executor.shutdown(wait=False)
 
-app = FastAPI(title="RISU API", lifespan=lifespan)
+# orjson があれば高速な JSON シリアライズをデフォルトにする（/results は MB 級）
+try:
+    from fastapi.responses import ORJSONResponse as _DefaultJSONResponse
+except ImportError:  # orjson 未インストール時は標準 JSON にフォールバック
+    from fastapi.responses import JSONResponse as _DefaultJSONResponse
+
+app = FastAPI(title="RISU API", lifespan=lifespan,
+              default_response_class=_DefaultJSONResponse)
 
 # ──────────────────────────────────────────────
 # グローバル例外ハンドラー
@@ -688,6 +763,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 大きな JSON レスポンス（/results は数 MB）を圧縮して転送量を ~90% 削減
+from starlette.middleware.gzip import GZipMiddleware
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
 # ──────────────────────────────────────────────
 # アップロードサイズ上限（DoS 防止）
@@ -745,10 +824,14 @@ async def simulate(scenario: SimulationInput):
 
 @app.get("/results/{sim_id}")
 async def get_results(sim_id: str):
-    """新スキーマ（risu_schema_version 1.0）の完全エンベロープを返す。"""
+    """新スキーマ（risu_schema_version 1.0）の完全エンベロープを返す。
+
+    数 MB になり得るため、レスポンスオブジェクトを直接返して
+    FastAPI の jsonable_encoder（全要素の再帰変換）をバイパスする。
+    """
     if sim_id not in results_store:
         raise HTTPException(404, detail="Result not found")
-    return _build_envelope(sim_id, include_result=True)
+    return _DefaultJSONResponse(_build_envelope(sim_id, include_result=True))
 
 
 @app.get("/results/{sim_id}/scenario")
@@ -1071,16 +1154,18 @@ def _get_simulation_data(sim_id: str) -> dict | None:
     sampled = frame_times[::step]
 
     # ネットワーク全体の時系列
+    # frames はコンパクト列指向フォーマット: {t_key: {ids:[], xs:[], ys:[], vs:[], ...}}
     time_labels = []
     net_avg_speed = []
     net_vehicle_count = []
     for t in sampled:
         t_key = str(t) if str(t) in frames else str(round(t, 1))
-        vehs = frames.get(t_key, [])
+        cols = frames.get(t_key) or {}
+        speeds = cols.get("vs", [])
         time_labels.append(round(t))
-        net_vehicle_count.append(len(vehs))
-        if vehs:
-            net_avg_speed.append(round(sum(v["v"] for v in vehs) / len(vehs), 2))
+        net_vehicle_count.append(len(speeds))
+        if speeds:
+            net_avg_speed.append(round(sum(speeds) / len(speeds), 2))
         else:
             net_avg_speed.append(None)
 
@@ -1106,8 +1191,9 @@ def _get_simulation_data(sim_id: str) -> dict | None:
     all_speeds = []
     for t in sampled:
         t_key = str(t) if str(t) in frames else str(round(t, 1))
-        for v in frames.get(t_key, []):
-            all_speeds.append(round(v["v"], 1))
+        cols = frames.get(t_key) or {}
+        for spd in cols.get("vs", []):
+            all_speeds.append(round(spd, 1))
 
     speed_hist = {"labels": [], "counts": []}
     if all_speeds:
