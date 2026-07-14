@@ -66,8 +66,19 @@ python server.py
 単純なボトルネック道路を作って渋滞をシミュレーションして
 3×3 のグリッドネットワークを作って
 渋谷駅周辺を OSM から取得してシミュレーションして
+新宿駅から半径2kmの幹線道路だけでシミュレーションして
 結果を速度グラフで見せて
 ```
+
+OSM インポートは取得する道路の種類を選べます（チャットで「主要道路だけ」「幹線道路で」
+のように指定するか、API の `road_types` パラメータで指定）:
+
+| 値 | 内容 | 用途 |
+|---|---|---|
+| `major` | 高速道路・国道級のみ | 広域（半径 2km 以上）でも高速 |
+| `arterial` | 幹線道路まで | 都市スケールの標準 |
+| `drive` | 一般車道（デフォルト） | 住宅街の道路含む、サービス道路除外 |
+| `all` | 全車道 | 駐車場内通路まで含む。狭い範囲向け |
 
 ## API エンドポイント
 
@@ -77,7 +88,7 @@ python server.py
 | GET  | `/results/{id}` | 結果取得（GeoJSON + フレーム + 統計） |
 | POST | `/chat` | LLM チャット（ツール自動呼び出し、SSE ストリーミング） |
 | POST | `/upload` | CSV / JSON ファイルからシミュレーション実行 |
-| POST | `/import/osm` | OpenStreetMap インポート |
+| POST | `/import/osm` | OpenStreetMap インポート（`road_types`: major / arterial / drive / all） |
 | GET  | `/gmns/datasets` | GMNS Plus データセット一覧 |
 | POST | `/gmns/import` | GMNS データセットインポート |
 | GET  | `/mcp` | MCP SSE エンドポイント |

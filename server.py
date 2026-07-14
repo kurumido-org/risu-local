@@ -83,7 +83,12 @@ async def _run_uxsim_async(scenario) -> dict:
     except asyncio.TimeoutError:
         raise HTTPException(
             408,
-            detail=f"シミュレーションがタイムアウトしました（{UXSIM_TIMEOUT_SEC}s 超過）。ネットワーク規模や tmax を縮小してください。",
+            detail=(
+                f"シミュレーションがタイムアウトしました（{UXSIM_TIMEOUT_SEC}s 超過）。"
+                "ネットワーク規模や tmax を縮小してください。"
+                "OSM インポートの場合は road_types='arterial' または 'major' を指定して"
+                "細街路を除外すると大幅に高速化できます。"
+            ),
         )
     except HTTPException:
         raise
@@ -284,11 +289,44 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
             flow=d.flow,
         )
 
+    # analyzer.basic_analysis は内部で od_analysis → floyd_warshall（全点対最短路,
+    # O(ノード数^3)）を実行し、大規模 OSM ネットワーク（5000 ノード級）では
+    # 1 回あたり数十秒かかる。RISU が必要とする統計は 3 値だけなので無効化し、
+    # 後段で車両ログから直接計算する。
+    # cpp backend は exec_simulation 終了時（simulation_terminated）に自動で
+    # basic_analysis を呼ぶため、analyzer 生成フックをラップして先に潰しておく。
+    # （analyzer は exec 中に生成されるので直接は差し替えられない）
+    if hasattr(W, "_setup_analyzer"):
+        _orig_setup_analyzer = W._setup_analyzer
+        def _setup_analyzer_no_basic(*a, **k):
+            r = _orig_setup_analyzer(*a, **k)
+            try:
+                W.analyzer.basic_analysis = lambda *a_, **k_: None
+            except Exception:
+                pass  # 失敗しても遅くなるだけで結果は変わらない
+            return r
+        W._setup_analyzer = _setup_analyzer_no_basic
+
     t0 = time.perf_counter()
     W.exec_simulation()
     elapsed = time.perf_counter() - t0
 
-    W.analyzer.basic_analysis()
+    # ---- 基本統計（basic_analysis 相当を直接計算） ----
+    # od_analysis と同じ数え方: dest を持つ車両 × DELTAN がトリップ数、
+    # travel_time != -1 が完了、平均旅行時間は完了車両の travel_time の平均。
+    _dn = W.DELTAN
+    _trip_all = 0
+    _trip_completed = 0
+    _tt_sum = 0.0
+    for veh in W.VEHICLES.values():
+        if veh.dest is None:
+            continue
+        _trip_all += _dn
+        _tt = veh.travel_time
+        if _tt != -1:
+            _trip_completed += _dn
+            _tt_sum += _tt
+    _avg_tt = (_tt_sum * _dn / _trip_completed) if _trip_completed else None
 
     # ---- リンク情報（GeoJSON） ----
     # 同一座標ペアのリンクを検出し、重複分にオフセットを付与して視覚的に区別
@@ -526,10 +564,10 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
           f"{len(features)} GeoJSON features, {len(coord_pairs)} unique coord pairs "
           f"(exec={elapsed:.2f}s, post={post_elapsed:.2f}s)")
     stats = {
-        "total_trips":           int(W.analyzer.trip_all),
-        "completed_trips":       int(W.analyzer.trip_completed),
-        "average_travel_time_s": round(float(W.analyzer.average_travel_time), 1)
-            if W.analyzer.trip_completed > 0 else None,
+        "total_trips":           int(_trip_all),
+        "completed_trips":       int(_trip_completed),
+        "average_travel_time_s": round(float(_avg_tt), 1)
+            if _trip_completed > 0 else None,
         "simulation_time_s":     round(elapsed, 2),
         "post_processing_s":     round(post_elapsed, 2),
     }
@@ -904,6 +942,14 @@ UXsim は交差点ノードに信号制御を設定できる。2 つのパラメ
 - import_osm_network は地名を自動でジオコーディングし、道路ネットワークをダウンロードする
 - distance_m パラメータで範囲を制御する（デフォルト500m）。ユーザーの要望に応じて調整する
   - 「広い範囲」→ 1000〜2000m、「狭い範囲」「駅前だけ」→ 200〜300m
+- road_types パラメータで取得する道路の種類を制御する:
+  - major: 高速道路・国道級のみ（都市間・広域シミュレーション向け）
+  - arterial: 幹線道路まで（都市スケールの標準）
+  - drive: 一般車道（デフォルト。住宅街の道路含む、サービス道路除外）
+  - all: 全車道（駐車場内通路等も含む。最も細かいが最も重い）
+- 【重要】distance_m が 1000 以上のときは road_types を "arterial" か "major" にすること。
+  細街路込みで広範囲を取得するとノード数が数千を超え、計算がタイムアウトする。
+  ユーザーが「主要道路」「幹線道路」「大きい道路だけ」と言った場合も major / arterial を使う
 - 取得後は自動的にダミー需要でシミュレーションが実行される
 - ユーザーが範囲や需要を調整したい場合は対話的にヒアリングしてよい
 - 結果は地図として表示される
@@ -1328,6 +1374,18 @@ CLAUDE_TOOLS = [
                     "type": "integer",
                     "description": "中心からの取得半径（メートル）。デフォルト500。大きいほど広い範囲だが処理に時間がかかる。100〜2000が推奨。",
                 },
+                "road_types": {
+                    "type": "string",
+                    "enum": ["major", "arterial", "drive", "all"],
+                    "description": (
+                        "取得する道路の種類。"
+                        "major=高速道路・国道級のみ / arterial=幹線道路まで / "
+                        "drive=一般車道（デフォルト、住宅街の道路含む） / "
+                        "all=サービス道路・駐車場内通路含む全車道。"
+                        "半径 1000m 以上では major か arterial を推奨"
+                        "（ノード数が減り計算が大幅に速くなる）。"
+                    ),
+                },
                 "tmax": {
                     "type": "integer",
                     "description": "シミュレーション時間（秒）。デフォルト3600",
@@ -1536,11 +1594,12 @@ async def _chat_claude_stream(body: ChatInput):
                     place = fn_args.get("place", "")
                     dist = fn_args.get("distance_m", 500)
                     osm_tmax = fn_args.get("tmax", 3600)
+                    road_types = fn_args.get("road_types", "drive")
                     yield _sse_event({"type": "progress", "message": f"Step 2/3: OpenStreetMap から「{place}」周辺のデータを取得中..."})
                     try:
                         loop = asyncio.get_event_loop()
                         osm_result = await loop.run_in_executor(
-                            executor, _run_osm_import, place, dist
+                            executor, _run_osm_import, place, dist, road_types
                         )
                         scenario = dict(osm_result)
                         link_geometries = scenario.pop("link_geometries", {})
@@ -1717,10 +1776,11 @@ async def _chat_claude_stream(body: ChatInput):
                         _place = tb.input.get("place", "")
                         _dist = tb.input.get("distance_m", 500)
                         _tmax = tb.input.get("tmax", 3600)
+                        _road_types = tb.input.get("road_types", "drive")
                         yield _sse_event({"type": "progress", "message": f"OpenStreetMap から「{_place}」のデータを取得中..."})
                         try:
                             loop = asyncio.get_event_loop()
-                            osm_r = await loop.run_in_executor(executor, _run_osm_import, _place, _dist)
+                            osm_r = await loop.run_in_executor(executor, _run_osm_import, _place, _dist, _road_types)
                             _scenario = dict(osm_r)
                             _link_geoms = _scenario.pop("link_geometries", {})
                             _scenario.pop("center", None)
@@ -1926,9 +1986,10 @@ async def _chat_claude(body: ChatInput):
                     place = fn_args.get("place", "")
                     dist = fn_args.get("distance_m", 500)
                     osm_tmax = fn_args.get("tmax", 3600)
+                    road_types = fn_args.get("road_types", "drive")
                     loop = asyncio.get_event_loop()
                     osm_result = await loop.run_in_executor(
-                        executor, _run_osm_import, place, dist
+                        executor, _run_osm_import, place, dist, road_types
                     )
                     # シナリオ構築（ダミー需要追加）
                     scenario = dict(osm_result)
@@ -2051,9 +2112,10 @@ async def _chat_claude(body: ChatInput):
                         _place = tb.input.get("place", "")
                         _dist = tb.input.get("distance_m", 500)
                         _tmax = tb.input.get("tmax", 3600)
+                        _road_types = tb.input.get("road_types", "drive")
                         loop = asyncio.get_event_loop()
                         osm_r = await loop.run_in_executor(
-                            executor, _run_osm_import, _place, _dist
+                            executor, _run_osm_import, _place, _dist, _road_types
                         )
                         _scenario = dict(osm_r)
                         _link_geoms = _scenario.pop("link_geometries", {})
@@ -2516,19 +2578,57 @@ def _gmns_to_scenario(
     }
 
 
-def _run_osm_import(place: str, distance_m: int = 1000) -> dict:
+# OSM 道路種別プリセット
+# custom_filter は Overpass QL の highway タグフィルタ。
+# None のプリセットは network_type で取得する。
+_OSM_ROAD_PRESETS = {
+    # 高速道路・国道級のみ（広域・大半径向け。ノード数が大幅に減り高速）
+    "major": '["highway"~"motorway|trunk|primary|motorway_link|trunk_link|primary_link"]',
+    # 幹線道路まで（major + 2次・3次幹線。都市スケールの標準）
+    "arterial": '["highway"~"motorway|trunk|primary|secondary|tertiary'
+                '|motorway_link|trunk_link|primary_link|secondary_link|tertiary_link"]',
+    # 一般車道（住宅街の道路含む。サービス道路・駐車場内通路は除外）
+    "drive": None,
+    # 全車道（サービス道路・駐車場内通路含む。最も細かいが最も重い）
+    "all": None,
+}
+_OSM_NETWORK_TYPE = {"drive": "drive", "all": "drive_service"}
+
+
+def _run_osm_import(place: str, distance_m: int = 1000, road_types: str = "drive") -> dict:
     """OSM から道路ネットワークを取得して UXsim シナリオに変換。
     OSMnx のグラフを直接活用し、道路形状・速度推定・車線数を取得する。
+
+    road_types: "major" | "arterial" | "drive" | "all"（_OSM_ROAD_PRESETS 参照）
     """
     import osmnx as ox
+
+    road_types = (road_types or "drive").strip().lower()
+    if road_types not in _OSM_ROAD_PRESETS:
+        raise ValueError(
+            f"road_types は {', '.join(_OSM_ROAD_PRESETS)} のいずれかを指定してください: {road_types}"
+        )
 
     # ── ジオコーディング: 自然言語 → (lat, lon) ──
     center = ox.geocode(place)  # (lat, lon)
     center_lat, center_lon = center
 
     # ── 道路ネットワーク取得 ──
-    # drive_service: 自動車通行可能な全道路（service道路・駐車場内道路等を含む）
-    G = ox.graph_from_point(center, dist=distance_m, network_type="drive_service")
+    custom_filter = _OSM_ROAD_PRESETS[road_types]
+    try:
+        if custom_filter is not None:
+            G = ox.graph_from_point(center, dist=distance_m, custom_filter=custom_filter)
+        else:
+            G = ox.graph_from_point(
+                center, dist=distance_m, network_type=_OSM_NETWORK_TYPE[road_types]
+            )
+    except Exception as e:
+        # 対象道路が範囲内に存在しない場合（郊外で major 指定など）
+        raise ValueError(
+            f"「{place}」周辺（半径{distance_m}m）で road_types='{road_types}' に該当する"
+            f"道路が見つかりませんでした。road_types を 'arterial' や 'drive' に広げるか、"
+            f"半径を大きくしてください。（{e.__class__.__name__}）"
+        ) from e
     G = ox.add_edge_speeds(G)       # highway 種別から速度推定 (speed_kph)
 
     # メートル座標に投影
@@ -2593,6 +2693,12 @@ def _run_osm_import(place: str, distance_m: int = 1000) -> dict:
             ]
         link_geometries[link_name] = coords
 
+    _road_labels = {
+        "major": "主要道路（高速・国道級）",
+        "arterial": "幹線道路",
+        "drive": "一般車道",
+        "all": "全車道",
+    }
     return {
         "name": f"osm_{place[:30]}",
         "tmax": 3600,
@@ -2604,7 +2710,8 @@ def _run_osm_import(place: str, distance_m: int = 1000) -> dict:
         "center": {"lat": center_lat, "lon": center_lon},
         "distance_m": distance_m,
         "summary": (
-            f"OSM から「{place}」周辺（半径{distance_m}m）の道路ネットワークを取得しました。"
+            f"OSM から「{place}」周辺（半径{distance_m}m、{_road_labels[road_types]}）の"
+            f"道路ネットワークを取得しました。"
             f"{len(scenario_nodes)} ノード、{len(scenario_links)} リンク。"
         ),
     }
@@ -2913,8 +3020,13 @@ async def upload_files(
 
 @app.post("/import/osm")
 async def import_osm(place: str = Form(...), tmax: int = Form(3600),
-                     distance_m: int = Form(500)):
-    """OpenStreetMap から道路ネットワークを取得"""
+                     distance_m: int = Form(500),
+                     road_types: str = Form("drive")):
+    """OpenStreetMap から道路ネットワークを取得
+
+    road_types: major（高速・国道級のみ） / arterial（幹線まで） /
+                drive（一般車道、デフォルト） / all（サービス道路含む全車道）
+    """
     # 入力バリデーション
     place = place.strip()
     if not place or len(place) > 200:
@@ -2925,10 +3037,13 @@ async def import_osm(place: str = Form(...), tmax: int = Form(3600),
         raise HTTPException(400, detail="半径は 50m〜5000m の範囲で指定してください")
     if tmax < 60 or tmax > MAX_TMAX:
         raise HTTPException(400, detail=f"tmax は 60〜{MAX_TMAX} 秒の範囲で指定してください")
+    road_types = road_types.strip().lower()
+    if road_types not in _OSM_ROAD_PRESETS:
+        raise HTTPException(400, detail=f"road_types は {', '.join(_OSM_ROAD_PRESETS)} のいずれかを指定してください")
 
     loop = asyncio.get_event_loop()
     try:
-        result = await loop.run_in_executor(executor, _run_osm_import, place, distance_m)
+        result = await loop.run_in_executor(executor, _run_osm_import, place, distance_m, road_types)
     except Exception as e:
         raise HTTPException(500, detail=f"OSM インポートエラー: {str(e)}")
 
@@ -2952,6 +3067,7 @@ async def import_osm(place: str = Form(...), tmax: int = Form(3600),
     _store_sim(sim_id, sim_result, {
         "type": "osm",
         "place": place,
+        "road_types": road_types,
         "distance_m": distance_m,
     })
 

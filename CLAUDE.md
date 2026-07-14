@@ -55,6 +55,12 @@ pytest tests/ -v
 
 ## パフォーマンス上の前提（変更時に壊さないこと）
 
+- `W.analyzer.basic_analysis` は無効化してある（od_analysis → floyd_warshall が
+  O(ノード数^3) で、5000 ノード級 OSM では 1 回 45 秒超）。統計 3 値
+  （total/completed/average_travel_time）は `_run_uxsim` 内で車両ログから直接計算。
+- OSM インポートは `road_types` プリセット（major/arterial/drive/all）で規模を制御。
+  デフォルト drive。半径 1000m 以上は arterial/major を使う（システムプロンプトで LLM に指示済み）。
+
 - uxsim は C++ バックエンド（1.14 beta, `World(cpp=True)`）優先、TypeError で純 Python にフォールバック。
 - `_run_uxsim` の後処理は numpy ベクトル化済み。cpp バックエンドでは `veh._log_cache` の
   生 int 配列（state コード / リンク index）を直接読む fast path がある。
