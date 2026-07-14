@@ -249,6 +249,51 @@ class TestBidirectionalLinks:
 
 
 # ============================================================
+# 2a. リンク容量テスト
+# ============================================================
+
+class TestLinkCapacity:
+    """
+    link.capacity（台/s、リンク全体）で容量を明示制御できること。
+    UXsim の capacity_out にマップされ、下流端がボトルネックになる。
+    """
+
+    def _run(self, capacity):
+        # 注意: capacity（capacity_out）はリンク終点が目的地そのものの場合は
+        # 作用しない（車両は境界を通らず到着・消滅する）ため、
+        # ボトルネックリンクの下流にもう 1 リンク置く
+        link = {"name": "r1", "start": "A", "end": "B", "length": 1000}
+        if capacity is not None:
+            link["capacity"] = capacity
+        scenario = SimulationInput(
+            name="cap_test", tmax=2400, deltan=5,
+            nodes=[{"name": "A", "x": 0, "y": 0}, {"name": "B", "x": 1000, "y": 0},
+                   {"name": "C", "x": 2000, "y": 0}],
+            links=[link, {"name": "r2", "start": "B", "end": "C", "length": 1000}],
+            demands=[{"orig": "A", "dest": "C", "t_start": 0, "t_end": 600, "flow": 0.5}],
+        )
+        return _run_uxsim(scenario)
+
+    def test_capacity_caps_throughput(self):
+        """容量指定で旅行時間が明確に悪化する（ボトルネック形成）"""
+        free = self._run(None)
+        capped = self._run(0.2)  # 需要 0.5 台/s > 容量 0.2 台/s
+        assert free["stats"]["average_travel_time_s"] is not None
+        assert capped["stats"]["average_travel_time_s"] > free["stats"]["average_travel_time_s"] * 2, \
+            f"capacity が効いていない: free={free['stats']}, capped={capped['stats']}"
+
+    def test_capacity_roundtrip_in_scenario(self):
+        """再現用シナリオ（envelope）に capacity が保存される"""
+        capped = self._run(0.2)
+        lk = capped["_scenario"]["links"][0]
+        assert lk["capacity"] == 0.2
+
+    def test_no_capacity_is_none(self):
+        free = self._run(None)
+        assert free["_scenario"]["links"][0]["capacity"] is None
+
+
+# ============================================================
 # 2b. 信号メタデータテスト
 # ============================================================
 

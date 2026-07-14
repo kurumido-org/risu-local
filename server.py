@@ -194,6 +194,8 @@ class LinkInput(BaseModel):
     free_flow_speed: float = 20.0
     jam_density: float = 0.2
     number_of_lanes: int = 1
+    capacity: float | None = None  # リンク容量（台/s、リンク全体）。UXsim の capacity_out にマップ。
+                                   # None なら FD（速度・密度・車線数）由来の容量のまま
     signal_group: int | None = None  # この進入リンクが青になる信号現示番号（0始まり）
 
 class DemandInput(BaseModel):
@@ -269,6 +271,10 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
         link_kwargs = {}
         if lk.signal_group is not None:
             link_kwargs["signal_group"] = lk.signal_group
+        if lk.capacity is not None:
+            # 明示容量: 下流端の流出容量として与える（渋滞の待ち行列が
+            # このリンク上に物理的に形成される、標準的なボトルネック表現）
+            link_kwargs["capacity_out"] = lk.capacity
         link_map[lk.name] = W.addLink(
             lk.name,
             start_node=node_map[lk.start],
@@ -682,6 +688,7 @@ async def list_tools() -> list[Tool]:
                                 "free_flow_speed":  {"type": "number"},
                                 "jam_density":      {"type": "number"},
                                 "number_of_lanes":  {"type": "integer"},
+                                "capacity":         {"type": "number", "description": "リンク容量（台/秒）"},
                                 "signal_group":     {"type": "integer", "description": "信号現示番号（0始まり）"},
                             },
                             "required": ["name", "start", "end", "length"],
@@ -915,6 +922,17 @@ SYSTEM_PROMPT = """私はRISUです。交通流シミュレーター UXsim を�
 - 双方向道路は必ず "2 本の並行有向リンク" として表現すること
 - 推奨: A→B と B→A を両方明示的に作成する
 - 一方通行を表現したい場合のみ片方向のリンクだけを作る
+
+【容量・ボトルネックの表現】
+- リンクの容量を明示したい場合は link の capacity（台/秒、リンク全体）を指定する
+  例: {"name": "r1", "start": "A", "end": "B", "length": 2000, "capacity": 0.5}
+- capacity 指定時は下流端の流出容量として作用し、渋滞の待ち行列はそのリンク上に形成される
+- 【注意】リンクの終点ノードがそのまま目的地（demand の dest）の場合、capacity は作用しない
+  （車両は境界を通過せず到着・消滅する）。ボトルネックを見せたい場合は
+  その下流にもう 1 本リンクを置き、目的地を先に延ばすこと
+- ユーザーが「容量 1800 台/時」のように台/時で言った場合は 3600 で割って台/秒に変換する（1800台/時 = 0.5台/秒）
+- ノードの flow_capacity は「交差点の処理能力」を表す（全流入リンク合計の流出容量）。
+  特定の道路のボトルネックは link capacity、交差点のボトルネックは node flow_capacity を使い分ける
 
 【信号制御】
 UXsim は交差点ノードに信号制御を設定できる。2 つのパラメータで記述する:
@@ -1328,6 +1346,7 @@ CLAUDE_TOOLS = [
                             "free_flow_speed":  {"type": "number", "description": "自由流速度（m/s）。デフォルト20"},
                             "jam_density":      {"type": "number", "description": "渋滞密度（台/m）。デフォルト0.2"},
                             "number_of_lanes":  {"type": "integer", "description": "車線数。デフォルト1"},
+                            "capacity":         {"type": "number", "description": "リンク容量（台/秒、リンク全体）。ボトルネックの明示表現に使う（例: 0.5）。省略時は速度・密度・車線数から決まる容量"},
                             "signal_group":     {"type": "integer", "description": "この進入リンクが青になる信号現示番号（0始まり）。退出リンクには不要。省略=常時通行可能"},
                         },
                         "required": ["name", "start", "end", "length"],
@@ -2364,6 +2383,7 @@ def _parse_csv_scenario(content: str) -> dict:
         col_length = _find_col(raw_fields, ["length", "distance", "dist"])
         col_ffs = _find_col(raw_fields, ["free_flow_speed", "speed", "free_speed", "speed_limit", "ffs"])
         col_lanes = _find_col(raw_fields, ["number_of_lanes", "lanes", "num_lanes"])
+        col_lcap = _find_col(raw_fields, ["capacity", "cap"])  # リンク容量（台/s）
         col_orig = _find_col(raw_fields, ["orig", "origin", "o_zone_id", "from", "source"])
         col_dest_d = _find_col(raw_fields, ["dest", "destination", "d_zone_id", "to", "target"])
         col_tstart = _find_col(raw_fields, ["t_start", "start_time", "time_start"])
@@ -2379,14 +2399,18 @@ def _parse_csv_scenario(content: str) -> dict:
                     "y": _get_float(row, col_y, 0),
                 })
             elif t == "link":
-                links.append({
+                link = {
                     "name": _get_val(row, col_name, ""),
                     "start": _get_val(row, col_start, ""),
                     "end": _get_val(row, col_end, ""),
                     "length": _get_float(row, col_length, 1000),
                     "free_flow_speed": _get_float(row, col_ffs, 20),
                     "number_of_lanes": _get_int(row, col_lanes, 1),
-                })
+                }
+                lcap = _get_float(row, col_lcap, -1)
+                if lcap > 0:
+                    link["capacity"] = lcap
+                links.append(link)
             elif t == "demand":
                 demands.append({
                     "orig": _get_val(row, col_orig, ""),
@@ -2437,6 +2461,7 @@ def _parse_csv_scenario(content: str) -> dict:
                                           "speed_limit", "ffs", "制限速度", "速度"])
         col_lanes = _find_col(raw_fields, ["number_of_lanes", "lanes", "num_lanes", "車線数"])
         col_jd = _find_col(raw_fields, ["jam_density", "kjam"])
+        col_lcap = _find_col(raw_fields, ["capacity", "cap", "容量"])
 
         links = []
         for row in reader:
@@ -2454,6 +2479,9 @@ def _parse_csv_scenario(content: str) -> dict:
             jd = _get_float(row, col_jd, -1)
             if jd > 0:
                 link["jam_density"] = jd
+            lcap = _get_float(row, col_lcap, -1)
+            if lcap > 0:
+                link["capacity"] = lcap
             links.append(link)
         return {"format": "link_csv", "links": links}
 
@@ -2557,6 +2585,10 @@ def _gmns_to_scenario(
             lk["length"] = lk["length"] * length_to_m
             raw_speed = lk["free_flow_speed"]
             lk["free_flow_speed"] = max(raw_speed * speed_to_ms, 1.0)
+            # GMNS の capacity は台/時/車線 → 台/s（リンク全体）に変換
+            if "capacity" in lk:
+                lanes = max(1, int(lk.get("number_of_lanes", 1) or 1))
+                lk["capacity"] = round(lk["capacity"] * lanes / 3600.0, 4)
         links = parsed["links"]
 
     # 需要

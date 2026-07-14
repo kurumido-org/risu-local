@@ -1938,6 +1938,7 @@ function renderEditProps(show) {
       + `<div class="ep-row"><label>延長 m</label><input data-ep="length" type="number" value="${lk.length}"></div>`
       + `<div class="ep-row"><label>自由流速度 m/s</label><input data-ep="free_flow_speed" type="number" step="0.5" value="${lk.free_flow_speed ?? 20}"></div>`
       + `<div class="ep-row"><label>車線数</label><input data-ep="number_of_lanes" type="number" min="1" value="${lk.number_of_lanes ?? 1}"></div>`
+      + `<div class="ep-row"><label>容量 台/s</label><input data-ep="capacity" type="number" step="0.05" min="0" placeholder="自動（FD 由来）" value="${lk.capacity ?? ''}"></div>`
       + `<div class="ep-row"><label>信号 group</label><input data-ep="signal_group" type="number" min="0" placeholder="なし" value="${lk.signal_group ?? ''}"></div>`;
   }
   _etProps.innerHTML = html;
@@ -1986,6 +1987,9 @@ function applyEditProp(field, value) {
     } else if (field === 'signal_group') {
       const v = parseInt(value);
       if (isNaN(v) || value === '') delete lk.signal_group; else lk.signal_group = v;
+    } else if (field === 'capacity') {
+      const v = parseFloat(value);
+      if (isNaN(v) || value === '' || v <= 0) delete lk.capacity; else lk.capacity = v;
     } else {
       const v = parseFloat(value);
       if (!isNaN(v)) lk[field] = field === 'number_of_lanes' ? Math.max(1, Math.round(v)) : v;
