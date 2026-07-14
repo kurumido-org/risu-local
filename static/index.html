@@ -2280,15 +2280,36 @@ async function sendMessage() {
   showStatus('RISUが考えています...');
 
   try {
-    // ファイルがある場合はフロントでテキスト読み取りしてメッセージに含める
     if (filesToSend.length > 0) {
-      const fileParts = [];
-      for (const f of filesToSend) {
-        const text = await f.text();
-        fileParts.push(`[添付ファイル: ${f.name}]\n\`\`\`\n${text}\n\`\`\``);
+      const totalSize = filesToSend.reduce((s, f) => s + (f.size || 0), 0);
+      const INLINE_LIMIT = 20000; // 20KB 超は LLM に埋め込まず参照渡し
+
+      if (totalSize > INLINE_LIMIT) {
+        // ── 大きい添付: /upload で直接実行し、チャットには sim_id 参照だけを渡す ──
+        // （LLM にネットワーク全体を往復させるとサイズ超過になるため。
+        //   以降の修正・再実行は LLM が rerun_simulation で行う）
+        showStatus('添付ネットワークをアップロードして実行中...');
+        const fd = new FormData();
+        for (const f of filesToSend) fd.append('files', f);
+        const up = await fetch(`${API}/upload`, { method: 'POST', body: fd });
+        const ud = await up.json().catch(() => null);
+        if (!up.ok) throw new Error((ud && ud.detail) || `アップロード失敗 (HTTP ${up.status})`);
+        await loadResult(ud.id);
+        addMsg('system', `添付ネットワークを実行しました（sim_id: ${ud.id}）`);
+        const last = chatHistory[chatHistory.length - 1];
+        last.content += `\n\n[システム: 添付ファイル（${fileNames.join(', ')}）はサーバーで実行済み。` +
+          `sim_id="${ud.id}"、統計: ${JSON.stringify(ud.stats || {})}。` +
+          `このネットワークの内容は再送不要。修正・再実行は rerun_simulation(base_sim_id="${ud.id}") を使うこと]`;
+      } else {
+        // ── 小さい添付: 従来どおりメッセージに埋め込む ──
+        const fileParts = [];
+        for (const f of filesToSend) {
+          const text = await f.text();
+          fileParts.push(`[添付ファイル: ${f.name}]\n\`\`\`\n${text}\n\`\`\``);
+        }
+        const last = chatHistory[chatHistory.length - 1];
+        last.content = last.content + '\n\n' + fileParts.join('\n\n');
       }
-      const last = chatHistory[chatHistory.length - 1];
-      last.content = last.content + '\n\n' + fileParts.join('\n\n');
     }
 
     const res = await fetch(`${API}/chat`, {

@@ -249,6 +249,128 @@ class TestBidirectionalLinks:
 
 
 # ============================================================
+# 2z. シナリオパッチエンジン（rerun_simulation）
+# ============================================================
+
+class TestScenarioModifications:
+    """
+    _apply_modifications: 大規模ネットワークを LLM に往復させないための
+    差分命令エンジン。保存済みシナリオに小さなパッチを適用する。
+    """
+
+    def _base(self):
+        return {
+            "name": "base", "tmax": 1000, "deltan": 5,
+            "nodes": [
+                {"name": "A", "x": 0, "y": 0},
+                {"name": "B", "x": 1000, "y": 0},
+                {"name": "C", "x": 2000, "y": 0},
+            ],
+            "links": [
+                {"name": "r1", "start": "A", "end": "B", "length": 1000,
+                 "free_flow_speed": 20, "number_of_lanes": 1},
+                {"name": "r2", "start": "B", "end": "C", "length": 1000,
+                 "free_flow_speed": 20, "number_of_lanes": 1},
+            ],
+            "demands": [
+                {"orig": "A", "dest": "C", "t_start": 0, "t_end": 500, "flow": 0.4},
+            ],
+        }
+
+    def test_update_links_by_name(self):
+        from server import _apply_modifications
+        sc, applied = _apply_modifications(self._base(), [
+            {"action": "update_links", "names": ["r1"], "set": {"capacity": 0.3}},
+        ])
+        assert sc["links"][0]["capacity"] == 0.3
+        assert "capacity" not in sc["links"][1]
+        assert len(applied) == 1
+
+    def test_update_links_all(self):
+        from server import _apply_modifications
+        sc, _ = _apply_modifications(self._base(), [
+            {"action": "update_links", "all": True, "set": {"free_flow_speed": 10}},
+        ])
+        assert all(l["free_flow_speed"] == 10 for l in sc["links"])
+
+    def test_unknown_link_name_raises(self):
+        from server import _apply_modifications
+        with pytest.raises(ValueError, match="r99"):
+            _apply_modifications(self._base(), [
+                {"action": "update_links", "names": ["r99"], "set": {"capacity": 1}},
+            ])
+
+    def test_update_demands_scale(self):
+        from server import _apply_modifications
+        sc, _ = _apply_modifications(self._base(), [
+            {"action": "update_demands", "all": True, "scale_flow": 1.5},
+        ])
+        assert sc["demands"][0]["flow"] == 0.6
+
+    def test_remove_nodes_cascades(self):
+        from server import _apply_modifications
+        sc, _ = _apply_modifications(self._base(), [
+            {"action": "remove_nodes", "names": ["B"]},
+        ])
+        assert len(sc["nodes"]) == 2
+        assert len(sc["links"]) == 0  # r1, r2 とも B に接続
+        assert len(sc["demands"]) == 1  # A→C は残る
+
+    def test_add_and_signal(self):
+        from server import _apply_modifications
+        sc, _ = _apply_modifications(self._base(), [
+            {"action": "update_nodes", "names": ["B"], "set": {"signal": [30, 30]}},
+            {"action": "update_links", "names": ["r1"], "set": {"signal_group": 0}},
+            {"action": "add_demand", "demand": {"orig": "C", "dest": "A",
+                                                "t_start": 0, "t_end": 500, "flow": 0.2}},
+        ])
+        assert sc["nodes"][1]["signal"] == [30, 30]
+        assert sc["links"][0]["signal_group"] == 0
+        assert len(sc["demands"]) == 2
+
+    def test_base_scenario_not_mutated(self):
+        from server import _apply_modifications
+        base = self._base()
+        _apply_modifications(base, [
+            {"action": "update_links", "all": True, "set": {"capacity": 0.1}},
+        ])
+        assert "capacity" not in base["links"][0]
+
+    def test_rerun_handler_end_to_end(self):
+        """保存済みシナリオ → パッチ → 再実行 → 新 sim_id"""
+        import asyncio, types, json as _json
+        from server import _handle_rerun_simulation, _store_sim
+
+        base_result = _run_uxsim(SimulationInput(**self._base()))
+        _store_sim("rerun_base", base_result)
+
+        body = types.SimpleNamespace(messages=[])
+        content, new_id, is_err = asyncio.run(_handle_rerun_simulation({
+            "base_sim_id": "rerun_base",
+            "modifications": [
+                {"action": "update_links", "names": ["r1"], "set": {"capacity": 0.15}},
+            ],
+        }, body))
+        assert not is_err, content
+        assert new_id in results_store
+        payload = _json.loads(content)
+        assert payload["base_sim_id"] == "rerun_base"
+        assert payload["applied"]
+        # 新シナリオに capacity が反映され、渋滞で旅行時間が悪化している
+        new_sc = results_store[new_id]["_scenario"]
+        assert new_sc["links"][0]["capacity"] == 0.15
+        assert payload["average_travel_time_s"] > base_result["stats"]["average_travel_time_s"]
+
+    def test_rerun_handler_bad_sim_id(self):
+        import asyncio, types
+        from server import _handle_rerun_simulation
+        content, new_id, is_err = asyncio.run(_handle_rerun_simulation(
+            {"base_sim_id": "no_such_id", "modifications": []},
+            types.SimpleNamespace(messages=[])))
+        assert is_err and new_id is None
+
+
+# ============================================================
 # 2a. リンク容量テスト
 # ============================================================
 

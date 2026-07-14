@@ -969,6 +969,17 @@ UXsim は交差点ノードに信号制御を設定できる。2 つのパラメ
   - 進入リンクに signal_group を割り当てる（対向方向は同じ group）
   - 青時間はユーザーの指示に従う。指示がなければ均等（例: [60, 60]）にする
 
+【既存ネットワークの修正・再実行（最重要ルール）】
+- 直前のシミュレーション（sim_id は【現在のコンテキスト】に記載）のネットワークを
+  修正して再実行する場合は、必ず rerun_simulation を使う
+- rerun_simulation はサーバーに保存されたシナリオへ「差分命令」だけを適用する。
+  ネットワーク全体（nodes/links）を run_simulation で再送してはいけない。
+  特に OSM 取込・ファイルアップロード由来の大規模ネットワークでは、
+  再送するとサイズ超過で必ず失敗する
+- run_simulation を使うのは「ゼロから新しいネットワークを設計する」ときだけ
+- シナリオ比較（容量変更前後など）も rerun_simulation を複数回呼べばよい。
+  各実行の sim_id が返るので、get_simulation_data でそれぞれの結果を取得して比較する
+
 【OSM（OpenStreetMap）連携】
 - ユーザーが実在の地名・場所・駅名・ランドマーク等を言及した場合、import_osm_network ツールを使う
   例: 「東京駅周辺」「渋谷の道路」「大阪城公園あたり」「新宿駅」
@@ -1249,9 +1260,29 @@ def _get_simulation_data(sim_id: str) -> dict | None:
             net_avg_speed.append(None)
 
     # リンク別速度
-    link_names = [f["properties"]["name"] for f in features]
+    # 大規模ネットワーク（数千〜1万リンク）で全リンクを返すと LLM の
+    # コンテキストに収まらないため、混雑度（平均速度 / 自由流速度 が低い順）
+    # 上位 MAX_DETAIL_LINKS 本に制限する。
+    MAX_DETAIL_LINKS = 30
+    total_links = len(features)
+
+    def _congestion_ratio(f):
+        tl = f["properties"].get("timeline", [])
+        ffs = f["properties"].get("free_flow_speed") or 20
+        if not tl or ffs <= 0:
+            return 1.0
+        avg = sum(e["speed"] for e in tl) / len(tl)
+        return avg / ffs
+
+    detail_features = features
+    truncated = False
+    if total_links > MAX_DETAIL_LINKS:
+        detail_features = sorted(features, key=_congestion_ratio)[:MAX_DETAIL_LINKS]
+        truncated = True
+
+    link_names = [f["properties"]["name"] for f in detail_features]
     link_speeds = {}
-    for f in features:
+    for f in detail_features:
         ln = f["properties"]["name"]
         tl = f["properties"].get("timeline", [])
         if not tl:
@@ -1286,17 +1317,244 @@ def _get_simulation_data(sim_id: str) -> dict | None:
         speed_hist["labels"] = [f"{bins[i]}-{bins[i+1]}" for i in range(len(counts))]
         speed_hist["counts"] = counts
 
-    return {
+    data = {
         "sim_id": sim_id,
         "tmax": tmax,
         "stats": stats,
         "time_labels": time_labels,
         "network_avg_speed": net_avg_speed,
         "network_vehicle_count": net_vehicle_count,
+        "total_links": total_links,
         "link_names": link_names,
         "link_speeds": link_speeds,
         "speed_histogram": speed_hist,
     }
+    if truncated:
+        data["link_speeds_note"] = (
+            f"リンク数が多いため（全 {total_links} 本）、link_speeds / link_names は"
+            f"混雑度上位 {MAX_DETAIL_LINKS} 本のみ。ネットワーク全体の傾向は"
+            f" network_avg_speed / speed_histogram を参照。"
+        )
+    return data
+
+
+# ──────────────────────────────────────────────
+# シナリオパッチエンジン（rerun_simulation 用）
+# 大規模ネットワークを LLM に往復させず、保存済みシナリオへの
+# 「小さな差分命令」だけで修正・再実行できるようにする。
+# ──────────────────────────────────────────────
+import copy as _copy
+
+
+def _mod_match_indices(items: list[dict], mod: dict, kind: str) -> list[int]:
+    """modification の対象指定（names / name_contains / all）から index 群を返す"""
+    if mod.get("all"):
+        return list(range(len(items)))
+    if "names" in mod:
+        wanted = list(mod["names"]) if isinstance(mod["names"], list) else [mod["names"]]
+        wanted_set = set(map(str, wanted))
+        idxs = [i for i, it in enumerate(items) if str(it.get("name")) in wanted_set]
+        found = {str(items[i]["name"]) for i in idxs}
+        missing = sorted(wanted_set - found)
+        if missing:
+            raise ValueError(f"{kind} が見つかりません: {missing}")
+        return idxs
+    if "name_contains" in mod:
+        sub = str(mod["name_contains"])
+        idxs = [i for i, it in enumerate(items) if sub in str(it.get("name", ""))]
+        if not idxs:
+            raise ValueError(f"名前に「{sub}」を含む {kind} がありません")
+        return idxs
+    raise ValueError(f"{kind} の対象指定が必要です（names / name_contains / all のいずれか）")
+
+
+_LINK_SET_FIELDS = {"capacity", "free_flow_speed", "number_of_lanes",
+                    "jam_density", "signal_group", "length"}
+_NODE_SET_FIELDS = {"signal", "flow_capacity", "x", "y"}
+_DEMAND_SET_FIELDS = {"flow", "t_start", "t_end"}
+
+
+def _apply_modifications(scenario: dict, mods: list[dict]) -> tuple[dict, list[str]]:
+    """保存済みシナリオ dict に modification 命令列を適用する。
+
+    戻り値: (新しいシナリオ dict, 適用ログ)。不正な命令は ValueError。
+    """
+    sc = _copy.deepcopy(scenario)
+    sc.setdefault("nodes", []); sc.setdefault("links", []); sc.setdefault("demands", [])
+    applied: list[str] = []
+
+    for mi, mod in enumerate(mods):
+        if not isinstance(mod, dict) or "action" not in mod:
+            raise ValueError(f"modifications[{mi}]: action が必要です")
+        action = mod["action"]
+
+        if action == "update_links":
+            idxs = _mod_match_indices(sc["links"], mod, "リンク")
+            sets = mod.get("set") or {}
+            bad = set(sets) - _LINK_SET_FIELDS
+            if bad:
+                raise ValueError(f"update_links の set に未対応のフィールド: {sorted(bad)}（対応: {sorted(_LINK_SET_FIELDS)}）")
+            if not sets:
+                raise ValueError("update_links には set が必要です")
+            for i in idxs:
+                sc["links"][i].update(sets)
+            applied.append(f"update_links: {len(idxs)} 本に {sorted(sets)} を設定")
+
+        elif action == "update_nodes":
+            idxs = _mod_match_indices(sc["nodes"], mod, "ノード")
+            sets = mod.get("set") or {}
+            bad = set(sets) - _NODE_SET_FIELDS
+            if bad:
+                raise ValueError(f"update_nodes の set に未対応のフィールド: {sorted(bad)}（対応: {sorted(_NODE_SET_FIELDS)}）")
+            if not sets:
+                raise ValueError("update_nodes には set が必要です")
+            for i in idxs:
+                sc["nodes"][i].update(sets)
+            applied.append(f"update_nodes: {len(idxs)} 個に {sorted(sets)} を設定")
+
+        elif action == "update_demands":
+            orig, dest = mod.get("orig"), mod.get("dest")
+            idxs = [i for i, d in enumerate(sc["demands"])
+                    if (orig is None or d.get("orig") == orig)
+                    and (dest is None or d.get("dest") == dest)]
+            if not idxs:
+                raise ValueError(f"該当する需要がありません（orig={orig}, dest={dest}）")
+            sets = mod.get("set") or {}
+            bad = set(sets) - _DEMAND_SET_FIELDS
+            if bad:
+                raise ValueError(f"update_demands の set に未対応のフィールド: {sorted(bad)}")
+            scale = mod.get("scale_flow")
+            for i in idxs:
+                sc["demands"][i].update(sets)
+                if scale is not None:
+                    sc["demands"][i]["flow"] = round(float(sc["demands"][i]["flow"]) * float(scale), 4)
+            desc = []
+            if sets: desc.append(f"{sorted(sets)} を設定")
+            if scale is not None: desc.append(f"flow を {scale} 倍")
+            applied.append(f"update_demands: {len(idxs)} 件に " + "、".join(desc))
+
+        elif action == "add_node":
+            node = mod.get("node")
+            if not isinstance(node, dict) or "name" not in node:
+                raise ValueError("add_node には node（name, x, y ...）が必要です")
+            if any(n.get("name") == node["name"] for n in sc["nodes"]):
+                raise ValueError(f"ノード名が重複: {node['name']}")
+            sc["nodes"].append(node)
+            applied.append(f"add_node: {node['name']}")
+
+        elif action == "add_link":
+            link = mod.get("link")
+            if not isinstance(link, dict) or "name" not in link:
+                raise ValueError("add_link には link（name, start, end, length ...）が必要です")
+            if any(l.get("name") == link["name"] for l in sc["links"]):
+                raise ValueError(f"リンク名が重複: {link['name']}")
+            sc["links"].append(link)
+            applied.append(f"add_link: {link['name']}")
+
+        elif action == "add_demand":
+            demand = mod.get("demand")
+            if not isinstance(demand, dict):
+                raise ValueError("add_demand には demand（orig, dest, t_start, t_end, flow）が必要です")
+            sc["demands"].append(demand)
+            applied.append(f"add_demand: {demand.get('orig')}→{demand.get('dest')}")
+
+        elif action == "remove_links":
+            idxs = set(_mod_match_indices(sc["links"], mod, "リンク"))
+            sc["links"] = [l for i, l in enumerate(sc["links"]) if i not in idxs]
+            applied.append(f"remove_links: {len(idxs)} 本を削除")
+
+        elif action == "remove_nodes":
+            idxs = set(_mod_match_indices(sc["nodes"], mod, "ノード"))
+            names = {sc["nodes"][i]["name"] for i in idxs}
+            sc["nodes"] = [n for i, n in enumerate(sc["nodes"]) if i not in idxs]
+            n_links_before = len(sc["links"]); n_dem_before = len(sc["demands"])
+            sc["links"] = [l for l in sc["links"] if l.get("start") not in names and l.get("end") not in names]
+            sc["demands"] = [d for d in sc["demands"] if d.get("orig") not in names and d.get("dest") not in names]
+            applied.append(
+                f"remove_nodes: {len(idxs)} 個を削除（接続リンク {n_links_before - len(sc['links'])} 本、"
+                f"需要 {n_dem_before - len(sc['demands'])} 件も削除）")
+
+        elif action == "remove_demands":
+            orig, dest = mod.get("orig"), mod.get("dest")
+            if orig is None and dest is None and not mod.get("all"):
+                raise ValueError("remove_demands には orig / dest / all のいずれかが必要です")
+            before = len(sc["demands"])
+            sc["demands"] = [d for d in sc["demands"]
+                             if not ((orig is None or d.get("orig") == orig)
+                                     and (dest is None or d.get("dest") == dest))] \
+                if not mod.get("all") else []
+            applied.append(f"remove_demands: {before - len(sc['demands'])} 件を削除")
+
+        elif action == "set_tmax":
+            sc["tmax"] = int(mod.get("tmax", sc.get("tmax", 3600)))
+            applied.append(f"set_tmax: {sc['tmax']}s")
+
+        else:
+            raise ValueError(
+                f"未対応の action: {action}（対応: update_links / update_nodes / update_demands / "
+                "add_node / add_link / add_demand / remove_links / remove_nodes / remove_demands / set_tmax）")
+
+    return sc, applied
+
+
+async def _handle_rerun_simulation(fn_args: dict, body) -> tuple[str, str | None, bool]:
+    """rerun_simulation ツールの共通ハンドラ（stream / sync 両系統から使用）。
+
+    戻り値: (tool_result content, 新 sim_id または None, is_error)
+    """
+    base_id = str(fn_args.get("base_sim_id", "")).strip()
+    if base_id not in results_store:
+        known = list(results_store.keys())[-5:]
+        return (f"base_sim_id '{base_id}' が見つかりません。有効な sim_id: {known}", None, True)
+    base = results_store[base_id]
+    base_scenario = base.get("_scenario")
+    if not base_scenario:
+        return (f"sim_id '{base_id}' にはシナリオが保存されていません。", None, True)
+
+    try:
+        mods = fn_args.get("modifications") or []
+        scenario, applied = _apply_modifications(base_scenario, mods)
+        if fn_args.get("tmax"):
+            scenario["tmax"] = int(fn_args["tmax"])
+            applied.append(f"tmax={scenario['tmax']}s")
+        if fn_args.get("name"):
+            scenario["name"] = str(fn_args["name"])
+        si = SimulationInput(**scenario)
+        _validate_scenario_size(si)
+        result = await _run_uxsim_async(si)
+
+        # OSM 由来の道路形状（曲線座標）を名前一致で引き継ぐ
+        base_geom = {}
+        for f in (base.get("geojson") or {}).get("features", []):
+            coords = f.get("geometry", {}).get("coordinates")
+            if coords and len(coords) > 2:
+                base_geom[f["properties"]["name"]] = coords
+        if base_geom:
+            _apply_link_geometries(result, base_geom)
+
+        new_id = str(uuid.uuid4())[:8]
+        _store_sim(new_id, result, {
+            "type": "llm",
+            "llm_backend": "claude",
+            "tool": "rerun_simulation",
+            "base_sim_id": base_id,
+            "llm_user_message": _last_user_message_text(body),
+        })
+        content = json.dumps({
+            **result["stats"],
+            "sim_id": new_id,
+            "base_sim_id": base_id,
+            "applied": applied,
+            "network": {"nodes": len(scenario["nodes"]), "links": len(scenario["links"]),
+                        "demands": len(scenario["demands"])},
+        }, ensure_ascii=False)
+        return (content, new_id, False)
+    except HTTPException as e:
+        return (f"再実行エラー: {e.detail}", None, True)
+    except (ValueError, TypeError) as e:
+        return (f"modifications が不正です: {e}\n修正して再度 rerun_simulation を呼んでください。", None, True)
+    except Exception as e:
+        return (f"再実行エラー: {e.__class__.__name__}: {e}", None, True)
 
 
 # ── Claude ツール定義 ──
@@ -1369,6 +1627,41 @@ CLAUDE_TOOLS = [
                 },
             },
             "required": ["nodes", "links", "demands"],
+        },
+    },
+    {
+        "name": "rerun_simulation",
+        "description": (
+            "保存済みシミュレーション（base_sim_id）のネットワークを起点に、"
+            "小さな修正（modifications）を適用して再実行する。"
+            "OSM 取込やファイルアップロードで作られた既存ネットワークの調整・比較は"
+            "【必ず】このツールを使うこと。ネットワーク全体を run_simulation で"
+            "再送してはいけない（大規模ネットワークではサイズ超過になる）。"
+            "modifications の例:\n"
+            '・リンク容量変更: {"action":"update_links","names":["r1"],"set":{"capacity":0.5}}\n'
+            '・全リンク速度変更: {"action":"update_links","all":true,"set":{"free_flow_speed":15}}\n'
+            '・部分一致: {"action":"update_links","name_contains":"link_1","set":{"number_of_lanes":2}}\n'
+            '・信号設置: {"action":"update_nodes","names":["I1"],"set":{"signal":[60,60]}}\n'
+            '・需要 1.5 倍: {"action":"update_demands","all":true,"scale_flow":1.5}\n'
+            '・需要追加: {"action":"add_demand","demand":{"orig":"A","dest":"B","t_start":0,"t_end":1800,"flow":0.3}}\n'
+            '・リンク削除（通行止め）: {"action":"remove_links","names":["r2"]}\n'
+            '・ノード/リンク追加: {"action":"add_node","node":{...}} / {"action":"add_link","link":{...}}\n'
+            '・時間変更: {"action":"set_tmax","tmax":7200}\n'
+            "modifications: [] で無修正の再実行（tmax だけ変える等）も可能。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "base_sim_id": {"type": "string", "description": "起点となるシミュレーション ID"},
+                "modifications": {
+                    "type": "array",
+                    "description": "修正命令の配列（description の例を参照）。各要素は action フィールドを持つ",
+                    "items": {"type": "object"},
+                },
+                "tmax": {"type": "integer", "description": "シミュレーション時間の上書き（秒、省略可）"},
+                "name": {"type": "string", "description": "新しいシミュレーション名（省略可）"},
+            },
+            "required": ["base_sim_id", "modifications"],
         },
     },
     {
@@ -1525,7 +1818,17 @@ async def _chat_claude_stream(body: ChatInput):
     if results_store:
         last_sim_id = list(results_store.keys())[-1]
         link_names = [f["properties"]["name"] for f in results_store[last_sim_id].get("geojson", {}).get("features", [])]
-        system += f"\n\n【現在のコンテキスト】\n直前のシミュレーションID: {last_sim_id}\nリンク名一覧: {', '.join(link_names[:20])}"
+        _sc = results_store[last_sim_id].get("_scenario") or {}
+        _sizes = (f"{len(_sc.get('nodes') or [])} ノード / {len(_sc.get('links') or [])} リンク / "
+                  f"{len(_sc.get('demands') or [])} 需要, tmax={_sc.get('tmax', '?')}s")
+        _more = f"（他 {len(link_names) - 20} 本）" if len(link_names) > 20 else ""
+        system += f"""
+
+【現在のコンテキスト】
+直前のシミュレーションID: {last_sim_id}
+ネットワーク規模: {_sizes}
+リンク名の例: {', '.join(link_names[:20])}{_more}
+この結果への修正・再実行・比較は rerun_simulation(base_sim_id="{last_sim_id}") を使うこと。"""
 
     chart_pattern = re.compile(r'```\s*chart\w*\s*\n?(.*?)\n?\s*```', re.DOTALL | re.IGNORECASE)
 
@@ -1623,6 +1926,16 @@ async def _chat_claude_stream(body: ChatInput):
                             "content": f"シミュレーション実行エラー: {str(e)}\n入力を修正して再度 run_simulation を呼んでください。",
                             "is_error": True,
                         })
+
+                elif fn_name == "rerun_simulation":
+                    yield _sse_event({"type": "progress", "message": "Step 2/3: 修正を適用して再実行中..."})
+                    content, new_sim_id, is_err = await _handle_rerun_simulation(fn_args, body)
+                    if new_sim_id:
+                        sim_id = new_sim_id
+                    tr = {"type": "tool_result", "tool_use_id": tool_block.id, "content": content}
+                    if is_err:
+                        tr["is_error"] = True
+                    tool_results.append(tr)
 
                 elif fn_name == "import_osm_network":
                     place = fn_args.get("place", "")
@@ -1806,6 +2119,15 @@ async def _chat_claude_stream(body: ChatInput):
                                 "content": f"シミュレーション実行エラー: {str(e)}",
                                 "is_error": True,
                             })
+                    elif tb.name == "rerun_simulation":
+                        yield _sse_event({"type": "progress", "message": "修正を適用して再実行中..."})
+                        content, new_sim_id, is_err = await _handle_rerun_simulation(tb.input, body)
+                        if new_sim_id:
+                            sim_id = new_sim_id
+                        tr = {"type": "tool_result", "tool_use_id": tb.id, "content": content}
+                        if is_err:
+                            tr["is_error"] = True
+                        next_tool_results.append(tr)
                     elif tb.name == "import_osm_network":
                         _place = tb.input.get("place", "")
                         _dist = tb.input.get("distance_m", 500)
@@ -1943,7 +2265,17 @@ async def _chat_claude(body: ChatInput):
     if results_store:
         last_sim_id = list(results_store.keys())[-1]
         link_names = [f["properties"]["name"] for f in results_store[last_sim_id].get("geojson", {}).get("features", [])]
-        system += f"\n\n【現在のコンテキスト】\n直前のシミュレーションID: {last_sim_id}\nリンク名一覧: {', '.join(link_names[:20])}"
+        _sc = results_store[last_sim_id].get("_scenario") or {}
+        _sizes = (f"{len(_sc.get('nodes') or [])} ノード / {len(_sc.get('links') or [])} リンク / "
+                  f"{len(_sc.get('demands') or [])} 需要, tmax={_sc.get('tmax', '?')}s")
+        _more = f"（他 {len(link_names) - 20} 本）" if len(link_names) > 20 else ""
+        system += f"""
+
+【現在のコンテキスト】
+直前のシミュレーションID: {last_sim_id}
+ネットワーク規模: {_sizes}
+リンク名の例: {', '.join(link_names[:20])}{_more}
+この結果への修正・再実行・比較は rerun_simulation(base_sim_id="{last_sim_id}") を使うこと。"""
 
     try:
         # 1回目：ツール付きリクエスト
@@ -2014,6 +2346,15 @@ async def _chat_claude(body: ChatInput):
                         "content": f"シミュレーション実行エラー: {str(e)}\n入力を修正して再度 run_simulation を呼んでください。",
                         "is_error": True,
                     })
+
+            elif fn_name == "rerun_simulation":
+                content, new_sim_id, is_err = await _handle_rerun_simulation(fn_args, body)
+                if new_sim_id:
+                    sim_id = new_sim_id
+                tr = {"type": "tool_result", "tool_use_id": tool_block.id, "content": content}
+                if is_err:
+                    tr["is_error"] = True
+                tool_results.append(tr)
 
             elif fn_name == "import_osm_network":
                 try:
@@ -2141,6 +2482,14 @@ async def _chat_claude(body: ChatInput):
                             "content": f"シミュレーション実行エラー: {str(e)}\n入力を修正して再度 run_simulation を呼んでください。",
                             "is_error": True,
                         })
+                elif tb.name == "rerun_simulation":
+                    content, new_sim_id, is_err = await _handle_rerun_simulation(tb.input, body)
+                    if new_sim_id:
+                        sim_id = new_sim_id
+                    tr = {"type": "tool_result", "tool_use_id": tb.id, "content": content}
+                    if is_err:
+                        tr["is_error"] = True
+                    next_tool_results.append(tr)
                 elif tb.name == "import_osm_network":
                     try:
                         _place = tb.input.get("place", "")
