@@ -565,6 +565,35 @@ class TestCSVParser:
         assert len(result["links"]) == 1
         assert len(result["demands"]) == 1
 
+    def test_node_csv_prefers_node_id_over_name(self):
+        """
+        [修正履歴] node_id（主キー）と name（表示ラベル、重複可）の両方を持つ
+        GMNS 風データで、name を識別子に選んで「ノード名が重複」エラーになった。
+        ID 系カラムを優先する。
+        """
+        csv = (
+            "node_id,name,x_coord,y_coord\n"
+            "1,東京高速道路-IN,0,0\n"
+            "2,東京高速道路-IN,500,0\n"
+            "3,東京高速道路-OUT,1000,0\n"
+        )
+        result = _parse_csv_scenario(csv)
+        assert result["format"] == "node_csv"
+        names = [n["name"] for n in result["nodes"]]
+        assert names == ["1", "2", "3"], f"node_id が識別子になるべき: {names}"
+
+    def test_link_csv_prefers_link_id_over_name(self):
+        csv = (
+            "link_id,name,from_node_id,to_node_id,length\n"
+            "10,環状線,1,2,800\n"
+            "11,環状線,2,3,800\n"
+        )
+        result = _parse_csv_scenario(csv)
+        assert result["format"] == "link_csv"
+        names = [l["name"] for l in result["links"]]
+        assert names == ["10", "11"], f"link_id が識別子になるべき: {names}"
+        assert result["links"][0]["start"] == "1"
+
     def test_risu_csv_empty_cells(self):
         """
         空セルが含まれる RISU CSV でエラーにならない。

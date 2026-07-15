@@ -2851,7 +2851,11 @@ def _parse_csv_scenario(content: str) -> dict:
 
     # ============ ノード CSV 判定 ============
     # name/id + x/y 系カラムがあるか
-    NODE_NAME_COLS = ["name", "node_name", "node_id", "id", "node"]
+    # 識別子カラムの優先順位: ID 系 > name 系。
+    # GMNS 等では node_id が主キーで name は表示ラベル（重複可）のため、
+    # name を優先すると「ノード名が重複」エラーになる。
+    # （リンクの from_node_id / to_node_id も node_id を参照するので整合する）
+    NODE_NAME_COLS = ["node_id", "id", "name", "node_name", "node"]
     NODE_X_COLS = ["x", "x_coord", "lon", "longitude", "lng", "経度"]
     NODE_Y_COLS = ["y", "y_coord", "lat", "latitude", "緯度"]
 
@@ -2883,7 +2887,8 @@ def _parse_csv_scenario(content: str) -> dict:
     col_le = _find_col(raw_fields, LINK_END_COLS)
 
     if col_ls and col_le:
-        col_lname = _find_col(raw_fields, ["name", "link_name", "link_id", "id", "link"])
+        # 識別子は ID 系を優先（link_id が主キー、name はラベルの可能性がある）
+        col_lname = _find_col(raw_fields, ["link_id", "id", "name", "link_name", "link"])
         col_length = _find_col(raw_fields, ["length", "distance", "dist", "長さ"])
         col_ffs = _find_col(raw_fields, ["free_flow_speed", "speed", "free_speed",
                                           "speed_limit", "ffs", "制限速度", "速度"])
