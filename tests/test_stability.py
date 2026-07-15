@@ -442,6 +442,93 @@ class TestScenarioModifications:
             types.SimpleNamespace(messages=[])))
         assert is_err and new_id is None
 
+    def test_generate_demands_random(self):
+        """ノード名を知らなくてもサーバー側でランダム OD を生成できる"""
+        from server import _apply_modifications
+        sc, applied = _apply_modifications(self._base(), [
+            {"action": "generate_demands", "strategy": "random",
+             "n_pairs": 5, "flow_per_pair": 0.1, "seed": 42, "clear_existing": True},
+        ])
+        assert len(sc["demands"]) == 5
+        node_names = {n["name"] for n in sc["nodes"]}
+        for d in sc["demands"]:
+            assert d["orig"] in node_names and d["dest"] in node_names
+            assert d["orig"] != d["dest"]
+            assert d["flow"] == 0.1
+        # seed 固定で再現性がある
+        sc2, _ = _apply_modifications(self._base(), [
+            {"action": "generate_demands", "strategy": "random",
+             "n_pairs": 5, "flow_per_pair": 0.1, "seed": 42, "clear_existing": True},
+        ])
+        assert sc["demands"] == sc2["demands"]
+
+    def test_generate_demands_flow_total(self):
+        from server import _apply_modifications
+        sc, _ = _apply_modifications(self._base(), [
+            {"action": "generate_demands", "strategy": "random",
+             "n_pairs": 4, "flow_total": 1.0, "clear_existing": True},
+        ])
+        assert all(d["flow"] == 0.25 for d in sc["demands"])
+
+    def test_generate_demands_boundary(self):
+        from server import _apply_modifications
+        sc, _ = _apply_modifications(self._base(), [
+            {"action": "generate_demands", "strategy": "boundary", "clear_existing": True},
+        ])
+        assert len(sc["demands"]) >= 2  # 周縁ノード全ペア
+
+
+class TestNetworkInfo:
+    """get_network_info: LLM がネットワークを必要な分だけ照会するツール"""
+
+    @pytest.fixture(scope="class")
+    def sim_id(self):
+        scenario = SimulationInput(
+            name="info_test", tmax=600, deltan=5,
+            nodes=[{"name": f"n{i}", "x": i * 100, "y": 0} for i in range(80)],
+            links=[{"name": f"L{i}", "start": f"n{i}", "end": f"n{i+1}", "length": 100}
+                   for i in range(79)],
+            demands=[{"orig": "n0", "dest": "n79", "t_start": 0, "t_end": 300, "flow": 0.3}],
+        )
+        result = _run_uxsim(scenario)
+        results_store["info_test"] = result
+        return "info_test"
+
+    def test_summary(self, sim_id):
+        from server import _handle_get_network_info
+        content, is_err = _handle_get_network_info({"sim_id": sim_id})
+        assert not is_err
+        d = json.loads(content)
+        assert d["total"] == {"nodes": 80, "links": 79, "demands": 1}
+        assert d["bbox"]["x_max"] == 7900
+        assert len(d["sample_node_names"]) == 20
+
+    def test_nodes_paging_and_filter(self, sim_id):
+        from server import _handle_get_network_info
+        content, _ = _handle_get_network_info(
+            {"sim_id": sim_id, "include": "nodes", "limit": 10, "offset": 5})
+        d = json.loads(content)
+        assert len(d["nodes"]) == 10
+        assert d["nodes"][0]["name"] == "n5"
+        assert "note" in d  # 途中までの表示であることが明示される
+        content, _ = _handle_get_network_info(
+            {"sim_id": sim_id, "include": "nodes", "name_contains": "n7"})
+        d = json.loads(content)
+        # n7, n70..n79 の 11 件
+        assert d["matched"] == 11
+
+    def test_limit_cap(self, sim_id):
+        from server import _handle_get_network_info
+        content, _ = _handle_get_network_info(
+            {"sim_id": sim_id, "include": "nodes", "limit": 9999})
+        d = json.loads(content)
+        assert len(d["nodes"]) <= 200
+
+    def test_bad_sim_id(self):
+        from server import _handle_get_network_info
+        content, is_err = _handle_get_network_info({"sim_id": "nope"})
+        assert is_err
+
 
 # ============================================================
 # 2a. リンク容量テスト

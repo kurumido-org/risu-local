@@ -1058,6 +1058,14 @@ UXsim は交差点ノードに信号制御を設定できる。2 つのパラメ
 - run_simulation を使うのは「ゼロから新しいネットワークを設計する」ときだけ
 - シナリオ比較（容量変更前後など）も rerun_simulation を複数回呼べばよい。
   各実行の sim_id が返るので、get_simulation_data でそれぞれの結果を取得して比較する
+- ネットワークの中身（ノード名・リンク名・構造）が必要なときは get_network_info で照会する:
+  - まず include="summary" で規模・座標範囲・次数上位ノード・名前のサンプルを把握
+  - 特定の名前が必要なら include="nodes"/"links" + name_contains / limit / offset で絞り込む
+  - 全件を取得しようとしないこと（上限 200 件/回。要約と絞り込みで足りるはず）
+- 「ランダムに OD を作って」「需要を自動生成して」と言われたら、ノード名を調べる必要はない。
+  rerun_simulation の generate_demands アクションでサーバー側に生成させる:
+  {"action":"generate_demands","strategy":"random","n_pairs":10,"flow_per_pair":0.2,"clear_existing":true}
+  周縁ノード間の現実的な通過交通なら strategy="boundary" を使う
 
 【OSM（OpenStreetMap）連携】
 - ユーザーが実在の地名・場所・駅名・ランドマーク等を言及した場合、import_osm_network ツールを使う
@@ -1568,12 +1576,151 @@ def _apply_modifications(scenario: dict, mods: list[dict]) -> tuple[dict, list[s
             sc["tmax"] = int(mod.get("tmax", sc.get("tmax", 3600)))
             applied.append(f"set_tmax: {sc['tmax']}s")
 
+        elif action == "generate_demands":
+            # サーバー側で OD 需要を自動生成する。LLM がノード名を列挙する
+            # 必要がないため、大規模ネットワークでも「ランダムに OD を生成」の
+            # ような指示に対応できる。
+            import random as _random
+            strategy = mod.get("strategy", "random")
+            if len(sc["nodes"]) < 2:
+                raise ValueError("generate_demands にはノードが 2 つ以上必要です")
+            if mod.get("clear_existing"):
+                n_cleared = len(sc["demands"])
+                sc["demands"] = []
+            else:
+                n_cleared = None
+            tmax = int(sc.get("tmax", 3600))
+            t_start = float(mod.get("t_start", 0))
+            t_end = float(mod.get("t_end", tmax * 0.5))
+
+            if strategy == "boundary":
+                # ネットワーク周縁ノード全ペア（OSM インポートと同じロジック）
+                new_demands = _generate_osm_demands(sc["nodes"], sc["links"], tmax)
+                if mod.get("flow_per_pair") is not None:
+                    for d in new_demands:
+                        d["flow"] = float(mod["flow_per_pair"])
+                for d in new_demands:
+                    d["t_start"] = t_start
+                    d["t_end"] = t_end
+            elif strategy == "random":
+                n_pairs = max(1, int(mod.get("n_pairs", 10)))
+                if mod.get("flow_per_pair") is not None:
+                    flow = float(mod["flow_per_pair"])
+                elif mod.get("flow_total") is not None:
+                    flow = round(float(mod["flow_total"]) / n_pairs, 4)
+                else:
+                    flow = 0.2
+                rng = _random.Random(mod.get("seed"))
+                names = [n["name"] for n in sc["nodes"]]
+                new_demands = []
+                for _ in range(n_pairs):
+                    orig, dest = rng.sample(names, 2)
+                    new_demands.append({"orig": orig, "dest": dest,
+                                        "t_start": t_start, "t_end": t_end,
+                                        "flow": flow})
+            else:
+                raise ValueError(f"generate_demands の strategy は random / boundary（指定: {strategy}）")
+
+            sc["demands"].extend(new_demands)
+            msg = f"generate_demands({strategy}): {len(new_demands)} 件を生成"
+            if n_cleared is not None:
+                msg += f"（既存 {n_cleared} 件はクリア）"
+            applied.append(msg)
+
         else:
             raise ValueError(
                 f"未対応の action: {action}（対応: update_links / update_nodes / update_demands / "
-                "add_node / add_link / add_demand / remove_links / remove_nodes / remove_demands / set_tmax）")
+                "add_node / add_link / add_demand / remove_links / remove_nodes / remove_demands / "
+                "generate_demands / set_tmax）")
 
     return sc, applied
+
+
+def _handle_get_network_info(fn_args: dict) -> tuple[str, bool]:
+    """get_network_info ツールの共通ハンドラ。(content, is_error) を返す。
+
+    LLM がネットワークの中身（ノード名・リンク名・構造）を必要な分だけ
+    照会するためのツール。常に上限つきで返し、コンテキストを溢れさせない。
+    """
+    sim_id = str(fn_args.get("sim_id", "")).strip()
+    if sim_id not in results_store:
+        known = list(results_store.keys())[-5:]
+        return (f"sim_id '{sim_id}' が見つかりません。有効な sim_id: {known}", True)
+    sc = results_store[sim_id].get("_scenario") or {}
+    nodes = sc.get("nodes") or []
+    links = sc.get("links") or []
+    demands = sc.get("demands") or []
+
+    include = str(fn_args.get("include", "summary")).lower()
+    limit = max(1, min(int(fn_args.get("limit", 50) or 50), 200))
+    offset = max(0, int(fn_args.get("offset", 0) or 0))
+    name_contains = fn_args.get("name_contains")
+
+    # 次数（ノードの接続本数）
+    degree: dict[str, int] = {}
+    for lk in links:
+        degree[lk["start"]] = degree.get(lk["start"], 0) + 1
+        degree[lk["end"]] = degree.get(lk["end"], 0) + 1
+
+    out: dict = {"sim_id": sim_id,
+                 "total": {"nodes": len(nodes), "links": len(links), "demands": len(demands)},
+                 "tmax": sc.get("tmax")}
+
+    if include == "summary":
+        xs = [n["x"] for n in nodes]; ys = [n["y"] for n in nodes]
+        lengths = [lk["length"] for lk in links]
+        top_deg = sorted(nodes, key=lambda n: -degree.get(n["name"], 0))[:10]
+        signal_nodes = [n["name"] for n in nodes if n.get("signal")]
+        out["bbox"] = ({"x_min": min(xs), "x_max": max(xs),
+                        "y_min": min(ys), "y_max": max(ys)} if xs else None)
+        out["link_length"] = ({"min": round(min(lengths), 1), "max": round(max(lengths), 1),
+                               "avg": round(sum(lengths) / len(lengths), 1)} if lengths else None)
+        out["top_degree_nodes"] = [
+            {"name": n["name"], "degree": degree.get(n["name"], 0)} for n in top_deg]
+        out["signal_nodes"] = signal_nodes[:20]
+        out["sample_node_names"] = [n["name"] for n in nodes[:20]]
+        out["sample_link_names"] = [lk["name"] for lk in links[:20]]
+        out["hint"] = ("詳細は include='nodes'/'links'/'demands'（limit/offset/name_contains 指定可）。"
+                       "ランダム OD は rerun_simulation の generate_demands アクションが使える。")
+    elif include == "nodes":
+        items = nodes
+        if name_contains:
+            items = [n for n in items if str(name_contains) in str(n["name"])]
+        out["matched"] = len(items)
+        out["nodes"] = [
+            {"name": n["name"], "x": n["x"], "y": n["y"],
+             "degree": degree.get(n["name"], 0),
+             **({"signal": n["signal"]} if n.get("signal") else {}),
+             **({"flow_capacity": n["flow_capacity"]} if n.get("flow_capacity") is not None else {})}
+            for n in items[offset:offset + limit]
+        ]
+        if len(items) > offset + limit:
+            out["note"] = f"{offset + limit} 件目まで表示（全 {len(items)} 件）。offset で続きを取得"
+    elif include == "links":
+        items = links
+        if name_contains:
+            items = [l for l in items if str(name_contains) in str(l["name"])]
+        out["matched"] = len(items)
+        out["links"] = [
+            {k: v for k, v in {
+                "name": l["name"], "start": l["start"], "end": l["end"],
+                "length": l["length"], "free_flow_speed": l.get("free_flow_speed"),
+                "number_of_lanes": l.get("number_of_lanes"),
+                "capacity": l.get("capacity"), "signal_group": l.get("signal_group"),
+            }.items() if v is not None}
+            for l in items[offset:offset + limit]
+        ]
+        if len(items) > offset + limit:
+            out["note"] = f"{offset + limit} 件目まで表示（全 {len(items)} 件）。offset で続きを取得"
+    elif include == "demands":
+        out["matched"] = len(demands)
+        out["demands"] = demands[offset:offset + limit]
+        if len(demands) > offset + limit:
+            out["note"] = f"{offset + limit} 件目まで表示（全 {len(demands)} 件）"
+    else:
+        return (f"include は summary / nodes / links / demands のいずれか（指定: {include}）", True)
+
+    return (json.dumps(out, ensure_ascii=False), False)
 
 
 async def _handle_rerun_simulation(fn_args: dict, body) -> tuple[str, str | None, bool]:
@@ -1726,6 +1873,10 @@ CLAUDE_TOOLS = [
             '・リンク削除（通行止め）: {"action":"remove_links","names":["r2"]}\n'
             '・ノード/リンク追加: {"action":"add_node","node":{...}} / {"action":"add_link","link":{...}}\n'
             '・時間変更: {"action":"set_tmax","tmax":7200}\n'
+            '・OD 自動生成: {"action":"generate_demands","strategy":"random","n_pairs":10,'
+            '"flow_per_pair":0.2,"clear_existing":true}\n'
+            '  （strategy: random=ランダムなノードペア / boundary=ネットワーク周縁の全ペア。'
+            'seed で再現可、flow_total で合計流率指定も可。ノード名を知らなくても使える）\n'
             "modifications: [] で無修正の再実行（tmax だけ変える等）も可能。"
         ),
         "input_schema": {
@@ -1741,6 +1892,30 @@ CLAUDE_TOOLS = [
                 "name": {"type": "string", "description": "新しいシミュレーション名（省略可）"},
             },
             "required": ["base_sim_id", "modifications"],
+        },
+    },
+    {
+        "name": "get_network_info",
+        "description": (
+            "保存済みシミュレーションのネットワーク構造（ノード・リンク・需要）を照会する。"
+            "大規模ネットワークはチャットに全体が渡らないため、ノード名やリンク名が"
+            "必要な操作（OD 設定・信号設置・特定リンクの修正など）の前に、"
+            "このツールで必要な分だけ調べる。"
+            "include='summary' で規模・座標範囲・次数上位ノード・名前のサンプルを取得。"
+            "include='nodes'/'links'/'demands' で一覧（limit/offset でページング、"
+            "name_contains で絞り込み）。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sim_id": {"type": "string", "description": "シミュレーション ID"},
+                "include": {"type": "string", "enum": ["summary", "nodes", "links", "demands"],
+                            "description": "取得内容。デフォルト summary"},
+                "name_contains": {"type": "string", "description": "名前の部分一致フィルタ（nodes/links 用）"},
+                "limit": {"type": "integer", "description": "最大件数（デフォルト 50、上限 200）"},
+                "offset": {"type": "integer", "description": "ページングオフセット"},
+            },
+            "required": ["sim_id"],
         },
     },
     {
@@ -2015,6 +2190,13 @@ async def _chat_claude_stream(body: ChatInput):
                     if is_err:
                         tr["is_error"] = True
                     tool_results.append(tr)
+                elif fn_name == "get_network_info":
+                    yield _sse_event({"type": "progress", "message": "ネットワーク情報を照会中..."})
+                    content, is_err = _handle_get_network_info(fn_args)
+                    tr = {"type": "tool_result", "tool_use_id": tool_block.id, "content": content}
+                    if is_err:
+                        tr["is_error"] = True
+                    tool_results.append(tr)
 
                 elif fn_name == "import_osm_network":
                     place = fn_args.get("place", "")
@@ -2203,6 +2385,12 @@ async def _chat_claude_stream(body: ChatInput):
                         content, new_sim_id, is_err = await _handle_rerun_simulation(tb.input, body)
                         if new_sim_id:
                             sim_id = new_sim_id
+                        tr = {"type": "tool_result", "tool_use_id": tb.id, "content": content}
+                        if is_err:
+                            tr["is_error"] = True
+                        next_tool_results.append(tr)
+                    elif tb.name == "get_network_info":
+                        content, is_err = _handle_get_network_info(tb.input)
                         tr = {"type": "tool_result", "tool_use_id": tb.id, "content": content}
                         if is_err:
                             tr["is_error"] = True
@@ -2434,6 +2622,12 @@ async def _chat_claude(body: ChatInput):
                 if is_err:
                     tr["is_error"] = True
                 tool_results.append(tr)
+            elif fn_name == "get_network_info":
+                content, is_err = _handle_get_network_info(fn_args)
+                tr = {"type": "tool_result", "tool_use_id": tool_block.id, "content": content}
+                if is_err:
+                    tr["is_error"] = True
+                tool_results.append(tr)
 
             elif fn_name == "import_osm_network":
                 try:
@@ -2565,6 +2759,12 @@ async def _chat_claude(body: ChatInput):
                     content, new_sim_id, is_err = await _handle_rerun_simulation(tb.input, body)
                     if new_sim_id:
                         sim_id = new_sim_id
+                    tr = {"type": "tool_result", "tool_use_id": tb.id, "content": content}
+                    if is_err:
+                        tr["is_error"] = True
+                    next_tool_results.append(tr)
+                elif tb.name == "get_network_info":
+                    content, is_err = _handle_get_network_info(tb.input)
                     tr = {"type": "tool_result", "tool_use_id": tb.id, "content": content}
                     if is_err:
                         tr["is_error"] = True
