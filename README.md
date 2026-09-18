@@ -1,5 +1,9 @@
 # RISU — Real-time Interactive Simulator for Urban mobility
 
+[![CI](https://github.com/kurumido-org/risu-local/actions/workflows/ci.yml/badge.svg)](https://github.com/kurumido-org/risu-local/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%20--%203.13-blue.svg)](https://www.python.org/)
+
 交通流シミュレーター [UXsim](https://github.com/toruseo/UXsim) を，ブラウザ上で
 LLM と対話しながら操作できるローカルアプリケーションです．
 
@@ -20,9 +24,9 @@ LLM と対話しながら操作できるローカルアプリケーションで�
 （LLM に `claude` バックエンドを選んだ場合のみ，ご自身の API キーで Anthropic API を呼びます）．
 
 > **v0.1.0 — ベータ公開です．**
-> 動作を確認しているのは **Windows 11 / Python 3.13 / Chrome** の組み合わせだけです．
-> Linux や他の Python では，まだ誰も動かしていません（[詳細](#1-動作環境)）．
-> うまくいった / いかなかったのどちらでも，
+> テストは CI で Windows・Ubuntu × Python 3.10〜3.13 を通っていますが，
+> **ブラウザ UI を実際に触って確認したのは Windows 11 / Chrome だけ**です（[詳細](#1-動作環境)）．
+> 他の環境で使われた方は，うまくいった / いかなかったのどちらでも
 > [Issue](../../issues) で教えていただけると助かります．
 
 > **English**: RISU is a browser-based chat interface for the mesoscopic traffic
@@ -55,35 +59,27 @@ LLM と対話しながら操作できるローカルアプリケーションで�
 
 | 項目 | 要件 |
 |---|---|
-| OS | **Windows 11**（推奨・検証済み）．Windows 10 と Linux は未検証，macOS はサポート対象外 |
-| Python | **3.10 以上**（開発・検証は 3.13） |
+| OS | **Windows**（推奨）/ **Linux**．どちらも CI でテストが通っています．macOS はサポート対象外 |
+| Python | **3.10 / 3.11 / 3.12 / 3.13**（すべて CI で検証） |
 | ブラウザ | **Chrome**（検証済み）．Edge / Firefox / Safari も動作する想定 |
 | メモリ | 4GB 以上．大規模ネットワーク（5,000 ノード級）を扱うなら 8GB 以上を推奨 |
 | ネットワーク | 初回の `pip install` 時．OSM 取込と `claude` バックエンドを使う場合は実行時にも必要 |
 
 <details>
-<summary><b>Linux / macOS の状況（正確なところ）</b></summary>
-
-開発・検証はすべて **Windows 11 / Python 3.13.5** で行っています．
-他の環境について正直に書くと，次の状態です．
+<summary><b>どこまで検証されているか（正確なところ）</b></summary>
 
 | 環境 | 状況 |
 |---|---|
-| Windows 11 / Python 3.13 | **検証済み**．セットアップから全機能まで実機で確認 |
-| Windows 10 | 未検証．問題が出る要素は思い当たりません |
-| Python 3.10 〜 3.12 | 未検証．CI の設定には含まれています |
-| Linux | **未検証**．動作する見込みは高いが，誰も動かしていない |
+| Windows 11 / Python 3.13 / Chrome | **全機能を実機で確認**．セットアップから UI 操作まで |
+| Ubuntu / Windows × Python 3.10〜3.13 | **CI でテスト 136 件が通過**．サーバー側の動作は確認済み |
+| ブラウザ UI（Chrome 以外 / Linux 上） | **未確認**．CI にブラウザテストは含まれていません |
 | macOS | **サポート対象外**．検証の予定もありません |
 
-Linux で動く見込みが高いと考える根拠は，コードに OS 依存が無いことです:
+つまり **サーバー側は複数環境で検証済み，ブラウザ側は Windows / Chrome のみ**という状態です．
+UI は素の HTML + Canvas + Chart.js で，OS 固有の API は使っていないので問題は出にくいはずですが，
+実際に確かめたわけではありません．
 
-- `sys.platform` / `os.name` による分岐が 1 箇所も無い
-- 絶対パスの直書きが無く，パス操作は `pathlib` に統一されている
-- ファイル入出力はすべて `encoding="utf-8"` を明示している
-- OS 固有の API・外部コマンドを呼んでいない
-
-とはいえ，これは「壊れる理由が見当たらない」というだけで，**動作を保証するものではありません**．
-Linux で試された方は，動いた・動かなかったのいずれでも Issue で教えていただけると助かります．
+Linux や他のブラウザで使われた方は，結果がどちらでも Issue で教えていただけると助かります．
 
 </details>
 
@@ -102,7 +98,7 @@ LLM バックエンドは 3 つから選べます．**API キーが無くても�
 ### 2.1 リポジトリを取得
 
 ```bash
-git clone <このリポジトリの URL>
+git clone https://github.com/kurumido-org/risu-local.git
 cd risu-local
 ```
 
@@ -1005,16 +1001,17 @@ CI（GitHub Actions）は次の 4 ジョブを定義しています:
 | `licenses` | 新しいコピーレフト依存が入っていないかの検査 |
 | `standalone` | uxsim だけの環境で `scripts/run_scenario.py` が動くかの検証 |
 
-> **注**: CI は設定済みですが，**まだ一度も実行されていません**（リモート未設定のため）．
-> 最初の push で Linux / Python 3.10〜3.12 の動作が初めて確認されることになります．
-> それまでは，動作が確かめられているのは Windows / Python 3.13 のみです．
+`schedule` で毎週も走ります．RISU は uxsim の内部 API に依存した高速化を持つため
+（[CLAUDE.md §3.6](CLAUDE.md#36-後処理に車両ごとの-python-ループを持たない)），
+新しい uxsim が出たときに push が無くても気づけるようにしてあります．
 
 開発の指針・設計上の不変条件は [CLAUDE.md](CLAUDE.md) にまとめてあります．
 特に**性能とトークン効率に関する前提**は，変更前に目を通してください．
 
 不具合の報告やご質問は [Issue](../../issues) へお願いします．
-**とくに「動いた／動かなかった」の報告が助かります**（Windows / Python 3.13 以外は
-まだ実績がありません）．報告の書き方は [CONTRIBUTING.md](CONTRIBUTING.md) にあります．
+**とくにブラウザ UI を Linux や Chrome 以外で使った報告が助かります**
+（そこだけ CI では確認できないためです）．
+報告の書き方は [CONTRIBUTING.md](CONTRIBUTING.md) にあります．
 
 ---
 
