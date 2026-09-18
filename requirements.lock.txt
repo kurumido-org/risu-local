@@ -1,0 +1,17 @@
+# 動作確認済みの正確なバージョン（2026-09-17 時点，Windows 11 / Python 3.12）．
+# 再現性が必要なとき（論文の追試・バグ報告の再現）はこちらを使う:
+#     pip install -r requirements.lock.txt
+# 通常のインストールは requirements.txt（範囲指定）で構わない．
+anthropic==0.116.0
+fastapi==0.139.0
+httpx==0.28.1
+mcp==1.28.1
+numpy==2.5.1
+orjson==3.11.9
+osmnx==2.1.0
+pydantic==2.13.4
+python-dotenv==1.2.2
+python-multipart==0.0.32
+uvicorn==0.51.0
+uxsim==1.14.0b7
+zstandard==0.25.0

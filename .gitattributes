@@ -1,0 +1,36 @@
+# 改行コードの扱い．
+# 開発は Windows だが，CI は Ubuntu でも動く．揃えておかないと OS をまたいだ
+# とたんに全行差分になるため，リポジトリ内は LF に正規化する．
+
+# 既定: テキストは自動判定．リポジトリ内は LF
+* text=auto
+
+# 明示的にテキスト扱い（改行は LF に正規化）
+*.py     text eol=lf
+*.js     text eol=lf
+*.css    text eol=lf
+*.html   text eol=lf
+*.json   text eol=lf
+*.toml   text eol=lf
+*.cfg    text eol=lf
+*.ini    text eol=lf
+*.txt    text eol=lf
+*.md     text eol=lf
+*.csv    text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.svg    text eol=lf
+.env.example  text eol=lf
+.gitignore    text eol=lf
+
+# バイナリ（差分・改行変換の対象外）
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.woff   binary
+*.woff2  binary
+
+# 同梱した第三者ライブラリ．diff の対象にせず，言語統計からも除外する
+static/vendor/** linguist-vendored

@@ -1,0 +1,5 @@
+# 開発・CI 用．実行時依存は requirements.txt を参照．
+-r requirements.txt
+
+pytest>=8.0
+ruff>=0.6

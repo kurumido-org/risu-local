@@ -1,0 +1,74 @@
+[project]
+name = "risu"
+version = "0.1.0"
+description = "Real-time Interactive Simulator for Urban mobility — 交通流シミュレーター UXsim をブラウザ上で LLM と対話しながら操作する"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Kurumido LLC" }]
+dependencies = [
+    "uxsim>=1.11.0,<2",
+    "fastapi>=0.115.0,<1",
+    "uvicorn[standard]>=0.30.0,<1",
+    "orjson>=3.9.0,<4",
+    # /results の圧縮（任意．無ければ gzip にフォールバックする）
+    "zstandard>=0.22,<1",
+    "python-multipart>=0.0.9,<0.1",
+    "python-dotenv>=1.0.0,<2",
+    "anthropic>=0.40.0,<1",
+    "httpx>=0.27.0,<1",
+    "mcp>=1.0.0,<2",
+    # OpenStreetMap 取込．geopandas / shapely（GDAL・GEOS 系のネイティブ依存）を
+    # 引くのでインストールが重い．server.py は遅延 import しているので，
+    # 入っていなくてもサーバーは起動し import_osm_network 以外は動く．
+    "osmnx>=2.0.0,<3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+# RISU を介さず素の UXsim でシナリオを実行する CLI
+risu-run-scenario = "scripts.run_scenario:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    # 依存側の非推奨警告．RISU のコードでは対処できないので黙らせる．
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+exclude = [
+    ".venv",
+    "cache",
+    # 図版・ポスター生成の使い捨てスクリプト群．成果物を一度作るためのもので
+    # 保守対象ではないため lint から外す．
+    "scripts/poster",
+]
+
+[tool.ruff.lint]
+# 段階的に厳しくする前提の最小セット．
+#   E,W  pycodestyle / F  pyflakes（未定義名・未使用 import などの実バグ）
+#   I    import 順 / UP  古い書き方 / B  bugbear（よくある落とし穴）
+select = ["E", "W", "F", "I", "UP", "B"]
+ignore = [
+    "E501",  # 行長: line-length は目安．日本語コメントが多く機械的な折返しは可読性を下げる
+    "E741",  # 曖昧な変数名 l: 数式まわりで慣用的に使っている
+    "B008",  # 引数デフォルトでの関数呼び出し: FastAPI の Depends/Form/File がこの形
+    # ── 以下はこのコードベースの既存スタイルに合わせて無効化している ──
+    "E701",  # `if x: return` の 1 行化．数値処理まわりで意図的に使っている
+    "E702",  # `a = 1; b = 2` のセミコロン連結．同上
+    "E402",  # import がファイル冒頭にない: 起動順序の都合（.env 読込後，遅延 import）
+    "B904",  # except 内の `raise ... from e` 省略．内部例外をユーザーに見せない意図．
+             # 例外連鎖はデバッグに有用なので，将来まとめて付ける候補（14 箇所）
+    "B905",  # `zip(..., strict=)` の省略．既存の zip は全て同長配列を前提にしている．
+             # strict=True への移行は不変条件を検証してから別途行う（5 箇所）
+]
+
+[tool.ruff.lint.per-file-ignores]
+# テストは import 順や体裁より「何を検証しているか」の並びを優先する
+"tests/*" = ["I001", "E402", "B007", "UP031"]

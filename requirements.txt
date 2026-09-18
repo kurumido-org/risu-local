@@ -1,12 +1,35 @@
-# uxsim 1.14 beta 以降は C++ バックエンド対応で 10 倍以上高速
-# （安定版 1.13 でも動作する。高速版: pip install --pre "uxsim>=1.14.0b7"）
-uxsim>=1.11.0
-fastapi>=0.115.0
-orjson>=3.9.0
-uvicorn[standard]>=0.30.0
-mcp>=1.0.0
-httpx>=0.27.0
-python-multipart>=0.0.9
-anthropic>=0.40.0
-osmnx>=2.0.0
-python-dotenv>=1.0.0
+# RISU の実行時依存．
+#
+# 上限（<N）を付けているのはメジャー更新での破壊を防ぐため．
+# 特に uxsim は内部 API（_cpp_world.build_all_vehicle_logs_flat_compact,
+# _LOG_STATE_MAP, _skip_log_on_terminate 等）に依存した高速化を入れているので，
+# 上げるときは必ず pytest tests/ を通すこと（CLAUDE.md の「パフォーマンス上の前提」参照）．
+#
+# 検証済みの組み合わせは requirements.lock.txt にある．
+
+# ── シミュレーション本体 ──────────────────────
+# 1.14 以降は C++ バックエンド対応で純 Python 比 10〜20 倍高速（安定版で入手可）．
+# 1.13 以前でも動作するが，その場合は純 Python 実装にフォールバックする．
+# 内部 API に依存した高速化があるため，上げるときは必ず pytest tests/ を通すこと．
+uxsim>=1.11.0,<2
+
+# ── API サーバー ──────────────────────────────
+fastapi>=0.115.0,<1
+uvicorn[standard]>=0.30.0,<1
+orjson>=3.9.0,<4
+# /results の圧縮．gzip lv1 と比べて転送量 1/3・圧縮 7 倍速（grid20 相当で 16.1→5.4MB, 0.47→0.07s）．
+# 未インストールでも動く（自動で gzip にフォールバックする）．
+zstandard>=0.22,<1
+python-multipart>=0.0.9,<0.1
+python-dotenv>=1.0.0,<2
+
+# ── LLM 連携 ──────────────────────────────────
+anthropic>=0.40.0,<1
+httpx>=0.27.0,<1          # ollama バックエンドと GMNS 取得に使用
+mcp>=1.0.0,<2             # MCP エンドポイント (GET /mcp)
+
+# ── 任意: OpenStreetMap 取込 ─────────────────
+# osmnx は geopandas / shapely（GDAL・GEOS 系のネイティブ依存）を引くため，
+# 環境によってはインストールに失敗する．RISU は遅延 import しており，
+# 入っていなくてもサーバーは起動し，import_osm_network 以外は全て動く．
+osmnx>=2.0.0,<3
