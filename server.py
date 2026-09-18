@@ -8,9 +8,11 @@ UXsim API + MCP Server
 
 import asyncio
 import csv
+import gzip
 import io
 import json
 import math
+import os
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -19,22 +21,23 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp.types import TextContent, Tool
 from pydantic import BaseModel, model_validator
 from starlette.requests import Request
-from starlette.routing import Route
+
+from uxsim_bridge import build_world
 
 # ──────────────────────────────────────────────
 # 設定
 # ──────────────────────────────────────────────
-import os
-from dotenv import load_dotenv
+# .env の読込は，以下の os.environ.get より必ず先に行うこと
 load_dotenv()
 
 # LLM バックエンド: "mock" / "claude" / "ollama"
@@ -64,15 +67,49 @@ except Exception:
 # ──────────────────────────────────────────────
 results_store: dict[str, Any] = {}
 executor = ThreadPoolExecutor(max_workers=4)
+# 結果ストアに保持する件数の上限．超えたら古いものから捨てる（frames の numpy 列と
+# gzip キャッシュで 1 件数十 MB になり得るため，無制限だとメモリ不足で落ちる）．
+MAX_RESULTS = int(os.getenv("RISU_MAX_RESULTS", "30"))
 
-# UXsim 実行タイムアウト（秒）。環境変数で上書き可能。
+# UXsim 実行タイムアウト（秒）．環境変数で上書き可能．
 UXSIM_TIMEOUT_SEC = int(os.getenv("RISU_UXSIM_TIMEOUT", "120"))
+
+# 待ち受けアドレス．**既定は 127.0.0.1（このマシンからのみ接続可）**．
+# RISU は認証を持たないので，0.0.0.0 で待ち受けると同一 LAN の誰でも
+#   - シミュレーションを実行できる（CPU を消費される）
+#   - 保存済みの結果を読める
+#   - /chat を叩いて **サーバー所有者の API キーで課金を発生させられる**
+# 別マシンから使いたい場合だけ RISU_HOST=0.0.0.0 を明示すること．
+RISU_HOST = os.getenv("RISU_HOST", "127.0.0.1")
+RISU_PORT = int(os.getenv("RISU_PORT", "8001"))
+# 開発時のオートリロード．既定は無効（利用者の環境ではプロセスが 2 つ起動し，
+# ファイル変更のたびに再起動してしまうため）．
+RISU_RELOAD = os.getenv("RISU_RELOAD", "").lower() in ("1", "true", "yes")
+
+# 可視化フレーム数の上限（時刻方向の間引き）
+MAX_FRAMES = int(os.getenv("RISU_MAX_FRAMES", "200"))
+# 可視化フレームの総車両点数の上限．超過時は車両 ID を等間隔にサンプリングして
+# 描画対象を減らす（0 で無効）．3,000,000 点 ≒ JSON 100MB / gzip 20MB が目安で，
+# これを超えるとブラウザ側の JSON.parse とメモリが破綻する．
+# リンク別速度 timeline と統計は間引き前の全点から計算するので影響を受けない．
+MAX_FRAME_POINTS = int(os.getenv("RISU_MAX_FRAME_POINTS", "3000000"))
+# /results の gzip レベル．level 1 は level 5 の約 3 倍速で，サイズ増は 1 割程度．
+RESULTS_GZIP_LEVEL = int(os.getenv("RISU_RESULTS_GZIP_LEVEL", "1"))
+# /results の zstd 圧縮レベル．gzip lv1 と比べて grid20 相当（2.4M 点 / JSON 64MB）で
+# 16.1MB → 5.4MB，圧縮時間 0.47s → 0.07s．lv3 以上は縮みがほぼ頭打ちになる．
+RESULTS_ZSTD_LEVEL = int(os.getenv("RISU_RESULTS_ZSTD_LEVEL", "3"))
+
+# zstd は任意依存．入っていなければ gzip にフォールバックする（機能差はない）．
+try:
+    import zstandard as _zstd
+except ImportError:
+    _zstd = None
 
 
 async def _run_uxsim_async(scenario) -> dict:
     """
-    UXsim をタイムアウト付きで非同期実行するラッパー。
-    エラーを HTTPException に分類してユーザー向けメッセージを返す。
+    UXsim をタイムアウト付きで非同期実行するラッパー．
+    エラーを HTTPException に分類してユーザー向けメッセージを返す．
     """
     loop = asyncio.get_event_loop()
     try:
@@ -84,10 +121,10 @@ async def _run_uxsim_async(scenario) -> dict:
         raise HTTPException(
             408,
             detail=(
-                f"シミュレーションがタイムアウトしました（{UXSIM_TIMEOUT_SEC}s 超過）。"
-                "ネットワーク規模や tmax を縮小してください。"
+                f"シミュレーションがタイムアウトしました（{UXSIM_TIMEOUT_SEC}s 超過）．"
+                "ネットワーク規模や tmax を縮小してください．"
                 "OSM インポートの場合は road_types='arterial' または 'major' を指定して"
-                "細街路を除外すると大幅に高速化できます。"
+                "細街路を除外すると大幅に高速化できます．"
             ),
         )
     except HTTPException:
@@ -95,13 +132,13 @@ async def _run_uxsim_async(scenario) -> dict:
     except MemoryError:
         raise HTTPException(
             413,
-            detail="メモリ不足でシミュレーションが中断されました。ネットワーク規模を縮小してください。",
+            detail="メモリ不足でシミュレーションが中断されました．ネットワーク規模を縮小してください．",
         )
     except KeyError as e:
         # シナリオ内で存在しないノード/リンクを参照
         raise HTTPException(
             400,
-            detail=f"シナリオ定義エラー: 参照先「{e.args[0] if e.args else '?'}」が見つかりません。",
+            detail=f"シナリオ定義エラー: 参照先「{e.args[0] if e.args else '?'}」が見つかりません．",
         )
     except ValueError as e:
         # UXsim の不正入力 or _validate_scenario_size
@@ -117,7 +154,7 @@ async def _run_uxsim_async(scenario) -> dict:
 
 
 def _last_user_message_text(body) -> str | None:
-    """ChatRequest body から最後のユーザーメッセージを抽出（source 記録用）。"""
+    """ChatRequest body から最後のユーザーメッセージを抽出（source 記録用）．"""
     try:
         for m in reversed(body.messages):
             if getattr(m, "role", None) == "user":
@@ -131,10 +168,10 @@ def _last_user_message_text(body) -> str | None:
 
 
 def _store_sim(sim_id: str, result: dict, source: dict | None = None) -> None:
-    """シミュレーション結果を results_store に保存し、再現性メタを付与する。
+    """シミュレーション結果を results_store に保存し，再現性メタを付与する．
 
-    result は _run_uxsim の戻り値（"_scenario" を含む）。
-    source は呼び出し経路の由来を表す任意の辞書（省略時は manual）。
+    result は _run_uxsim の戻り値（"_scenario" を含む）．
+    source は呼び出し経路の由来を表す任意の辞書（省略時は manual）．
     """
     src = source or {"type": "manual"}
     result["_meta"] = {
@@ -142,13 +179,20 @@ def _store_sim(sim_id: str, result: dict, source: dict | None = None) -> None:
         "source": src,
     }
     results_store[sim_id] = result
+    # 上限超過分を古い順に追い出す（dict は挿入順）
+    while MAX_RESULTS > 0 and len(results_store) > MAX_RESULTS:
+        old_id = next(iter(results_store))
+        if old_id == sim_id:
+            break
+        results_store.pop(old_id, None)
+        print(f"[RISU] results_store evicted {old_id} (limit {MAX_RESULTS})")
 
 
 def _build_envelope(sim_id: str, *, include_result: bool = True) -> dict:
-    """results_store の内部表現を DL/取得用の正規エンベロープに変換する。
+    """results_store の内部表現を DL/取得用の正規エンベロープに変換する．
 
     include_result=False の場合は再現に必要な scenario と meta のみを返す
-    （Scenario DL ボタン用）。
+    （Scenario DL ボタン用）．
     """
     raw = results_store[sim_id]
     meta = raw.get("_meta", {})
@@ -173,6 +217,8 @@ def _build_envelope(sim_id: str, *, include_result: bool = True) -> dict:
             "frame_format": raw.get("frame_format"),
             # 信号現示メタデータ
             "signals":      raw.get("signals"),
+            # 描画用フレームの車両サンプリング間隔（1 = 全車両）
+            "vehicle_sample_step": raw.get("vehicle_sample_step", 1),
         }
     return envelope
 
@@ -184,7 +230,7 @@ class NodeInput(BaseModel):
     x: float
     y: float
     flow_capacity: float | None = None
-    signal: list[float] | None = None  # 信号現示の青時間リスト（秒）。例: [60,60] → 2現示各60秒
+    signal: list[float] | None = None  # 信号現示の青時間リスト（秒）．例: [60,60] → 2現示各60秒
 
 class LinkInput(BaseModel):
     name: str
@@ -194,7 +240,7 @@ class LinkInput(BaseModel):
     free_flow_speed: float = 20.0
     jam_density: float = 0.2
     number_of_lanes: int = 1
-    capacity: float | None = None  # リンク容量（台/s、リンク全体）。UXsim の capacity_out にマップ。
+    capacity: float | None = None  # リンク容量（台/s，リンク全体）．UXsim の capacity_out にマップ．
                                    # None なら FD（速度・密度・車線数）由来の容量のまま
     signal_group: int | None = None  # この進入リンクが青になる信号現示番号（0始まり）
 
@@ -209,17 +255,20 @@ class SimulationInput(BaseModel):
     name: str = "sim"
     tmax: int = 3600
     deltan: int = 5
+    # 車頭時間（反応時間）秒．UXsim 既定 1.0 → 1 車線容量 ≈ 2,770 台/時（ffs 60km/h, kjam 0.2）．
+    # 高速道路の実勢（1,800〜2,000 台/時/車線）に合わせるなら 1.5〜1.7．None なら UXsim 既定．
+    reaction_time: float | None = None
     nodes: list[NodeInput]
     links: list[LinkInput]
     demands: list[DemandInput]
 
     @model_validator(mode="after")
     def _normalize_and_validate(self):
-        """重複・参照切れを UXsim に渡す前に検出する。
+        """重複・参照切れを UXsim に渡す前に検出する．
 
         - 完全一致の重複ノード/リンク（全属性が同じ）は黙って統合
           （「リンクごとにノード行を繰り返す」形式の CSV 等でよくあるため）
-        - 同名で属性が異なる場合は、どの名前が問題かを列挙してエラー
+        - 同名で属性が異なる場合は，どの名前が問題かを列挙してエラー
         - リンク・需要が存在しないノードを参照している場合もエラー
           （UXsim の KeyError より分かりやすいメッセージにする）
         """
@@ -237,7 +286,7 @@ class SimulationInput(BaseModel):
         if conflicts:
             raise ValueError(
                 f"ノード名が重複しています（属性が異なるため自動統合できません）: "
-                f"{sorted(set(conflicts))[:10]}。名前を一意にしてください。")
+                f"{sorted(set(conflicts))[:10]}．名前を一意にしてください．")
         self.nodes = uniq_nodes
 
         # ── リンク重複 ──
@@ -254,7 +303,7 @@ class SimulationInput(BaseModel):
         if conflicts:
             raise ValueError(
                 f"リンク名が重複しています（属性が異なるため自動統合できません）: "
-                f"{sorted(set(conflicts))[:10]}。名前を一意にしてください。")
+                f"{sorted(set(conflicts))[:10]}．名前を一意にしてください．")
         self.links = uniq_links
 
         # ── 参照整合性 ──
@@ -263,19 +312,19 @@ class SimulationInput(BaseModel):
                           if e not in node_names})
         if missing:
             raise ValueError(
-                f"リンクが存在しないノードを参照しています: {missing[:10]}。"
-                f"ノード定義を追加するか、リンクの start/end を修正してください。")
+                f"リンクが存在しないノードを参照しています: {missing[:10]}．"
+                f"ノード定義を追加するか，リンクの start/end を修正してください．")
         missing_d = sorted({e for d in self.demands for e in (d.orig, d.dest)
                             if e not in node_names})
         if missing_d:
             raise ValueError(
-                f"需要が存在しないノードを参照しています: {missing_d[:10]}。")
+                f"需要が存在しないノードを参照しています: {missing_d[:10]}．")
         return self
 
 def _scenario_to_input(scenario: dict) -> SimulationInput:
-    """dict → SimulationInput。Pydantic 検証エラーを 422 の平易なメッセージに変換する。
+    """dict → SimulationInput．Pydantic 検証エラーを 422 の平易なメッセージに変換する．
 
-    （変換しないと global handler が 500「予期しないエラー」にしてしまい、
+    （変換しないと global handler が 500「予期しないエラー」にしてしまい，
     重複ノード名など修正可能な問題がユーザーに伝わらない）
     """
     from pydantic import ValidationError
@@ -298,10 +347,171 @@ class ChatMessage(BaseModel):
 
 class ChatInput(BaseModel):
     messages: list[ChatMessage]
+    # この会話でフロントに表示中のシミュレーションID．
+    # LLM へのコンテキスト注入はこの sim だけを対象にする
+    # （別会話・アップロード等で作られたグローバル最新の sim を流用しない）．
+    last_sim_id: str | None = None
 
 # ──────────────────────────────────────────────
 # UXsim 実行（同期 → Executor で非同期化）
 # ──────────────────────────────────────────────
+def _trip_stats(W) -> tuple[int, int, float | None]:
+    """basic_analysis / od_analysis と同じ数え方でトリップ統計を計算する．
+
+    dest を持つ車両 × DELTAN がトリップ数，travel_time != -1 が完了，
+    平均旅行時間は完了車両の travel_time の平均．
+    cpp backend では CppVehicle のプロパティ（毎回 state 判定で C++ を複数回参照）を
+    経由せず C++ オブジェクトを直接読む．
+    """
+    dn = W.DELTAN
+    trip_all = 0
+    trip_completed = 0
+    tt_sum = 0.0
+    for veh in W.VEHICLES.values():
+        cv = veh.__dict__.get("_cpp_vehicle")
+        if cv is not None:
+            if cv.dest is None:
+                continue
+            tt = cv.travel_time
+            # CppVehicle.travel_time と同じ abort 判定（abort なら -1 扱い）
+            if cv.flag_trip_aborted or (cv.state == 3 and cv.arrival_time < 0 and tt <= 0):
+                tt = -1
+        else:
+            if veh.dest is None:
+                continue
+            tt = veh.travel_time
+        trip_all += dn
+        if tt != -1:
+            trip_completed += dn
+            tt_sum += tt
+    avg_tt = (tt_sum * dn / trip_completed) if trip_completed else None
+    return trip_all, trip_completed, avg_tt
+
+
+def _select_frames(tk, max_frames: int):
+    """時刻キー配列から可視化フレームを選ぶ．
+
+    戻り値: (kept, fidx) — kept は昇順のフレーム時刻キー，fidx は各点のフレーム index
+    （間引きで落ちた点は -1）．ユニーク時刻キーが max_frames を超える場合のみ
+    len // max_frames 間隔で間引く（len // max_frames が 1 のときは間引かない）．
+
+    tk は 0.1 秒精度の整数（≤ tmax×10）なので，ソートベースの np.unique / isin ではなく
+    bincount + ルックアップテーブルで O(N) に処理する（5,000 万点で約 5 倍速）．
+    """
+    import numpy as np
+    if tk.size == 0:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
+    tk_max = int(tk.max())
+    if tk_max < 0 or tk_max > 50_000_000:  # 想定外の時刻（LUT が巨大になる）→ 汎用経路
+        kept = np.unique(tk)
+        if kept.size > max_frames:
+            kept = kept[::max(1, kept.size // max_frames)]
+        fidx = np.searchsorted(kept, tk)
+        fidx[(fidx >= kept.size) | (kept[np.minimum(fidx, kept.size - 1)] != tk)] = -1
+        return kept, fidx
+    present = np.bincount(tk, minlength=tk_max + 1) > 0
+    kept = np.flatnonzero(present).astype(np.int64)
+    if kept.size > max_frames:
+        kept = kept[::max(1, kept.size // max_frames)]
+    lut = np.full(tk_max + 1, -1, dtype=np.int64)
+    lut[kept] = np.arange(kept.size, dtype=np.int64)
+    return kept, lut[tk]
+
+
+def _collect_run_points(W, n_links: int, max_frames: int):
+    """全車両のログから「run 状態かつ有効リンク上」の点を，可視化フレーム分だけ列として取り出す．
+
+    戻り値: (kept, fidx, li, vid, x, v)
+      kept: 昇順のフレーム時刻キー（0.1 秒精度の整数）
+      fidx: 各点のフレーム index（kept への index），li: リンク index，
+      vid: W.VEHICLES の登録順 index，x: リンク上位置，v: 速度
+
+    fast path (uxsim cpp backend): C++ 側の build_all_vehicle_logs_flat_compact() で
+    全車両のログを 1 回でフラット配列として受け取り，車両ごとの Python ループを行わない．
+    間引きで落ちるフレームの点は列抽出の前にマスクして，抽出コストを保持分だけにする．
+    fallback (純 Python uxsim / 旧 API): 車両ごとに log_* を読む．
+    """
+    import numpy as np
+
+    cpp = getattr(W, "_cpp_world", None)
+    if cpp is not None and hasattr(cpp, "build_all_vehicle_logs_flat_compact"):
+        try:
+            flat = cpp.build_all_vehicle_logs_flat_compact()
+            offsets = np.asarray(flat["offsets"], dtype=np.int64)
+            n_veh = offsets.size - 1
+            if n_veh != len(W.VEHICLES):
+                raise RuntimeError(f"vehicle count mismatch: flat={n_veh} VEHICLES={len(W.VEHICLES)}")
+            state = np.asarray(flat["log_state"])
+            link = np.asarray(flat["log_link"])
+            veh_cls = type(next(iter(W.VEHICLES.values()))) if n_veh else None
+            state_map = getattr(veh_cls, "_LOG_STATE_MAP", None)
+            run_code = state_map.index("run") if state_map else 2
+            # run 状態かつ有効リンク上の点（entry index）
+            idx = np.flatnonzero((state == run_code) & (link >= 0) & (link < n_links))
+            tk = np.rint(np.asarray(flat["log_t"], dtype=np.float64)[idx] * 10.0).astype(np.int64)
+            kept, fidx = _select_frames(tk, max_frames)
+            if kept.size and fidx.size and (fidx < 0).any():
+                m = fidx >= 0
+                idx, fidx = idx[m], fidx[m]
+            # entry index → 車両 index（offsets[v] <= e < offsets[v+1]）．
+            # W.VEHICLES の登録順 == C++ vehicle index 順（_register_new_cpp_vehicles）．
+            vid = np.searchsorted(offsets, idx, side="right") - 1
+            return (
+                kept, fidx,
+                link[idx].astype(np.int64),
+                vid,
+                np.asarray(flat["log_x"], dtype=np.float64)[idx],
+                np.asarray(flat["log_v"], dtype=np.float64)[idx],
+            )
+        except Exception as e:  # 内部 API 変更時は遅い経路にフォールバック
+            print(f"[RISU] flat vehicle log fast path unavailable ({e.__class__.__name__}: {e}); "
+                  f"falling back to per-vehicle logs")
+
+    link_idx_map = {lk.name: i for i, lk in enumerate(W.LINKS)}
+    tk_parts, vid_parts, li_parts, x_parts, v_parts = [], [], [], [], []
+    for vid, veh in enumerate(W.VEHICLES.values()):
+        cache = getattr(veh, "_log_cache", None)
+        if cache is None and hasattr(veh, "_ensure_log_raw"):
+            veh._ensure_log_raw()
+            cache = veh._log_cache
+        if cache is not None and "log_state" in cache and "log_link" in cache:
+            state_map = getattr(type(veh), "_LOG_STATE_MAP", None)
+            run_code = state_map.index("run") if state_map else 2
+            state_raw = np.asarray(cache["log_state"])
+            link_raw = np.asarray(cache["log_link"], dtype=np.int64)
+            sel = np.nonzero((state_raw == run_code) & (link_raw >= 0) & (link_raw < n_links))[0]
+            if sel.size == 0:
+                continue
+            li_sel = link_raw[sel]
+        else:
+            log_state = veh.log_state
+            log_link = veh.log_link
+            li = np.fromiter(
+                (link_idx_map.get(lk.name, -1) if (s == "run" and hasattr(lk, "name")) else -1
+                 for s, lk in zip(log_state, log_link)),
+                dtype=np.int64, count=len(log_state),
+            )
+            sel = np.nonzero(li >= 0)[0]
+            if sel.size == 0:
+                continue
+            li_sel = li[sel]
+        log_t = np.asarray(veh.log_t, dtype=np.float64)
+        tk_parts.append(np.rint(log_t[sel] * 10.0).astype(np.int64))
+        li_parts.append(li_sel)
+        vid_parts.append(np.full(sel.size, vid, dtype=np.int64))
+        x_parts.append(np.asarray(veh.log_x, dtype=np.float64)[sel])
+        v_parts.append(np.asarray(veh.log_v, dtype=np.float64)[sel])
+    if not tk_parts:
+        e = np.empty(0, dtype=np.int64)
+        return e, e, e, e, np.empty(0), np.empty(0)
+    tk = np.concatenate(tk_parts)
+    li, vid = np.concatenate(li_parts), np.concatenate(vid_parts)
+    x, v = np.concatenate(x_parts), np.concatenate(v_parts)
+    kept, fidx = _select_frames(tk, max_frames)
+    m = fidx >= 0
+    return kept, fidx[m], li[m], vid[m], x[m], v[m]
+
+
 def _run_uxsim(scenario: SimulationInput) -> dict:
     # リソース保護: ユーザー入力 / LLM 経由のいずれでも上限を適用
     try:
@@ -320,101 +530,29 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
         for lk in scenario.links if lk.signal_group is not None
     }
 
-    from uxsim import World
+    # ネットワーク構築は uxsim_bridge に集約している（素の UXsim から実行する
+    # scripts/run_scenario.py と同じコードを通す．二重に持つと片方だけ直して挙動がずれる）．
+    # basic_analysis は内部で od_analysis → floyd_warshall（全点対最短路, O(ノード数^3)）を
+    # 実行し 5000 ノード級で数十秒かかる．RISU が必要な統計 3 値は後段で車両ログから直接計算する．
+    W = build_world(scenario, cpp=True, disable_basic_analysis=True)
 
-    _world_kwargs = dict(
-        name=scenario.name,
-        tmax=scenario.tmax,
-        deltan=scenario.deltan,
-        print_mode=0,
-        save_mode=0,
-        show_mode=0,
-    )
-    try:
-        # uxsim >= 1.14 (beta) は C++ 高速化バックエンドをサポート
-        W = World(**_world_kwargs, cpp=True)
-    except TypeError:
-        W = World(**_world_kwargs)
-
-    node_map = {}
-    for n in scenario.nodes:
-        kwargs = {}
-        if n.flow_capacity is not None:
-            kwargs["flow_capacity"] = n.flow_capacity
-        if n.signal is not None:
-            kwargs["signal"] = n.signal
-        node_map[n.name] = W.addNode(n.name, x=n.x, y=n.y, **kwargs)
-
-    link_map = {}
-    for lk in scenario.links:
-        link_kwargs = {}
-        if lk.signal_group is not None:
-            link_kwargs["signal_group"] = lk.signal_group
-        if lk.capacity is not None:
-            # 明示容量: 下流端の流出容量として与える（渋滞の待ち行列が
-            # このリンク上に物理的に形成される、標準的なボトルネック表現）
-            link_kwargs["capacity_out"] = lk.capacity
-        link_map[lk.name] = W.addLink(
-            lk.name,
-            start_node=node_map[lk.start],
-            end_node=node_map[lk.end],
-            length=lk.length,
-            free_flow_speed=lk.free_flow_speed,
-            jam_density=lk.jam_density,
-            number_of_lanes=lk.number_of_lanes,
-            **link_kwargs,
-        )
-
-    for d in scenario.demands:
-        W.adddemand(
-            orig=node_map[d.orig],
-            dest=node_map[d.dest],
-            t_start=d.t_start,
-            t_end=d.t_end,
-            flow=d.flow,
-        )
-
-    # analyzer.basic_analysis は内部で od_analysis → floyd_warshall（全点対最短路,
-    # O(ノード数^3)）を実行し、大規模 OSM ネットワーク（5000 ノード級）では
-    # 1 回あたり数十秒かかる。RISU が必要とする統計は 3 値だけなので無効化し、
-    # 後段で車両ログから直接計算する。
-    # cpp backend は exec_simulation 終了時（simulation_terminated）に自動で
-    # basic_analysis を呼ぶため、analyzer 生成フックをラップして先に潰しておく。
-    # （analyzer は exec 中に生成されるので直接は差し替えられない）
-    if hasattr(W, "_setup_analyzer"):
-        _orig_setup_analyzer = W._setup_analyzer
-        def _setup_analyzer_no_basic(*a, **k):
-            r = _orig_setup_analyzer(*a, **k)
-            try:
-                W.analyzer.basic_analysis = lambda *a_, **k_: None
-            except Exception:
-                pass  # 失敗しても遅くなるだけで結果は変わらない
-            return r
-        W._setup_analyzer = _setup_analyzer_no_basic
+    # cpp backend は終了時に全車両の _log_cache（車両ごとの numpy スライス辞書）を
+    # 構築するが，RISU は後段で C++ のフラット配列を直接読むので不要（数万台で数秒）．
+    # フォールバック経路では _ensure_log_raw() が必要に応じて構築する．
+    if hasattr(W, "_skip_log_on_terminate"):
+        W._skip_log_on_terminate = True
 
     t0 = time.perf_counter()
     W.exec_simulation()
     elapsed = time.perf_counter() - t0
 
     # ---- 基本統計（basic_analysis 相当を直接計算） ----
-    # od_analysis と同じ数え方: dest を持つ車両 × DELTAN がトリップ数、
-    # travel_time != -1 が完了、平均旅行時間は完了車両の travel_time の平均。
-    _dn = W.DELTAN
-    _trip_all = 0
-    _trip_completed = 0
-    _tt_sum = 0.0
-    for veh in W.VEHICLES.values():
-        if veh.dest is None:
-            continue
-        _trip_all += _dn
-        _tt = veh.travel_time
-        if _tt != -1:
-            _trip_completed += _dn
-            _tt_sum += _tt
-    _avg_tt = (_tt_sum * _dn / _trip_completed) if _trip_completed else None
+    # od_analysis と同じ数え方: dest を持つ車両 × DELTAN がトリップ数，
+    # travel_time != -1 が完了，平均旅行時間は完了車両の travel_time の平均．
+    _trip_all, _trip_completed, _avg_tt = _trip_stats(W)
 
     # ---- リンク情報（GeoJSON） ----
-    # 同一座標ペアのリンクを検出し、重複分にオフセットを付与して視覚的に区別
+    # 同一座標ペアのリンクを検出し，重複分にオフセットを付与して視覚的に区別
     coord_count = {}  # (sx,sy,ex,ey) -> count（同一方向）
     for lk in W.LINKS:
         key = (lk.start_node.x, lk.start_node.y, lk.end_node.x, lk.end_node.y)
@@ -430,13 +568,13 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
         coord_idx[key] = idx + 1
         total = coord_count[key]
 
-        # 重複がある場合、垂直方向にオフセット
+        # 重複がある場合，垂直方向にオフセット
         if total > 1:
             dx, dy = ex - sx, ey - sy
             length = (dx**2 + dy**2) ** 0.5 or 1
             # 法線方向の単位ベクトル
             nx, ny = -dy / length, dx / length
-            # オフセット量（リンク長の2%、中央揃え）
+            # オフセット量（リンク長の2%，中央揃え）
             offset = (idx - (total - 1) / 2) * max(length * 0.02, 5)
             sx += nx * offset
             sy += ny * offset
@@ -461,139 +599,76 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
         })
 
     # ---- 個車軌跡データ ----
-    # Vehicle.log_t/log_x/log_link/log_v/log_state からスナップショットを構築
-    # 旧実装は O(T × V × L) の Python 線形探索でボトルネック化していたため、
-    # 「車両ごとに 1 パス」で frames と link_timeline を同時集計するよう最適化。
+    # 「run 状態かつ有効リンク上」の全ログ点を (tk, li, vid, x, v) の列として一括取得し，
+    # 以降は numpy だけで集計する（車両ごと・点ごとの Python ループなし）．
+    #  - リンク別平均速度: (フレーム, リンク) キーで bincount
+    #  - フレーム分割: フレーム index でソートして searchsorted で境界を求める
+    #  - frames の各列は numpy 配列のまま保持（Python float 化しない．orjson が直接直列化）
     t_post0 = time.perf_counter()
-
-    # リンク座標マップ（中心座標／法線オフセットは features 側で適用済みなので
-    # ここでは元座標を使う）
-    link_coord_map = {}
-    link_ffs_map = {}
-    link_idx_map = {}  # lk_name -> int index (for compact frame format)
-    for i, lk in enumerate(W.LINKS):
-        link_coord_map[lk.name] = (
-            lk.start_node.x, lk.start_node.y,
-            lk.end_node.x,   lk.end_node.y,
-            lk.length,
-        )
-        link_ffs_map[lk.name] = lk.free_flow_speed
-        link_idx_map[lk.name] = i
-
-    # 車両ユニーク ID
-    veh_id_map = {id(veh): i for i, veh in enumerate(W.VEHICLES.values())}
-
-    # ── ベクトル化集計 ──
-    # uxsim (cpp) の log_t/log_x/log_v は numpy 配列。Python ループでの要素アクセスは
-    # numpy スカラー生成が支配的なボトルネックになるため、車両ごとに
-    # 「run 状態かつ有効リンク」のマスクだけ Python で作り、残りは numpy 一括処理する。
     import numpy as np
 
-    # リンク幾何を index 順の配列としてまとめる（li から np.take で参照）
-    _n_links = len(W.LINKS)
-    _sx = np.empty(_n_links); _sy = np.empty(_n_links)
-    _ex = np.empty(_n_links); _ey = np.empty(_n_links)
-    _ll = np.empty(_n_links)
-    for lk_name, i in link_idx_map.items():
-        sx0, sy0, ex0, ey0, llen0 = link_coord_map[lk_name]
-        _sx[i] = sx0; _sy[i] = sy0; _ex[i] = ex0; _ey[i] = ey0; _ll[i] = llen0
+    link_names = [lk.name for lk in W.LINKS]
+    _n_links = len(link_names)
+    _sx = np.fromiter((lk.start_node.x for lk in W.LINKS), dtype=np.float64, count=_n_links)
+    _sy = np.fromiter((lk.start_node.y for lk in W.LINKS), dtype=np.float64, count=_n_links)
+    _ex = np.fromiter((lk.end_node.x   for lk in W.LINKS), dtype=np.float64, count=_n_links)
+    _ey = np.fromiter((lk.end_node.y   for lk in W.LINKS), dtype=np.float64, count=_n_links)
+    _ll = np.fromiter((lk.length       for lk in W.LINKS), dtype=np.float64, count=_n_links)
+    _ffs = np.fromiter((lk.free_flow_speed for lk in W.LINKS), dtype=np.float64, count=_n_links)
 
-    # 車両ごとに有効点を抽出して列を蓄積
-    tk_parts, vid_parts, li_parts, x_parts, v_parts = [], [], [], [], []
-    for veh in W.VEHICLES.values():
-        # fast path (uxsim cpp backend): 生ログ配列を直接使う。
-        # _log_cache['log_state'] は int コード（"run" など状態名への index）、
-        # _log_cache['log_link'] は W.LINKS への int index。変換プロパティ
-        # (log_state / log_link) は呼ぶたびに Python リストを構築して
-        # コストが大きいため回避する。
-        cache = getattr(veh, "_log_cache", None)
-        if cache is None and hasattr(veh, "_ensure_log_raw"):
-            veh._ensure_log_raw()
-            cache = veh._log_cache
-        if cache is not None and "log_state" in cache and "log_link" in cache:
-            state_map = getattr(type(veh), "_LOG_STATE_MAP", None)
-            run_code = state_map.index("run") if state_map else 2
-            state_raw = np.asarray(cache["log_state"])
-            link_raw = np.asarray(cache["log_link"], dtype=np.int64)
-            sel = np.nonzero(
-                (state_raw == run_code) & (link_raw >= 0) & (link_raw < _n_links)
-            )[0]
-            if sel.size == 0:
-                continue
-            li_sel = link_raw[sel]
-        else:
-            # fallback (pure-Python uxsim): run 状態かつ Link オブジェクトの点のみ、
-            # リンク index に変換（他は -1）
-            log_state = veh.log_state
-            log_link  = veh.log_link
-            li = np.fromiter(
-                (
-                    link_idx_map.get(lk.name, -1)
-                    if (s == "run" and hasattr(lk, "name")) else -1
-                    for s, lk in zip(log_state, log_link)
-                ),
-                dtype=np.int64, count=len(log_state),
-            )
-            sel = np.nonzero(li >= 0)[0]
-            if sel.size == 0:
-                continue
-            li_sel = li[sel]
-        log_t = np.asarray(veh.log_t, dtype=np.float64)
-        tk = np.rint(log_t[sel] * 10.0).astype(np.int64)  # 0.1 秒精度
-        tk_parts.append(tk)
-        li_parts.append(li_sel)
-        vid_parts.append(np.full(sel.size, veh_id_map[id(veh)], dtype=np.int64))
-        x_parts.append(np.asarray(veh.log_x, dtype=np.float64)[sel])
-        v_parts.append(np.asarray(veh.log_v, dtype=np.float64)[sel])
+    # 時刻方向の間引き（MAX_FRAMES）は _collect_run_points 内で列抽出前に適用済み
+    kept, fidx, li_all, vid_all, x_all, v_all = _collect_run_points(W, _n_links, MAX_FRAMES)
 
-    frames_by_tk = {}            # int_t_key(×10) -> column dict
-    link_speeds_by_tk = {}       # int_t_key -> {link_name: [speeds]}
-    sorted_tks = []
+    frames = {}
+    frame_times = []
+    link_timeline = {ln: [] for ln in link_names}
+    vehicle_sample_step = 1
 
-    if tk_parts:
-        tk_all  = np.concatenate(tk_parts)
-        li_all  = np.concatenate(li_parts)
-        vid_all = np.concatenate(vid_parts)
-        x_all   = np.concatenate(x_parts)
-        v_all   = np.concatenate(v_parts)
+    if kept.size:
+        n_frames = kept.size
+        # 旧実装互換のキー: str(round(tk/10, 1)) → 整数時刻は "12.0"
+        t_vals = [round(tk / 10.0, 1) for tk in kept.tolist()]
+        frame_keys = [str(t) for t in t_vals]
+        frame_times = t_vals
 
-        # 間引き: ユニーク時刻キーが 200 を超える場合のみ（len // 200 が 1 のときは間引かない）
-        uniq_tks = np.unique(tk_all)
-        kept = uniq_tks
-        if uniq_tks.size > 200:
-            step = max(1, uniq_tks.size // 200)
-            kept = uniq_tks[::step]
-            mask = np.isin(tk_all, kept)
-            tk_all, li_all, vid_all = tk_all[mask], li_all[mask], vid_all[mask]
-            x_all, v_all = x_all[mask], v_all[mask]
+        # ── リンク別平均速度（間引き前の全点で集計） ──
+        key = fidx * _n_links + li_all
+        cnt = np.bincount(key, minlength=n_frames * _n_links).reshape(n_frames, _n_links)
+        vsum = np.bincount(key, weights=v_all, minlength=n_frames * _n_links).reshape(n_frames, _n_links)
+        avg = np.where(cnt > 0, vsum / np.maximum(cnt, 1), _ffs[None, :])
+        avg_cols = np.round(avg, 2).T.tolist()  # リンクごとの時系列
+        for i, ln in enumerate(link_names):
+            link_timeline[ln] = [{"t": t, "speed": s} for t, s in zip(t_vals, avg_cols[i])]
 
-        # 座標・alpha を一括計算
+        # ── 総点数の上限: 車両 ID を等間隔サンプリング（描画用のみ） ──
+        if MAX_FRAME_POINTS > 0 and fidx.size > MAX_FRAME_POINTS:
+            vehicle_sample_step = int(math.ceil(fidx.size / MAX_FRAME_POINTS))
+            keep = (vid_all % vehicle_sample_step) == 0
+            print(f"[RISU] frame points {fidx.size:,} > {MAX_FRAME_POINTS:,}: "
+                  f"sampling every {vehicle_sample_step} vehicles -> {int(keep.sum()):,} points")
+            fidx, li_all, vid_all = fidx[keep], li_all[keep], vid_all[keep]
+            x_all, v_all = x_all[keep], v_all[keep]
+
+        # ── 座標・alpha を一括計算 ──
         llen = _ll[li_all]
         with np.errstate(divide="ignore", invalid="ignore"):
             alpha = np.where(llen > 0, np.clip(x_all / llen, 0.0, 1.0), 0.0)
         vx = _sx[li_all] * (1.0 - alpha) + _ex[li_all] * alpha
         vy = _sy[li_all] * (1.0 - alpha) + _ey[li_all] * alpha
 
-        # tk 順に整列し、フレーム境界で分割（stable sort で車両順を保持）
-        order = np.argsort(tk_all, kind="stable")
-        tk_s  = tk_all[order]
-        boundaries = np.nonzero(np.diff(tk_s))[0] + 1
-        starts = np.concatenate(([0], boundaries))
-        ends   = np.concatenate((boundaries, [tk_s.size]))
-
-        ids_s    = vid_all[order].tolist()
-        xs_s     = np.round(vx[order], 2).tolist()
-        ys_s     = np.round(vy[order], 2).tolist()
-        vs_s     = np.round(v_all[order], 2).tolist()
-        alphas_s = np.round(alpha[order], 4).tolist()
-        li_s     = li_all[order].tolist()
-        v_raw_s  = v_all[order]  # link_timeline 用（丸め前）
-
-        link_names_by_idx = [lk.name for lk in W.LINKS]
-        for st, en in zip(starts.tolist(), ends.tolist()):
-            tk = int(tk_s[st])
-            sorted_tks.append(tk)
-            frames_by_tk[tk] = {
+        # ── フレーム順に整列し，境界で分割（stable sort で車両順を保持） ──
+        order = np.argsort(fidx, kind="stable")
+        fidx_s = fidx[order]
+        ids_s    = vid_all[order].astype(np.int32)
+        li_s     = li_all[order].astype(np.int32)
+        xs_s     = np.round(vx[order], 2)
+        ys_s     = np.round(vy[order], 2)
+        vs_s     = np.round(v_all[order], 2)
+        alphas_s = np.round(alpha[order], 4)
+        starts = np.searchsorted(fidx_s, np.arange(n_frames), side="left").tolist()
+        ends   = np.searchsorted(fidx_s, np.arange(n_frames), side="right").tolist()
+        for fk, st, en in zip(frame_keys, starts, ends):
+            frames[fk] = {
                 "ids":    ids_s[st:en],
                 "xs":     xs_s[st:en],
                 "ys":     ys_s[st:en],
@@ -601,39 +676,7 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
                 "alphas": alphas_s[st:en],
                 "li":     li_s[st:en],
             }
-            # リンク別速度集計（保持フレームの点のみなので軽量）
-            ls = {}
-            seg_li = li_s[st:en]
-            seg_v  = v_raw_s[st:en]
-            for j in range(en - st):
-                ln = link_names_by_idx[seg_li[j]]
-                sl = ls.get(ln)
-                if sl is None:
-                    ls[ln] = [float(seg_v[j])]
-                else:
-                    sl.append(float(seg_v[j]))
-            link_speeds_by_tk[tk] = ls
 
-    # 出力 frames（旧フォーマット維持: キーは "12.3" のような小数文字列）
-    frames = {}
-    for tk in sorted_tks:
-        t_val = tk / 10.0
-        # キーは旧実装互換: round(t_val,1) → str(...)。整数の場合 "12.0"
-        frames[str(round(t_val, 1))] = frames_by_tk[tk]
-
-    # link_timeline を間引き後の t セットだけ集計
-    link_names = [lk.name for lk in W.LINKS]
-    link_timeline = {ln: [] for ln in link_names}
-    for tk in sorted_tks:
-        t_val = round(tk / 10.0, 1)
-        ls = link_speeds_by_tk.get(tk, {})
-        for ln in link_names:
-            speeds = ls.get(ln)
-            if speeds:
-                avg = sum(speeds) / len(speeds)
-            else:
-                avg = link_ffs_map[ln]
-            link_timeline[ln].append({"t": t_val, "speed": round(avg, 2)})
     for f in features:
         f["properties"]["timeline"] = link_timeline[f["properties"]["name"]]
 
@@ -658,8 +701,8 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
     }
 
     # 信号現示メタデータ（可視化用）
-    # phase_log は UXsim の実シミュレーション結果（signal_log）を採用し、
-    # クライアント表示と内部挙動のタイミングずれをなくす。
+    # phase_log は UXsim の実シミュレーション結果（signal_log）を採用し，
+    # クライアント表示と内部挙動のタイミングずれをなくす．
     signals = []
     try:
         # リンク名 → 終端ノード名（信号機は「その交差点に流入するリンク」だけに描く）
@@ -674,8 +717,8 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
                 log_by_orig_id[w_node.name] = list(sl)
 
         for orig_node in _orig_signal_nodes:
-            # この交差点に流入する signal_group 付きリンクのみ。
-            # （全 signal_group リンクを渡すと、複数の信号交差点があるとき
+            # この交差点に流入する signal_group 付きリンクのみ．
+            # （全 signal_group リンクを渡すと，複数の信号交差点があるとき
             #   同じ信号機が交差点の数だけ重複描画されてしまう）
             groups = {
                 lk_name: g for lk_name, g in _orig_signal_groups.items()
@@ -699,19 +742,21 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
         "_scenario": scenario.model_dump(),
         "geojson": {"type": "FeatureCollection", "features": features},
         "frames":  frames,
-        "frame_times": sorted([float(k) for k in frames.keys()]),
+        "frame_times": frame_times,
         "stats":   stats,
         "tmax":    scenario.tmax,
         "signals": signals,
         # コンパクト列指向フォーマット用: link 名一覧（li インデックスで参照）
-        "link_names": [lk.name for lk in W.LINKS],
+        "link_names": link_names,
         # スキーマバージョン（クライアントのフォーマット分岐用）
         "frame_format": "columnar_v2",
+        # 描画用フレームの車両サンプリング間隔（1 = 全車両）．MAX_FRAME_POINTS 参照．
+        "vehicle_sample_step": vehicle_sample_step,
     }
 
 
 def _apply_link_geometries(result: dict, link_geometries: dict):
-    """GeoJSON features のリンク座標を OSMnx の道路形状（多点 LineString）で置き換える。"""
+    """GeoJSON features のリンク座標を OSMnx の道路形状（多点 LineString）で置き換える．"""
     if not link_geometries:
         return
     for f in result.get("geojson", {}).get("features", []):
@@ -731,9 +776,9 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="run_simulation",
             description=(
-                "UXsim 交通流シミュレーションを実行します。"
-                "ノード・リンク・需要を指定してください。"
-                "結果は GeoJSON 形式と集計統計で返されます。"
+                "UXsim 交通流シミュレーションを実行します．"
+                "ノード・リンク・需要を指定してください．"
+                "結果は GeoJSON 形式と集計統計で返されます．"
             ),
             inputSchema={
                 "type": "object",
@@ -793,7 +838,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_result",
-            description="以前実行したシミュレーションの結果を ID で取得します。",
+            description="以前実行したシミュレーションの結果を ID で取得します．",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -808,8 +853,8 @@ async def list_tools() -> list[Tool]:
 @mcp_server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     if name == "run_simulation":
-        sim_input = SimulationInput(**arguments)
-        loop = asyncio.get_event_loop()
+        scenario, _info = _expand_run_simulation_args(arguments)  # grid / auto_demands 対応
+        sim_input = SimulationInput(**scenario)
         result = await _run_uxsim_async(sim_input)
         sim_id = str(uuid.uuid4())[:8]
         _store_sim(sim_id, result, {"type": "llm", "via": "mcp"})
@@ -817,7 +862,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(
             type="text",
             text=(
-                f"シミュレーション完了。ID: {sim_id}\n"
+                f"シミュレーション完了．ID: {sim_id}\n"
                 f"総トリップ数: {summary['total_trips']}\n"
                 f"完了トリップ数: {summary['completed_trips']}\n"
                 f"平均旅行時間: {summary['average_travel_time_s']} 秒\n"
@@ -829,7 +874,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     elif name == "get_result":
         sim_id = arguments["simulation_id"]
         if sim_id not in results_store:
-            return [TextContent(type="text", text=f"ID {sim_id} の結果が見つかりません。")]
+            return [TextContent(type="text", text=f"ID {sim_id} の結果が見つかりません．")]
         stats = results_store[sim_id]["stats"]
         return [TextContent(type="text", text=json.dumps(stats, ensure_ascii=False))]
 
@@ -846,8 +891,10 @@ async def lifespan(app: FastAPI):
 
 # orjson があれば高速な JSON シリアライズをデフォルトにする（/results は MB 級）
 try:
+    import orjson
     from fastapi.responses import ORJSONResponse as _DefaultJSONResponse
 except ImportError:  # orjson 未インストール時は標準 JSON にフォールバック
+    orjson = None
     from fastapi.responses import JSONResponse as _DefaultJSONResponse
 
 app = FastAPI(title="RISU API", lifespan=lifespan,
@@ -857,15 +904,17 @@ app = FastAPI(title="RISU API", lifespan=lifespan,
 # グローバル例外ハンドラー
 # ──────────────────────────────────────────────
 import traceback as _tb
+
 from fastapi.responses import JSONResponse as _JSONResp
+
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     """
-    HTTPException 以外の未捕捉例外を 500 に統一。
-    詳細はサーバーログだけに残し、ユーザーには汎用メッセージ。
+    HTTPException 以外の未捕捉例外を 500 に統一．
+    詳細はサーバーログだけに残し，ユーザーには汎用メッセージ．
     """
-    # HTTPException は FastAPI が処理するが、念のため
+    # HTTPException は FastAPI が処理するが，念のため
     if isinstance(exc, HTTPException):
         raise exc
     trace = _tb.format_exc()
@@ -875,7 +924,7 @@ async def global_exception_handler(request, exc):
     return _JSONResp(
         status_code=500,
         content={
-            "detail": "予期しないエラーが発生しました。時間を空けて再度お試しください。",
+            "detail": "予期しないエラーが発生しました．時間を空けて再度お試しください．",
             "error_id": id(exc) & 0xFFFFFF,  # 運用ログと突き合わせ可能な簡易 ID
         },
     )
@@ -894,10 +943,11 @@ app.add_middleware(
 
 # 大きな JSON レスポンス（/results は数 MB）を圧縮して転送量を ~90% 削減
 from starlette.middleware.gzip import GZipMiddleware
+
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
 # ──────────────────────────────────────────────
-# HTML はキャッシュさせない（UI 更新時にブラウザが古い画面を出さないように。
+# HTML はキャッシュさせない（UI 更新時にブラウザが古い画面を出さないように．
 # ETag 再検証で 304 が返るので転送コストはほぼゼロ）
 # ──────────────────────────────────────────────
 @app.middleware("http")
@@ -930,7 +980,7 @@ async def limit_upload_mw(request, call_next):
 
 # ──────────────────────────────────────────────
 # シナリオサイズ上限（リソース保護）
-# 環境変数で上書き可能。プラン制御を本番化する際はユーザーのプランを参照すること。
+# 環境変数で上書き可能．プラン制御を本番化する際はユーザーのプランを参照すること．
 # ──────────────────────────────────────────────
 MAX_NODES   = int(os.getenv("RISU_MAX_NODES",   "50000"))
 MAX_LINKS   = int(os.getenv("RISU_MAX_LINKS",   "100000"))
@@ -938,7 +988,7 @@ MAX_DEMANDS = int(os.getenv("RISU_MAX_DEMANDS", "10000"))
 MAX_TMAX    = int(os.getenv("RISU_MAX_TMAX",    "86400"))  # 24 時間
 
 def _validate_scenario_size(scenario: SimulationInput) -> None:
-    """シナリオのサイズ上限チェック。超過時は 413 を返す。"""
+    """シナリオのサイズ上限チェック．超過時は 413 を返す．"""
     n_nodes   = len(scenario.nodes)
     n_links   = len(scenario.links)
     n_demands = len(scenario.demands)
@@ -961,21 +1011,151 @@ async def simulate(scenario: SimulationInput):
     _store_sim(sim_id, result, {"type": "manual"})
     return {"id": sim_id, "stats": result["stats"]}
 
-@app.get("/results/{sim_id}")
-async def get_results(sim_id: str):
-    """新スキーマ（risu_schema_version 1.0）の完全エンベロープを返す。
+def _envelope_json_bytes(sim_id: str) -> bytes:
+    """完全エンベロープを JSON バイト列に直列化する（frames の numpy 列も直接）．"""
+    env = _build_envelope(sim_id, include_result=True)
+    _res = env.get("result")
+    if _res is not None and _res.get("frame_format") == "columnar_v2" and _res.get("frames"):
+        # 送出時だけ columnar_v3（量子化＋差分符号化）に変換する．
+        # results_store 側の配列は触らない（_get_simulation_data など
+        # サーバー内の消費側は素の値を前提にしているため）．
+        _res["frames"] = _encode_frames_v3(_res["frames"])
+        _res["frame_format"] = "columnar_v3"
+    if orjson is not None:
+        return orjson.dumps(env, option=orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_NON_STR_KEYS)
+    import numpy as np
+    def _default(o):
+        if isinstance(o, np.ndarray):
+            return o.tolist()
+        if isinstance(o, np.generic):
+            return o.item()
+        raise TypeError(f"not serializable: {type(o)}")
+    return json.dumps(env, ensure_ascii=False, default=_default).encode("utf-8")
 
-    数 MB になり得るため、レスポンスオブジェクトを直接返して
-    FastAPI の jsonable_encoder（全要素の再帰変換）をバイパスする。
+
+def _encode_frames_v3(frames: dict) -> dict:
+    """columnar_v2 の frames を送出用の columnar_v3 に変換する（新しい dict を返す）．
+
+    JSON はテキストなので，`4500.0` のような冗長な表現がそのままバイト数になる．
+    描画に不要な精度を落として整数にするだけで，grid20 相当で
+    json 78.1MB → 53.5MB，gzip 21.1MB → 15.0MB，直列化 0.32s → 0.09s になる
+    （ブラウザ側の JSON.parse も同じ割合で軽くなる）．
+
+    v3 の符号化:
+      ids    差分符号化した int32．フレーム内の ids は昇順なので差分は小さな値に収まる．
+             復元は累積和（フロントの `_decodeFrame`）．
+      xs, ys 1 m に丸めた int32．車両位置は基本的に alphas + リンク形状から決まり，
+             xs/ys はリンク情報が無いときのフォールバックなので 1 m で十分．
+      vs     0.1 m/s 単位の int16（元々 0.1 丸め済み）．
+      alphas 0.001 単位の int16（リンク長 5 km でも 5 m 分解能）．元は 4 桁丸め．
+      li     変更なし（link_names への index）．
+
+    フロントは frame_format を見て v2 / v3 を切り替える．
+    ダウンロード済みの古い JSON を読めるよう，v2 の読み込み経路は残してある．
+    """
+    import numpy as np
+
+    out = {}
+    for key, f in frames.items():
+        ids = np.asarray(f["ids"])
+        if ids.size:
+            d = np.empty(ids.size, dtype=np.int64)
+            d[0] = ids[0]
+            if ids.size > 1:
+                np.subtract(ids[1:], ids[:-1], out=d[1:])
+            ids_enc = d.astype(np.int32)
+        else:
+            ids_enc = ids.astype(np.int32)
+        out[key] = {
+            "ids":    ids_enc,
+            "xs":     np.rint(np.asarray(f["xs"])).astype(np.int32),
+            "ys":     np.rint(np.asarray(f["ys"])).astype(np.int32),
+            "vs":     np.rint(np.asarray(f["vs"]) * 10).astype(np.int16),
+            "alphas": np.rint(np.asarray(f["alphas"]) * 1000).astype(np.int16),
+            "li":     np.asarray(f["li"]),
+        }
+    return out
+
+
+def _negotiate_encoding(accept_encoding: str) -> str:
+    """Accept-Encoding から使う圧縮方式を選ぶ．返り値は "zstd" / "gzip" / "identity"．
+
+    zstd は gzip より小さく・速いので優先する（grid20 相当で 16.1MB/0.47s → 5.4MB/0.07s）．
+    ただし zstandard が未インストールなら gzip に落ちる．zstd 非対応のクライアントも
+    Accept-Encoding に zstd を入れてこないので，そのまま gzip になる．
+    """
+    ae = (accept_encoding or "").lower()
+    if _zstd is not None and "zstd" in ae:
+        return "zstd"
+    if "gzip" in ae:
+        return "gzip"
+    return "identity"
+
+
+def _envelope_compressed_bytes(sim_id: str, encoding: str) -> bytes:
+    """圧縮済みエンベロープ．結果は不変なので sim × 方式ごとに 1 回だけ作ってキャッシュする．
+
+    キャッシュは `_enc_cache` に方式名をキーにして持つ．実際に要求された方式しか
+    作らないので，1 種類しか使われない通常運用ではメモリは従来と変わらない
+    （1 件数十 MB になり得るため，両方を先回りして作らない）．
+    """
+    raw = results_store[sim_id]
+    cache = raw.get("_enc_cache")
+    if cache is None:
+        cache = raw["_enc_cache"] = {}
+    blob = cache.get(encoding)
+    if blob is not None:
+        return blob
+
+    t0 = time.perf_counter()
+    data = _envelope_json_bytes(sim_id)
+    t1 = time.perf_counter()
+    if encoding == "zstd":
+        blob = _zstd.ZstdCompressor(level=RESULTS_ZSTD_LEVEL).compress(data)
+    else:
+        blob = gzip.compress(data, compresslevel=RESULTS_GZIP_LEVEL)
+    cache[encoding] = blob
+    print(f"[RISU] /results/{sim_id}: json={len(data)/1e6:.1f}MB ({t1-t0:.2f}s) "
+          f"{encoding}={len(blob)/1e6:.1f}MB ({time.perf_counter()-t1:.2f}s)")
+    return blob
+
+
+def _envelope_gzip_bytes(sim_id: str) -> bytes:
+    """gzip 済みエンベロープ（後方互換のための薄いラッパー）．"""
+    return _envelope_compressed_bytes(sim_id, "gzip")
+
+
+@app.get("/results/{sim_id}")
+async def get_results(sim_id: str, request: Request):
+    """新スキーマ（risu_schema_version 1.0）の完全エンベロープを返す．
+
+    数十 MB になり得るため，
+      - jsonable_encoder（全要素の再帰変換）をバイパスして orjson で直接直列化し，
+      - 直列化と圧縮はイベントループをブロックしないよう executor スレッドで行い，
+      - 圧縮結果は sim × 方式ごとにキャッシュして 2 回目以降は即応答する．
+    Content-Encoding を自前で付けるので GZipMiddleware は二重圧縮しない．
+
+    圧縮方式は Accept-Encoding で交渉する（zstd 優先，無ければ gzip，それも無ければ非圧縮）．
+    ブラウザ側の解凍は透過的なのでフロントの変更は要らない．
     """
     if sim_id not in results_store:
         raise HTTPException(404, detail="Result not found")
-    return _DefaultJSONResponse(_build_envelope(sim_id, include_result=True))
+    loop = asyncio.get_event_loop()
+    encoding = _negotiate_encoding(request.headers.get("accept-encoding", ""))
+    if encoding == "identity":
+        body = await loop.run_in_executor(executor, _envelope_json_bytes, sim_id)
+        # ここでは Vary を付けない．Content-Encoding が無い応答には GZipMiddleware が
+        # 素通し時に Vary: Accept-Encoding を足すので，自前で付けると重複する．
+        # （圧縮済みの応答は middleware が触らないので，そちらは自前で付ける）
+        return Response(body, media_type="application/json")
+    body = await loop.run_in_executor(executor, _envelope_compressed_bytes, sim_id, encoding)
+    return Response(body, media_type="application/json",
+                    headers={"Content-Encoding": encoding, "Vary": "Accept-Encoding"})
 
 
 @app.get("/results/{sim_id}/scenario")
 async def get_results_scenario(sim_id: str):
-    """再現用の軽量エンベロープ（scenario + meta のみ、result なし）を返す。"""
+    """再現用の軽量エンベロープ（scenario + meta のみ，result なし）を返す．"""
     if sim_id not in results_store:
         raise HTTPException(404, detail="Result not found")
     return _build_envelope(sim_id, include_result=False)
@@ -983,18 +1163,18 @@ async def get_results_scenario(sim_id: str):
 # ---- Chat エンドポイント ----
 # LLM_BACKEND 環境変数で切り替え: "mock" / "claude" / "ollama"
 
-SYSTEM_PROMPT = """私はRISUです。交通流シミュレーター UXsim を対話的に操作するアシスタントです。
-一人称は常に「RISU」を使います。
+SYSTEM_PROMPT = """私はRISUです．交通流シミュレーター UXsim を対話的に操作するアシスタントです．
+一人称は常に「RISU」を使います．
 
 【最重要ルール】
-ユーザーがシミュレーションの実行を求めている場合（ネットワーク作成、渋滞シミュレーション、交通シナリオなど）、
-「実行します」「作成します」と言うだけでなく、必ずその場で run_simulation ツールを呼び出してください。
-テキストだけで応答してツール呼び出しを省略することは絶対にしないでください。
+ユーザーがシミュレーションの実行を求めている場合（ネットワーク作成，渋滞シミュレーション，交通シナリオなど），
+「実行します」「作成します」と言うだけでなく，必ずその場で run_simulation ツールを呼び出してください．
+テキストだけで応答してツール呼び出しを省略することは絶対にしないでください．
 
 【ツール呼び出しの指針】
 - ノード座標の単位はメートル（例: x=0, y=0 ～ x=5000, y=5000）
 - flow の単位は台/秒（例: 0.5 = 1秒に0.5台）
-- 知らないネットワーク名を求められた場合でも、妥当な仮定でシナリオを構築してツールを呼び出すこと
+- 知らないネットワーク名を求められた場合でも，妥当な仮定でシナリオを構築してツールを呼び出すこと
 
 【リンクの方向ルール（必須）】
 - すべての link は有向リンク（start → end の一方向）として扱われる
@@ -1003,22 +1183,22 @@ SYSTEM_PROMPT = """私はRISUです。交通流シミュレーター UXsim を�
 - 一方通行を表現したい場合のみ片方向のリンクだけを作る
 
 【容量・ボトルネックの表現】
-- リンクの容量を明示したい場合は link の capacity（台/秒、リンク全体）を指定する
+- リンクの容量を明示したい場合は link の capacity（台/秒，リンク全体）を指定する
   例: {"name": "r1", "start": "A", "end": "B", "length": 2000, "capacity": 0.5}
-- capacity 指定時は下流端の流出容量として作用し、渋滞の待ち行列はそのリンク上に形成される
-- 【注意】リンクの終点ノードがそのまま目的地（demand の dest）の場合、capacity は作用しない
-  （車両は境界を通過せず到着・消滅する）。ボトルネックを見せたい場合は
-  その下流にもう 1 本リンクを置き、目的地を先に延ばすこと
+- capacity 指定時は下流端の流出容量として作用し，渋滞の待ち行列はそのリンク上に形成される
+- 【注意】リンクの終点ノードがそのまま目的地（demand の dest）の場合，capacity は作用しない
+  （車両は境界を通過せず到着・消滅する）．ボトルネックを見せたい場合は
+  その下流にもう 1 本リンクを置き，目的地を先に延ばすこと
 - ユーザーが「容量 1800 台/時」のように台/時で言った場合は 3600 で割って台/秒に変換する（1800台/時 = 0.5台/秒）
-- ノードの flow_capacity は「交差点の処理能力」を表す（全流入リンク合計の流出容量）。
-  特定の道路のボトルネックは link capacity、交差点のボトルネックは node flow_capacity を使い分ける
+- ノードの flow_capacity は「交差点の処理能力」を表す（全流入リンク合計の流出容量）．
+  特定の道路のボトルネックは link capacity，交差点のボトルネックは node flow_capacity を使い分ける
 
 【信号制御】
-UXsim は交差点ノードに信号制御を設定できる。2 つのパラメータで記述する:
+UXsim は交差点ノードに信号制御を設定できる．2 つのパラメータで記述する:
 
 ■ ノード側: signal パラメータ（各現示の青時間リスト）
-  - signal: [60, 60]  → 2現示、各60秒青 → サイクル長120秒
-  - signal: [30, 10, 50, 5]  → 4現示、サイクル長95秒
+  - signal: [60, 60]  → 2現示，各60秒青 → サイクル長120秒
+  - signal: [30, 10, 50, 5]  → 4現示，サイクル長95秒
   - signal を省略 or null → 信号なし（常時通行可能）
 
 ■ リンク側: signal_group パラメータ（どの現示で青になるか）
@@ -1027,12 +1207,12 @@ UXsim は交差点ノードに信号制御を設定できる。2 つのパラメ
   - signal_group を省略 → 信号に関係なく常時通行可能（退出リンクはこれ）
 
 ■ 使い方のルール
-  - signal はノード（交差点）に設定する。signal_group は進入リンクに設定する
+  - signal はノード（交差点）に設定する．signal_group は進入リンクに設定する
   - 退出リンク（交差点→外部）には signal_group を付けない（常時通行可能）
   - 同じ signal_group の進入リンクは同じ現示で同時に青になる
-  - 典型例: 東西方向 signal_group=0、南北方向 signal_group=1
+  - 典型例: 東西方向 signal_group=0，南北方向 signal_group=1
 
-■ 4枝交差点の例（2現示、東西青/南北青）
+■ 4枝交差点の例（2現示，東西青/南北青）
   nodes:
     {"name": "I", "x": 0, "y": 0, "signal": [60, 60]}  ← サイクル120秒
   links (進入リンクのみ signal_group を設定):
@@ -1046,62 +1226,74 @@ UXsim は交差点ノードに信号制御を設定できる。2 つのパラメ
 ■ ユーザーが「信号をつけて」「信号制御して」と言った場合
   - まず交差点ノードに signal パラメータを追加する
   - 進入リンクに signal_group を割り当てる（対向方向は同じ group）
-  - 青時間はユーザーの指示に従う。指示がなければ均等（例: [60, 60]）にする
+  - 青時間はユーザーの指示に従う．指示がなければ均等（例: [60, 60]）にする
 
 【既存ネットワークの修正・再実行（最重要ルール）】
 - 直前のシミュレーション（sim_id は【現在のコンテキスト】に記載）のネットワークを
-  修正して再実行する場合は、必ず rerun_simulation を使う
-- rerun_simulation はサーバーに保存されたシナリオへ「差分命令」だけを適用する。
-  ネットワーク全体（nodes/links）を run_simulation で再送してはいけない。
-  特に OSM 取込・ファイルアップロード由来の大規模ネットワークでは、
+  修正して再実行する場合は，必ず rerun_simulation を使う
+- rerun_simulation はサーバーに保存されたシナリオへ「差分命令」だけを適用する．
+  ネットワーク全体（nodes/links）を run_simulation で再送してはいけない．
+  特に OSM 取込・ファイルアップロード由来の大規模ネットワークでは，
   再送するとサイズ超過で必ず失敗する
 - run_simulation を使うのは「ゼロから新しいネットワークを設計する」ときだけ
-- シナリオ比較（容量変更前後など）も rerun_simulation を複数回呼べばよい。
-  各実行の sim_id が返るので、get_simulation_data でそれぞれの結果を取得して比較する
+- 格子状（グリッド）ネットワークは nodes/links を列挙せず run_simulation の grid テンプレート
+  {"grid":{"nx":5,"ny":5,"spacing":500}} を使う（サーバーが展開する．ノード名 n{i}_{j}，
+  リンク名 n0_0-n1_0 形式）．需要も auto_demands（random / boundary）で生成できる．
+  例: run_simulation({"grid":{"nx":5,"ny":5,"spacing":500},"auto_demands":{"strategy":"boundary"},"tmax":3600})
+- シナリオ比較（容量変更前後など）も rerun_simulation を複数回呼べばよい．
+  各実行の sim_id が返るので，get_simulation_data でそれぞれの結果を取得して比較する
 - ネットワークの中身（ノード名・リンク名・構造）が必要なときは get_network_info で照会する:
   - まず include="summary" で規模・座標範囲・次数上位ノード・名前のサンプルを把握
   - 特定の名前が必要なら include="nodes"/"links" + name_contains / limit / offset で絞り込む
-  - 全件を取得しようとしないこと（上限 200 件/回。要約と絞り込みで足りるはず）
-- 「ランダムに OD を作って」「需要を自動生成して」と言われたら、ノード名を調べる必要はない。
+  - 全件を取得しようとしないこと（上限 200 件/回．要約と絞り込みで足りるはず）
+- 「ランダムに OD を作って」「需要を自動生成して」と言われたら，ノード名を調べる必要はない．
   rerun_simulation の generate_demands アクションでサーバー側に生成させる:
   {"action":"generate_demands","strategy":"random","n_pairs":10,"flow_per_pair":0.2,"clear_existing":true}
   周縁ノード間の現実的な通過交通なら strategy="boundary" を使う
+- 「時差出勤」「ピークを分散」と言われたら rerun_simulation の shift_demands アクションを使う:
+  {"action":"shift_demands","t_from":3600,"t_to":10800,"fraction":0.3,"shift_s":-3600}
+  （時刻はシミュレーション開始からの秒．前倒しと後ろ倒しに分けるなら 2 つ並べる）
 
 【OSM（OpenStreetMap）連携】
-- ユーザーが実在の地名・場所・駅名・ランドマーク等を言及した場合、import_osm_network ツールを使う
+- ユーザーが実在の地名・場所・駅名・ランドマーク等を言及した場合，import_osm_network ツールを使う
   例: 「東京駅周辺」「渋谷の道路」「大阪城公園あたり」「新宿駅」
-- import_osm_network は地名を自動でジオコーディングし、道路ネットワークをダウンロードする
-- distance_m パラメータで範囲を制御する（デフォルト500m）。ユーザーの要望に応じて調整する
-  - 「広い範囲」→ 1000〜2000m、「狭い範囲」「駅前だけ」→ 200〜300m
+- import_osm_network は地名を自動でジオコーディングし，道路ネットワークをダウンロードする
+- distance_m パラメータで範囲を制御する（デフォルト500m）．ユーザーの要望に応じて調整する
+  - 「広い範囲」→ 1000〜2000m，「狭い範囲」「駅前だけ」→ 200〜300m
 - road_types パラメータで取得する道路の種類を制御する:
   - major: 高速道路・国道級のみ（都市間・広域シミュレーション向け）
   - arterial: 幹線道路まで（都市スケールの標準）
-  - drive: 一般車道（デフォルト。住宅街の道路含む、サービス道路除外）
-  - all: 全車道（駐車場内通路等も含む。最も細かいが最も重い）
-- 【重要】distance_m が 1000 以上のときは road_types を "arterial" か "major" にすること。
-  細街路込みで広範囲を取得するとノード数が数千を超え、計算がタイムアウトする。
+  - drive: 一般車道（デフォルト．住宅街の道路含む，サービス道路除外）
+  - all: 全車道（駐車場内通路等も含む．最も細かいが最も重い）
+- 【重要】distance_m が 1000 以上のときは road_types を "arterial" か "major" にすること．
+  細街路込みで広範囲を取得するとノード数が数千を超え，計算がタイムアウトする．
   ユーザーが「主要道路」「幹線道路」「大きい道路だけ」と言った場合も major / arterial を使う
 - 取得後は自動的にダミー需要でシミュレーションが実行される
 - ユーザーが範囲や需要を調整したい場合は対話的にヒアリングしてよい
 - 結果は地図として表示される
 
 【グラフ機能】
-- ユーザーがグラフ・チャート・分析・可視化を求めた場合、get_simulation_data ツールを呼んでデータを取得する
-- データを受け取ったら、ユーザーの要望に合った Chart.js 設定を ```chart ... ``` コードブロックで出力する
+- ユーザーがグラフ・チャート・分析・可視化を求めた場合，get_simulation_data ツールを呼んでデータを取得する
+- データを受け取ったら，ユーザーの要望に合った Chart.js 設定を ```chart ... ``` コードブロックで出力する
 - Chart.js設定は完全なJSON: {type, data: {labels, datasets}, options} 形式
-- 例: ```chart\n{"type":"line","data":{"labels":[0,100,200],"datasets":[{"label":"速度","data":[20,15,10],"borderColor":"#0d9668"}]}}\n```
-- どんな種類のグラフでも自由に作成できる（折れ線、棒、散布図、レーダー等）
+- 【必須】get_simulation_data の配列は書き写さず参照で指定する（出力トークン節約）:
+  {"$data":"time_labels"} / {"$data":"network_avg_speed"} / {"$data":"network_vehicle_count"} /
+  {"$data":"link_speeds.<リンク名>"} / {"$data":"speed_histogram.labels"} / {"$data":"speed_histogram.counts"}
+  複数の sim を比較するときは {"$data":"network_avg_speed","sim_id":"xxxxxxxx"} と sim_id を付ける
+- 例: ```chart\n{"type":"line","data":{"labels":{"$data":"time_labels"},"datasets":[{"label":"平均速度","data":{"$data":"network_avg_speed"},"borderColor":"#0d9668"}]}}\n```
+- 差分・比率など加工した値が必要なときだけ数値を直接書く
+- どんな種類のグラフでも自由に作成できる（折れ線，棒，散布図，レーダー等）
 - 複数のグラフを返す場合は複数の ```chart ブロックを使う
-- データの加工・計算・フィルタリングは自由に行ってよい（平均、差分、比率、累積など）
+- データの加工・計算・フィルタリングは自由に行ってよい（平均，差分，比率，累積など）
 
 【ファイル添付】
-- ユーザーがCSV/JSONファイルを添付した場合、メッセージ内にパース結果が含まれる
-- RISU CSV形式のパース結果にはnodes/links/demandsがJSON形式で含まれるので、そのまま run_simulation に渡すこと
-- ユーザーのメッセージも確認し、パラメータ変更の要望があれば反映すること
+- ユーザーがCSV/JSONファイルを添付した場合，メッセージ内にパース結果が含まれる
+- RISU CSV形式のパース結果にはnodes/links/demandsがJSON形式で含まれるので，そのまま run_simulation に渡すこと
+- ユーザーのメッセージも確認し，パラメータ変更の要望があれば反映すること
 
 【結果の説明】
-結果を説明する際は、渋滞箇所・平均旅行時間・完了率などを分かりやすく日本語で解説してください。
-常に「RISUが〜しました」のように一人称で話してください。"""
+結果を説明する際は，渋滞箇所・平均旅行時間・完了率などを分かりやすく日本語で解説してください．
+常に「RISUが〜しました」のように一人称で話してください．"""
 
 # ── モック用シナリオ定義 ──
 MOCK_SCENARIOS = {
@@ -1124,16 +1316,16 @@ MOCK_SCENARIOS = {
             ],
         },
         "description": (
-            "ボトルネック道路のシミュレーションを実行しました。\n\n"
+            "ボトルネック道路のシミュレーションを実行しました．\n\n"
             "【シナリオ】\n"
             "・start → neck → goal の3ノード直線道路\n"
             "・neck ノードの流出容量を 0.4 台/秒に制限（ボトルネック）\n"
             "・road2 の自由流速度を 10 m/s に低下\n"
             "・0〜600秒に 0.8 台/秒の需要を投入\n\n"
             "【結果の見方】\n"
-            "・タイムスライダーを動かすと、時間経過に伴う速度変化が確認できます\n"
-            "・緑=自由流（スムーズ）、赤=渋滞を示します\n"
-            "・ボトルネック手前（road1）で渋滞が発生し、速度が低下している様子が観察できます"
+            "・タイムスライダーを動かすと，時間経過に伴う速度変化が確認できます\n"
+            "・緑=自由流（スムーズ），赤=渋滞を示します\n"
+            "・ボトルネック手前（road1）で渋滞が発生し，速度が低下している様子が観察できます"
         ),
     },
     "grid": {
@@ -1189,14 +1381,14 @@ MOCK_SCENARIOS = {
             ],
         },
         "description": (
-            "3×3 グリッドネットワークのシミュレーションを実行しました。\n\n"
+            "3×3 グリッドネットワークのシミュレーションを実行しました．\n\n"
             "【シナリオ】\n"
-            "・9ノード（3×3格子）、24リンク（全道路双方向）のグリッド道路網\n"
-            "・3つの OD 需要: 左下→右上、左上→右下、右下→左上\n"
+            "・9ノード（3×3格子），24リンク（全道路双方向）のグリッド道路網\n"
+            "・3つの OD 需要: 左下→右上，左上→右下，右下→左上\n"
             "・交差点（n11）付近で交通が集中\n\n"
             "【結果の見方】\n"
             "・双方向リンクは円弧で表示されます（進行方向の右側に膨らむ）\n"
-            "・中央の交差点付近のリンクが赤くなり、混雑が確認できます\n"
+            "・中央の交差点付近のリンクが赤くなり，混雑が確認できます\n"
             "・タイムスライダーで需要投入前後の変化を観察してください"
         ),
     },
@@ -1219,13 +1411,13 @@ MOCK_SCENARIOS = {
             ],
         },
         "description": (
-            "シミュレーションを実行しました。\n\n"
+            "シミュレーションを実行しました．\n\n"
             "【シナリオ】\n"
             "・A → B → C の3ノード道路\n"
             "・0〜500秒に 0.6 台/秒の需要\n\n"
             "【結果の見方】\n"
             "・タイムスライダーで速度の時間変化を確認できます\n"
-            "・緑=スムーズ、赤=渋滞です"
+            "・緑=スムーズ，赤=渋滞です"
         ),
     },
 }
@@ -1237,11 +1429,11 @@ def _mock_llm_response(user_text: str) -> dict:
     # シミュレーション不要な質問
     greetings = ["hello", "こんにちは", "はじめ", "ありがとう", "thanks"]
     if any(g in text for g in greetings):
-        return {"content": "こんにちは！交通流シミュレーター UXsim のアシスタントです。\n\nシミュレーションしたいシナリオを入力してください。例えば：\n・「ボトルネック道路を作って」\n・「3×3 グリッドネットワーク」\n・「渋滞をシミュレーションして」\n\nお気軽にどうぞ！", "scenario_key": None}
+        return {"content": "こんにちは！交通流シミュレーター UXsim のアシスタントです．\n\nシミュレーションしたいシナリオを入力してください．例えば：\n・「ボトルネック道路を作って」\n・「3×3 グリッドネットワーク」\n・「渋滞をシミュレーションして」\n\nお気軽にどうぞ！", "scenario_key": None}
 
     info_keywords = ["教えて", "説明", "とは", "仕組み", "条件"]
     if any(k in text for k in info_keywords) and not any(k in text for k in ["作って", "シミュレ", "実行"]):
-        return {"content": "交通流の渋滞は、道路の容量を超える交通需要が発生したときに起こります。\n\n主な要因：\n・ボトルネック（車線減少、合流部）\n・交通需要の集中（ラッシュアワー）\n・信号制御の不適切な設定\n\n実際にシミュレーションで確認してみましょう！\n「ボトルネック道路を作って」と入力してみてください。", "scenario_key": None}
+        return {"content": "交通流の渋滞は，道路の容量を超える交通需要が発生したときに起こります．\n\n主な要因：\n・ボトルネック（車線減少，合流部）\n・交通需要の集中（ラッシュアワー）\n・信号制御の不適切な設定\n\n実際にシミュレーションで確認してみましょう！\n「ボトルネック道路を作って」と入力してみてください．", "scenario_key": None}
 
     # シナリオ選択
     if any(k in text for k in ["ボトルネック", "bottleneck", "単純", "渋滞"]):
@@ -1256,9 +1448,9 @@ def _mock_llm_response(user_text: str) -> dict:
 @app.post("/chat")
 async def chat(body: ChatInput):
     """チャットエンドポイント（mock / claude / ollama）
-    フロントエンドは常に JSON で送信。
-    ファイル添付時はフロントでテキスト読み取りしてメッセージに含める。
-    Claude バックエンド時は SSE ストリーミングで進捗を返す。
+    フロントエンドは常に JSON で送信．
+    ファイル添付時はフロントでテキスト読み取りしてメッセージに含める．
+    Claude バックエンド時は SSE ストリーミングで進捗を返す．
     """
     # 空メッセージ防止
     for i, m in enumerate(body.messages):
@@ -1276,7 +1468,7 @@ async def chat(body: ChatInput):
 
 
 async def _chat_mock(user_text: str):
-    """モック LLM: キーワードマッチでシナリオを選択し、実際の UXsim を実行"""
+    """モック LLM: キーワードマッチでシナリオを選択し，実際の UXsim を実行"""
     mock = _mock_llm_response(user_text)
 
     # テキスト応答のみ（シミュレーション不要）
@@ -1286,7 +1478,6 @@ async def _chat_mock(user_text: str):
     # シミュレーション実行
     scenario_data = MOCK_SCENARIOS[mock["scenario_key"]]
     sim_input = SimulationInput(**scenario_data["scenario"])
-    loop = asyncio.get_event_loop()
     result = await _run_uxsim_async(sim_input)
     sim_id = str(uuid.uuid4())[:8]
     _store_sim(sim_id, result, {
@@ -1311,10 +1502,16 @@ async def _chat_mock(user_text: str):
 
 
 # ── シミュレーションデータ集計（LLM に渡す） ──
-def _get_simulation_data(sim_id: str) -> dict | None:
-    """シミュレーション結果から集計データを返す（LLMがチャート生成に使用）"""
+def _get_simulation_data(sim_id: str, points: int = 30, max_links: int = 20) -> dict | None:
+    """シミュレーション結果から集計データを返す（LLMがチャート生成に使用）．
+
+    LLM のコンテキストに入るので小さく保つ: 時系列は最大 points 点，リンク別速度は
+    混雑度上位 max_links 本，速度は 0.1 m/s に丸める．
+    """
     if sim_id not in results_store:
         return None
+    points = max(5, min(int(points or 30), 60))
+    max_links = max(0, min(int(max_links if max_links is not None else 20), 50))
     data = results_store[sim_id]
     frames = data.get("frames", {})
     geojson = data.get("geojson", {})
@@ -1322,35 +1519,41 @@ def _get_simulation_data(sim_id: str) -> dict | None:
     tmax = data.get("tmax", 3600)
     stats = data.get("stats", {})
 
-    frame_times = sorted([float(k) for k in frames.keys()])
+    frame_times = data.get("frame_times") or sorted([float(k) for k in frames.keys()])
     if not frame_times:
         return None
+    # 描画用フレームが車両サンプリングされている場合，台数を元のスケールに戻す
+    sample_step = int(data.get("vehicle_sample_step") or 1)
 
-    # 間引き（最大40点）
-    step = max(1, len(frame_times) // 40)
+    # 間引き（最大 points 点）
+    step = max(1, -(-len(frame_times) // points))
     sampled = frame_times[::step]
 
     # ネットワーク全体の時系列
     # frames はコンパクト列指向フォーマット: {t_key: {ids:[], xs:[], ys:[], vs:[], ...}}
+    # （各列は list または numpy 配列）
+    import numpy as np
     time_labels = []
     net_avg_speed = []
     net_vehicle_count = []
+    sampled_speeds = []
     for t in sampled:
         t_key = str(t) if str(t) in frames else str(round(t, 1))
         cols = frames.get(t_key) or {}
-        speeds = cols.get("vs", [])
+        speeds = np.asarray(cols.get("vs", ()), dtype=np.float64)
         time_labels.append(round(t))
-        net_vehicle_count.append(len(speeds))
-        if speeds:
-            net_avg_speed.append(round(sum(speeds) / len(speeds), 2))
+        net_vehicle_count.append(int(speeds.size) * sample_step)
+        if speeds.size:
+            net_avg_speed.append(round(float(speeds.mean()), 1))
+            sampled_speeds.append(speeds)
         else:
             net_avg_speed.append(None)
 
     # リンク別速度
     # 大規模ネットワーク（数千〜1万リンク）で全リンクを返すと LLM の
-    # コンテキストに収まらないため、混雑度（平均速度 / 自由流速度 が低い順）
-    # 上位 MAX_DETAIL_LINKS 本に制限する。
-    MAX_DETAIL_LINKS = 30
+    # コンテキストに収まらないため，混雑度（平均速度 / 自由流速度 が低い順）
+    # 上位 MAX_DETAIL_LINKS 本に制限する．
+    MAX_DETAIL_LINKS = max_links
     total_links = len(features)
 
     def _congestion_ratio(f):
@@ -1364,7 +1567,8 @@ def _get_simulation_data(sim_id: str) -> dict | None:
     detail_features = features
     truncated = False
     if total_links > MAX_DETAIL_LINKS:
-        detail_features = sorted(features, key=_congestion_ratio)[:MAX_DETAIL_LINKS]
+        detail_features = (sorted(features, key=_congestion_ratio)[:MAX_DETAIL_LINKS]
+                           if MAX_DETAIL_LINKS > 0 else [])
         truncated = True
 
     link_names = [f["properties"]["name"] for f in detail_features]
@@ -1381,27 +1585,20 @@ def _get_simulation_data(sim_id: str) -> dict | None:
                 m = (lo + hi + 1) >> 1
                 if tl[m]["t"] <= t: lo = m
                 else: hi = m - 1
-            speeds.append(round(tl[lo]["speed"], 2))
+            speeds.append(round(tl[lo]["speed"], 1))
         link_speeds[ln] = speeds
 
-    # 速度分布（全期間）
-    all_speeds = []
-    for t in sampled:
-        t_key = str(t) if str(t) in frames else str(round(t, 1))
-        cols = frames.get(t_key) or {}
-        for spd in cols.get("vs", []):
-            all_speeds.append(round(spd, 1))
-
+    # 速度分布（全期間，サンプル時刻の全車両点）
     speed_hist = {"labels": [], "counts": []}
-    if all_speeds:
-        max_spd = max(all_speeds)
+    if sampled_speeds:
+        all_speeds = np.round(np.concatenate(sampled_speeds), 1)
+        max_spd = float(all_speeds.max())
         bin_size = max(1, round(max_spd / 12))
         bins = list(range(0, int(max_spd) + bin_size + 1, bin_size))
-        counts = [0] * (len(bins) - 1)
-        for s in all_speeds:
-            idx = min(int(s / bin_size), len(counts) - 1)
-            counts[idx] += 1
-        speed_hist["labels"] = [f"{bins[i]}-{bins[i+1]}" for i in range(len(counts))]
+        n_bins = len(bins) - 1
+        idx = np.minimum((all_speeds / bin_size).astype(np.int64), n_bins - 1)
+        counts = np.bincount(idx, minlength=n_bins).tolist()
+        speed_hist["labels"] = [f"{bins[i]}-{bins[i+1]}" for i in range(n_bins)]
         speed_hist["counts"] = counts
 
     data = {
@@ -1418,17 +1615,22 @@ def _get_simulation_data(sim_id: str) -> dict | None:
     }
     if truncated:
         data["link_speeds_note"] = (
-            f"リンク数が多いため（全 {total_links} 本）、link_speeds / link_names は"
-            f"混雑度上位 {MAX_DETAIL_LINKS} 本のみ。ネットワーク全体の傾向は"
-            f" network_avg_speed / speed_histogram を参照。"
+            f"リンク数が多いため（全 {total_links} 本），link_speeds / link_names は"
+            f"混雑度上位 {MAX_DETAIL_LINKS} 本のみ．ネットワーク全体の傾向は"
+            f" network_avg_speed / speed_histogram を参照．"
+        )
+    if sample_step > 1:
+        data["vehicle_sample_note"] = (
+            f"描画用フレームは {sample_step} 台に 1 台をサンプリングしている．"
+            f"network_vehicle_count は補正済み，speed_histogram の counts はサンプル数．"
         )
     return data
 
 
 # ──────────────────────────────────────────────
 # シナリオパッチエンジン（rerun_simulation 用）
-# 大規模ネットワークを LLM に往復させず、保存済みシナリオへの
-# 「小さな差分命令」だけで修正・再実行できるようにする。
+# 大規模ネットワークを LLM に往復させず，保存済みシナリオへの
+# 「小さな差分命令」だけで修正・再実行できるようにする．
 # ──────────────────────────────────────────────
 import copy as _copy
 
@@ -1462,9 +1664,9 @@ _DEMAND_SET_FIELDS = {"flow", "t_start", "t_end"}
 
 
 def _apply_modifications(scenario: dict, mods: list[dict]) -> tuple[dict, list[str]]:
-    """保存済みシナリオ dict に modification 命令列を適用する。
+    """保存済みシナリオ dict に modification 命令列を適用する．
 
-    戻り値: (新しいシナリオ dict, 適用ログ)。不正な命令は ValueError。
+    戻り値: (新しいシナリオ dict, 適用ログ)．不正な命令は ValueError．
     """
     sc = _copy.deepcopy(scenario)
     sc.setdefault("nodes", []); sc.setdefault("links", []); sc.setdefault("demands", [])
@@ -1518,7 +1720,7 @@ def _apply_modifications(scenario: dict, mods: list[dict]) -> tuple[dict, list[s
             desc = []
             if sets: desc.append(f"{sorted(sets)} を設定")
             if scale is not None: desc.append(f"flow を {scale} 倍")
-            applied.append(f"update_demands: {len(idxs)} 件に " + "、".join(desc))
+            applied.append(f"update_demands: {len(idxs)} 件に " + "，".join(desc))
 
         elif action == "add_node":
             node = mod.get("node")
@@ -1558,7 +1760,7 @@ def _apply_modifications(scenario: dict, mods: list[dict]) -> tuple[dict, list[s
             sc["links"] = [l for l in sc["links"] if l.get("start") not in names and l.get("end") not in names]
             sc["demands"] = [d for d in sc["demands"] if d.get("orig") not in names and d.get("dest") not in names]
             applied.append(
-                f"remove_nodes: {len(idxs)} 個を削除（接続リンク {n_links_before - len(sc['links'])} 本、"
+                f"remove_nodes: {len(idxs)} 個を削除（接続リンク {n_links_before - len(sc['links'])} 本，"
                 f"需要 {n_dem_before - len(sc['demands'])} 件も削除）")
 
         elif action == "remove_demands":
@@ -1577,10 +1779,9 @@ def _apply_modifications(scenario: dict, mods: list[dict]) -> tuple[dict, list[s
             applied.append(f"set_tmax: {sc['tmax']}s")
 
         elif action == "generate_demands":
-            # サーバー側で OD 需要を自動生成する。LLM がノード名を列挙する
-            # 必要がないため、大規模ネットワークでも「ランダムに OD を生成」の
-            # ような指示に対応できる。
-            import random as _random
+            # サーバー側で OD 需要を自動生成する．LLM がノード名を列挙する
+            # 必要がないため，大規模ネットワークでも「ランダムに OD を生成」の
+            # ような指示に対応できる．
             strategy = mod.get("strategy", "random")
             if len(sc["nodes"]) < 2:
                 raise ValueError("generate_demands にはノードが 2 つ以上必要です")
@@ -1589,63 +1790,64 @@ def _apply_modifications(scenario: dict, mods: list[dict]) -> tuple[dict, list[s
                 sc["demands"] = []
             else:
                 n_cleared = None
-            tmax = int(sc.get("tmax", 3600))
-            t_start = float(mod.get("t_start", 0))
-            t_end = float(mod.get("t_end", tmax * 0.5))
-
-            if strategy == "boundary":
-                # ネットワーク周縁ノード全ペア（OSM インポートと同じロジック）
-                new_demands = _generate_osm_demands(sc["nodes"], sc["links"], tmax)
-                if mod.get("flow_per_pair") is not None:
-                    for d in new_demands:
-                        d["flow"] = float(mod["flow_per_pair"])
-                for d in new_demands:
-                    d["t_start"] = t_start
-                    d["t_end"] = t_end
-            elif strategy == "random":
-                n_pairs = max(1, int(mod.get("n_pairs", 10)))
-                if mod.get("flow_per_pair") is not None:
-                    flow = float(mod["flow_per_pair"])
-                elif mod.get("flow_total") is not None:
-                    flow = round(float(mod["flow_total"]) / n_pairs, 4)
-                else:
-                    flow = 0.2
-                rng = _random.Random(mod.get("seed"))
-                names = [n["name"] for n in sc["nodes"]]
-                new_demands = []
-                for _ in range(n_pairs):
-                    orig, dest = rng.sample(names, 2)
-                    new_demands.append({"orig": orig, "dest": dest,
-                                        "t_start": t_start, "t_end": t_end,
-                                        "flow": flow})
-            else:
-                raise ValueError(f"generate_demands の strategy は random / boundary（指定: {strategy}）")
-
+            try:
+                new_demands = _generate_demands_spec(sc["nodes"], sc["links"], mod,
+                                                     int(sc.get("tmax", 3600)))
+            except ValueError as e:
+                raise ValueError(f"generate_demands の {e}") from e
             sc["demands"].extend(new_demands)
             msg = f"generate_demands({strategy}): {len(new_demands)} 件を生成"
             if n_cleared is not None:
                 msg += f"（既存 {n_cleared} 件はクリア）"
             applied.append(msg)
 
+        elif action == "shift_demands":
+            # 需要パターンの時間シフト（時差出勤・ピークカット）．
+            # 時間帯 [t_from, t_to) に入る需要行の flow を fraction だけ減らし，
+            # 同じ OD で t_start/t_end を shift_s ずらした行を追加する．
+            # 例: 7-9 時の 30% を 1 時間前倒し → {"t_from":3600,"t_to":10800,"fraction":0.3,"shift_s":-3600}
+            t_from = float(mod.get("t_from", 0)); t_to = float(mod.get("t_to", sc.get("tmax", 3600)))
+            frac = float(mod.get("fraction", 0.3)); shift_s = float(mod.get("shift_s", -3600))
+            if not (0 < frac <= 1):
+                raise ValueError("shift_demands の fraction は 0 より大きく 1 以下")
+            orig, dest = mod.get("orig"), mod.get("dest")
+            moved = 0.0; n_rows = 0; new_rows = []
+            for d in sc["demands"]:
+                if orig is not None and d.get("orig") != orig: continue
+                if dest is not None and d.get("dest") != dest: continue
+                if float(d["t_start"]) < t_from or float(d["t_end"]) > t_to: continue
+                part = round(float(d["flow"]) * frac, 4)
+                if part <= 0: continue
+                d["flow"] = round(float(d["flow"]) - part, 4)
+                ns, ne = float(d["t_start"]) + shift_s, float(d["t_end"]) + shift_s
+                if ns < 0:
+                    raise ValueError(f"shift_demands: シフト後の開始時刻が負になります（{ns}s）")
+                new_rows.append({"orig": d["orig"], "dest": d["dest"], "t_start": ns, "t_end": ne, "flow": part})
+                moved += part * (float(d["t_end"]) - float(d["t_start"])); n_rows += 1
+            if n_rows == 0:
+                raise ValueError(f"shift_demands: 時間帯 [{t_from}, {t_to}) に該当する需要がありません")
+            sc["demands"].extend(new_rows)
+            applied.append(f"shift_demands: {n_rows} 行の {frac:.0%}（約 {moved:,.0f} 台）を {shift_s:+.0f}s 移動")
+
         else:
             raise ValueError(
                 f"未対応の action: {action}（対応: update_links / update_nodes / update_demands / "
                 "add_node / add_link / add_demand / remove_links / remove_nodes / remove_demands / "
-                "generate_demands / set_tmax）")
+                "generate_demands / shift_demands / set_tmax）")
 
     return sc, applied
 
 
 def _handle_get_network_info(fn_args: dict) -> tuple[str, bool]:
-    """get_network_info ツールの共通ハンドラ。(content, is_error) を返す。
+    """get_network_info ツールの共通ハンドラ．(content, is_error) を返す．
 
     LLM がネットワークの中身（ノード名・リンク名・構造）を必要な分だけ
-    照会するためのツール。常に上限つきで返し、コンテキストを溢れさせない。
+    照会するためのツール．常に上限つきで返し，コンテキストを溢れさせない．
     """
     sim_id = str(fn_args.get("sim_id", "")).strip()
     if sim_id not in results_store:
         known = list(results_store.keys())[-5:]
-        return (f"sim_id '{sim_id}' が見つかりません。有効な sim_id: {known}", True)
+        return (f"sim_id '{sim_id}' が見つかりません．有効な sim_id: {known}", True)
     sc = results_store[sim_id].get("_scenario") or {}
     nodes = sc.get("nodes") or []
     links = sc.get("links") or []
@@ -1680,8 +1882,8 @@ def _handle_get_network_info(fn_args: dict) -> tuple[str, bool]:
         out["signal_nodes"] = signal_nodes[:20]
         out["sample_node_names"] = [n["name"] for n in nodes[:20]]
         out["sample_link_names"] = [lk["name"] for lk in links[:20]]
-        out["hint"] = ("詳細は include='nodes'/'links'/'demands'（limit/offset/name_contains 指定可）。"
-                       "ランダム OD は rerun_simulation の generate_demands アクションが使える。")
+        out["hint"] = ("詳細は include='nodes'/'links'/'demands'（limit/offset/name_contains 指定可）．"
+                       "ランダム OD は rerun_simulation の generate_demands アクションが使える．")
     elif include == "nodes":
         items = nodes
         if name_contains:
@@ -1695,7 +1897,7 @@ def _handle_get_network_info(fn_args: dict) -> tuple[str, bool]:
             for n in items[offset:offset + limit]
         ]
         if len(items) > offset + limit:
-            out["note"] = f"{offset + limit} 件目まで表示（全 {len(items)} 件）。offset で続きを取得"
+            out["note"] = f"{offset + limit} 件目まで表示（全 {len(items)} 件）．offset で続きを取得"
     elif include == "links":
         items = links
         if name_contains:
@@ -1711,7 +1913,7 @@ def _handle_get_network_info(fn_args: dict) -> tuple[str, bool]:
             for l in items[offset:offset + limit]
         ]
         if len(items) > offset + limit:
-            out["note"] = f"{offset + limit} 件目まで表示（全 {len(items)} 件）。offset で続きを取得"
+            out["note"] = f"{offset + limit} 件目まで表示（全 {len(items)} 件）．offset で続きを取得"
     elif include == "demands":
         out["matched"] = len(demands)
         out["demands"] = demands[offset:offset + limit]
@@ -1724,18 +1926,18 @@ def _handle_get_network_info(fn_args: dict) -> tuple[str, bool]:
 
 
 async def _handle_rerun_simulation(fn_args: dict, body) -> tuple[str, str | None, bool]:
-    """rerun_simulation ツールの共通ハンドラ（stream / sync 両系統から使用）。
+    """rerun_simulation ツールの共通ハンドラ（stream / sync 両系統から使用）．
 
     戻り値: (tool_result content, 新 sim_id または None, is_error)
     """
     base_id = str(fn_args.get("base_sim_id", "")).strip()
     if base_id not in results_store:
         known = list(results_store.keys())[-5:]
-        return (f"base_sim_id '{base_id}' が見つかりません。有効な sim_id: {known}", None, True)
+        return (f"base_sim_id '{base_id}' が見つかりません．有効な sim_id: {known}", None, True)
     base = results_store[base_id]
     base_scenario = base.get("_scenario")
     if not base_scenario:
-        return (f"sim_id '{base_id}' にはシナリオが保存されていません。", None, True)
+        return (f"sim_id '{base_id}' にはシナリオが保存されていません．", None, True)
 
     try:
         mods = fn_args.get("modifications") or []
@@ -1778,7 +1980,7 @@ async def _handle_rerun_simulation(fn_args: dict, body) -> tuple[str, str | None
     except HTTPException as e:
         return (f"再実行エラー: {e.detail}", None, True)
     except (ValueError, TypeError) as e:
-        return (f"modifications が不正です: {e}\n修正して再度 rerun_simulation を呼んでください。", None, True)
+        return (f"modifications が不正です: {e}\n修正して再度 rerun_simulation を呼んでください．", None, True)
     except Exception as e:
         return (f"再実行エラー: {e.__class__.__name__}: {e}", None, True)
 
@@ -1788,16 +1990,47 @@ CLAUDE_TOOLS = [
     {
         "name": "run_simulation",
         "description": (
-            "UXsim 交通流シミュレーションを実行する。"
-            "ノード（交差点）、リンク（道路）、需要（交通量）を指定する。"
-            "座標の単位はメートル、flow の単位は台/秒。"
+            "UXsim 交通流シミュレーションを実行する．"
+            "ノード（交差点），リンク（道路），需要（交通量）を指定する．"
+            "座標の単位はメートル，flow の単位は台/秒．"
+            "格子状ネットワークは nodes/links を列挙せず grid テンプレートで指定すること"
+            "（サーバー側で展開．ノード名は n{i}_{j}，リンク名は n0_0-n1_0 形式で返る）．"
+            "OD をランダム/周縁に自動生成したいときは auto_demands を使う（demands は省略可）．"
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "name":    {"type": "string", "description": "シミュレーション名"},
-                "tmax":    {"type": "integer", "description": "シミュレーション終了時刻（秒）。デフォルト2000"},
+                "tmax":    {"type": "integer", "description": "シミュレーション終了時刻（秒）．デフォルト2000"},
                 "deltan":  {"type": "integer", "description": "車両集計単位（デフォルト5）"},
+                "grid": {
+                    "type": "object",
+                    "description": "格子ネットワークをサーバー側で生成する（nodes/links の列挙不要）",
+                    "properties": {
+                        "nx": {"type": "integer", "description": "横方向のノード数"},
+                        "ny": {"type": "integer", "description": "縦方向のノード数（省略で nx）"},
+                        "spacing": {"type": "number", "description": "ノード間隔＝リンク長（m）．デフォルト500"},
+                        "bidirectional": {"type": "boolean", "description": "双方向道路にする（デフォルト true）"},
+                        "free_flow_speed": {"type": "number"},
+                        "number_of_lanes": {"type": "integer"},
+                        "capacity": {"type": "number"},
+                        "name_prefix": {"type": "string", "description": "ノード名の接頭辞（デフォルト n）"},
+                    },
+                    "required": ["nx"],
+                },
+                "auto_demands": {
+                    "type": "object",
+                    "description": "OD 需要の自動生成．strategy=random（ランダムなノードペア）/ boundary（周縁ノード全ペア）",
+                    "properties": {
+                        "strategy": {"type": "string", "enum": ["random", "boundary"]},
+                        "n_pairs": {"type": "integer", "description": "random のペア数（デフォルト10）"},
+                        "flow_per_pair": {"type": "number", "description": "ペアあたり流率（台/秒）"},
+                        "flow_total": {"type": "number", "description": "合計流率（台/秒，flow_per_pair の代わり）"},
+                        "seed": {"type": "integer"},
+                        "t_start": {"type": "number"},
+                        "t_end": {"type": "number", "description": "デフォルト tmax の半分"},
+                    },
+                },
                 "nodes": {
                     "type": "array",
                     "description": "交差点リスト",
@@ -1807,11 +2040,11 @@ CLAUDE_TOOLS = [
                             "name": {"type": "string"},
                             "x":    {"type": "number", "description": "X座標（メートル）"},
                             "y":    {"type": "number", "description": "Y座標（メートル）"},
-                            "flow_capacity": {"type": "number", "description": "ノード流出容量（台/秒）。省略で無制限"},
+                            "flow_capacity": {"type": "number", "description": "ノード流出容量（台/秒）．省略で無制限"},
                             "signal": {
                                 "type": "array",
                                 "items": {"type": "number"},
-                                "description": "信号現示の青時間リスト（秒）。例: [60,60]→2現示各60秒。省略=信号なし",
+                                "description": "信号現示の青時間リスト（秒）．例: [60,60]→2現示各60秒．省略=信号なし",
                             },
                         },
                         "required": ["name", "x", "y"],
@@ -1827,11 +2060,11 @@ CLAUDE_TOOLS = [
                             "start":            {"type": "string", "description": "始点ノード名"},
                             "end":              {"type": "string", "description": "終点ノード名"},
                             "length":           {"type": "number", "description": "道路長（メートル）"},
-                            "free_flow_speed":  {"type": "number", "description": "自由流速度（m/s）。デフォルト20"},
-                            "jam_density":      {"type": "number", "description": "渋滞密度（台/m）。デフォルト0.2"},
-                            "number_of_lanes":  {"type": "integer", "description": "車線数。デフォルト1"},
-                            "capacity":         {"type": "number", "description": "リンク容量（台/秒、リンク全体）。ボトルネックの明示表現に使う（例: 0.5）。省略時は速度・密度・車線数から決まる容量"},
-                            "signal_group":     {"type": "integer", "description": "この進入リンクが青になる信号現示番号（0始まり）。退出リンクには不要。省略=常時通行可能"},
+                            "free_flow_speed":  {"type": "number", "description": "自由流速度（m/s）．デフォルト20"},
+                            "jam_density":      {"type": "number", "description": "渋滞密度（台/m）．デフォルト0.2"},
+                            "number_of_lanes":  {"type": "integer", "description": "車線数．デフォルト1"},
+                            "capacity":         {"type": "number", "description": "リンク容量（台/秒，リンク全体）．ボトルネックの明示表現に使う（例: 0.5）．省略時は速度・密度・車線数から決まる容量"},
+                            "signal_group":     {"type": "integer", "description": "この進入リンクが青になる信号現示番号（0始まり）．退出リンクには不要．省略=常時通行可能"},
                         },
                         "required": ["name", "start", "end", "length"],
                     },
@@ -1852,17 +2085,17 @@ CLAUDE_TOOLS = [
                     },
                 },
             },
-            "required": ["nodes", "links", "demands"],
+            "required": [],
         },
     },
     {
         "name": "rerun_simulation",
         "description": (
-            "保存済みシミュレーション（base_sim_id）のネットワークを起点に、"
-            "小さな修正（modifications）を適用して再実行する。"
+            "保存済みシミュレーション（base_sim_id）のネットワークを起点に，"
+            "小さな修正（modifications）を適用して再実行する．"
             "OSM 取込やファイルアップロードで作られた既存ネットワークの調整・比較は"
-            "【必ず】このツールを使うこと。ネットワーク全体を run_simulation で"
-            "再送してはいけない（大規模ネットワークではサイズ超過になる）。"
+            "【必ず】このツールを使うこと．ネットワーク全体を run_simulation で"
+            "再送してはいけない（大規模ネットワークではサイズ超過になる）．"
             "modifications の例:\n"
             '・リンク容量変更: {"action":"update_links","names":["r1"],"set":{"capacity":0.5}}\n'
             '・全リンク速度変更: {"action":"update_links","all":true,"set":{"free_flow_speed":15}}\n'
@@ -1875,9 +2108,13 @@ CLAUDE_TOOLS = [
             '・時間変更: {"action":"set_tmax","tmax":7200}\n'
             '・OD 自動生成: {"action":"generate_demands","strategy":"random","n_pairs":10,'
             '"flow_per_pair":0.2,"clear_existing":true}\n'
-            '  （strategy: random=ランダムなノードペア / boundary=ネットワーク周縁の全ペア。'
-            'seed で再現可、flow_total で合計流率指定も可。ノード名を知らなくても使える）\n'
-            "modifications: [] で無修正の再実行（tmax だけ変える等）も可能。"
+            '  （strategy: random=ランダムなノードペア / boundary=ネットワーク周縁の全ペア．'
+            'seed で再現可，flow_total で合計流率指定も可．ノード名を知らなくても使える）\n'
+            '・需要の時間シフト（時差出勤）: {"action":"shift_demands","t_from":3600,"t_to":10800,'
+            '"fraction":0.3,"shift_s":-3600}\n'
+            '  （時間帯 [t_from,t_to) の需要の fraction を shift_s 秒ずらす．前倒しは負，後ろ倒しは正．'
+            '2 方向に分けるなら 2 回指定）\n'
+            "modifications: [] で無修正の再実行（tmax だけ変える等）も可能．"
         ),
         "input_schema": {
             "type": "object",
@@ -1885,10 +2122,10 @@ CLAUDE_TOOLS = [
                 "base_sim_id": {"type": "string", "description": "起点となるシミュレーション ID"},
                 "modifications": {
                     "type": "array",
-                    "description": "修正命令の配列（description の例を参照）。各要素は action フィールドを持つ",
+                    "description": "修正命令の配列（description の例を参照）．各要素は action フィールドを持つ",
                     "items": {"type": "object"},
                 },
-                "tmax": {"type": "integer", "description": "シミュレーション時間の上書き（秒、省略可）"},
+                "tmax": {"type": "integer", "description": "シミュレーション時間の上書き（秒，省略可）"},
                 "name": {"type": "string", "description": "新しいシミュレーション名（省略可）"},
             },
             "required": ["base_sim_id", "modifications"],
@@ -1897,22 +2134,22 @@ CLAUDE_TOOLS = [
     {
         "name": "get_network_info",
         "description": (
-            "保存済みシミュレーションのネットワーク構造（ノード・リンク・需要）を照会する。"
-            "大規模ネットワークはチャットに全体が渡らないため、ノード名やリンク名が"
-            "必要な操作（OD 設定・信号設置・特定リンクの修正など）の前に、"
-            "このツールで必要な分だけ調べる。"
-            "include='summary' で規模・座標範囲・次数上位ノード・名前のサンプルを取得。"
-            "include='nodes'/'links'/'demands' で一覧（limit/offset でページング、"
-            "name_contains で絞り込み）。"
+            "保存済みシミュレーションのネットワーク構造（ノード・リンク・需要）を照会する．"
+            "大規模ネットワークはチャットに全体が渡らないため，ノード名やリンク名が"
+            "必要な操作（OD 設定・信号設置・特定リンクの修正など）の前に，"
+            "このツールで必要な分だけ調べる．"
+            "include='summary' で規模・座標範囲・次数上位ノード・名前のサンプルを取得．"
+            "include='nodes'/'links'/'demands' で一覧（limit/offset でページング，"
+            "name_contains で絞り込み）．"
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "sim_id": {"type": "string", "description": "シミュレーション ID"},
                 "include": {"type": "string", "enum": ["summary", "nodes", "links", "demands"],
-                            "description": "取得内容。デフォルト summary"},
+                            "description": "取得内容．デフォルト summary"},
                 "name_contains": {"type": "string", "description": "名前の部分一致フィルタ（nodes/links 用）"},
-                "limit": {"type": "integer", "description": "最大件数（デフォルト 50、上限 200）"},
+                "limit": {"type": "integer", "description": "最大件数（デフォルト 50，上限 200）"},
                 "offset": {"type": "integer", "description": "ページングオフセット"},
             },
             "required": ["sim_id"],
@@ -1921,16 +2158,19 @@ CLAUDE_TOOLS = [
     {
         "name": "get_simulation_data",
         "description": (
-            "シミュレーション結果の集計データを取得する。"
-            "ユーザーがグラフ・チャート・分析を求めた場合に呼び出す。"
+            "シミュレーション結果の集計データを取得する．"
+            "ユーザーがグラフ・チャート・分析を求めた場合に呼び出す．"
             "返されるデータ: time_labels, network_avg_speed, network_vehicle_count, "
-            "link_speeds(リンク別), speed_histogram, stats。"
-            "データを受け取ったら、Chart.js設定JSONを ```chart ... ``` コードブロックで返すこと。"
+            "link_speeds(混雑度上位リンク別), speed_histogram, stats．"
+            "チャートでは配列を書き写さず {\"$data\":\"network_avg_speed\"} のような参照を使う"
+            "（サーバーが実データに置換する）．"
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "sim_id": {"type": "string", "description": "シミュレーションID"},
+                "points": {"type": "integer", "description": "時系列のサンプル点数（デフォルト 30，上限 60）"},
+                "max_links": {"type": "integer", "description": "link_speeds に含めるリンク数（デフォルト 20，上限 50）．リンク別の分析が不要なら 0"},
             },
             "required": ["sim_id"],
         },
@@ -1938,11 +2178,11 @@ CLAUDE_TOOLS = [
     {
         "name": "import_osm_network",
         "description": (
-            "OpenStreetMap から実在の道路ネットワークをダウンロードしてシミュレーションを実行する。"
-            "地名・ランドマーク名を指定すると、自動でジオコーディングし、周辺の道路を取得する。"
-            "例: '東京駅', 'Shibuya Station', '大阪城公園', 'Times Square, New York' など。"
-            "取得後、自動的にダミー需要を設定してシミュレーションを実行する。"
-            "結果はブラウザ上に地図として表示される。"
+            "OpenStreetMap から実在の道路ネットワークをダウンロードしてシミュレーションを実行する．"
+            "地名・ランドマーク名を指定すると，自動でジオコーディングし，周辺の道路を取得する．"
+            "例: '東京駅', 'Shibuya Station', '大阪城公園', 'Times Square, New York' など．"
+            "取得後，自動的にダミー需要を設定してシミュレーションを実行する．"
+            "結果はブラウザ上に地図として表示される．"
         ),
         "input_schema": {
             "type": "object",
@@ -1953,23 +2193,23 @@ CLAUDE_TOOLS = [
                 },
                 "distance_m": {
                     "type": "integer",
-                    "description": "中心からの取得半径（メートル）。デフォルト500。大きいほど広い範囲だが処理に時間がかかる。100〜2000が推奨。",
+                    "description": "中心からの取得半径（メートル）．デフォルト500．大きいほど広い範囲だが処理に時間がかかる．100〜2000が推奨．",
                 },
                 "road_types": {
                     "type": "string",
                     "enum": ["major", "arterial", "drive", "all"],
                     "description": (
-                        "取得する道路の種類。"
+                        "取得する道路の種類．"
                         "major=高速道路・国道級のみ / arterial=幹線道路まで / "
-                        "drive=一般車道（デフォルト、住宅街の道路含む） / "
-                        "all=サービス道路・駐車場内通路含む全車道。"
+                        "drive=一般車道（デフォルト，住宅街の道路含む） / "
+                        "all=サービス道路・駐車場内通路含む全車道．"
                         "半径 1000m 以上では major か arterial を推奨"
-                        "（ノード数が減り計算が大幅に速くなる）。"
+                        "（ノード数が減り計算が大幅に速くなる）．"
                     ),
                 },
                 "tmax": {
                     "type": "integer",
-                    "description": "シミュレーション時間（秒）。デフォルト3600",
+                    "description": "シミュレーション時間（秒）．デフォルト3600",
                 },
             },
             "required": ["place"],
@@ -1982,15 +2222,23 @@ CLAUDE_TOOLS = [
 # Prompt Caching ヘルパー
 # ──────────────────────────────────────────────
 # Anthropic の Prompt Caching は system プロンプト + tool 定義をキャッシュすることで
-# 入力トークンの 90% OFF を実現する（5 分 TTL）。
-# RISU は system が ~3,000 tokens、tools が ~2,000 tokens なので効果絶大。
+# 入力トークンの 90% OFF を実現する（5 分 TTL）．
+# RISU は system が ~3,000 tokens，tools が ~2,000 tokens なので効果絶大．
 # https://docs.anthropic.com/en/docs/prompt-caching
+def _cache_ctl() -> dict:
+    """cache_control ブロック（TTL は CACHE_TTL）"""
+    cc = {"type": "ephemeral"}
+    if CACHE_TTL and CACHE_TTL != "5m":
+        cc["ttl"] = CACHE_TTL
+    return cc
+
+
 def _cached_system(text: str) -> list:
     """system プロンプトをキャッシュ有効形式で返す"""
     return [{
         "type": "text",
         "text": text,
-        "cache_control": {"type": "ephemeral"},
+        "cache_control": _cache_ctl(),
     }]
 
 def _cached_tools() -> list:
@@ -1998,15 +2246,353 @@ def _cached_tools() -> list:
     if not CLAUDE_TOOLS:
         return []
     tools = [dict(t) for t in CLAUDE_TOOLS]
-    tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
+    tools[-1] = {**tools[-1], "cache_control": _cache_ctl()}
     return tools
+
+
+# ──────────────────────────────────────────────
+# 会話履歴のトークン節約
+#
+# キャッシュ順序は tools → system → messages．以前は sim_id ごとに変わる
+# 【現在のコンテキスト】を system に足していたため，rerun のたびに system 以降の
+# キャッシュが全滅していた．今は
+#   1. system は SYSTEM_PROMPT のみ（不変）
+#   2. 動的コンテキストは最後のユーザーメッセージに別ブロックとして付ける
+#   3. 履歴の最後の assistant メッセージに cache_control（ターン跨ぎで prefix ヒット）
+#   4. 各リクエストの最後のメッセージに cache_control（同一ターン内の tool ラウンドで
+#      prefix ヒット．以前は tool ラウンドごとに履歴全体を再課金していた）
+# breakpoint は tools / system / 履歴 assistant / 末尾 の 4 つ（API 上限）．
+# ──────────────────────────────────────────────
+def _msg_text(content) -> str:
+    """メッセージ content（str または block list）からテキストを取り出す"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            (b.get("text", "") if isinstance(b, dict) else getattr(b, "text", "") or "")
+            for b in content
+        )
+    return str(content or "")
+
+
+def _trim_history(msgs: list[dict]) -> list[dict]:
+    """文字数予算を超えた履歴を古いターンから落とす．
+
+    予算超過時は予算の半分まで落とす（ヒステリシス）．毎ターン 1 件ずつ落とすと
+    prefix が毎回変わってキャッシュが一度も当たらないため．先頭は必ず user．
+    """
+    if MAX_HISTORY_CHARS <= 0 or not msgs:
+        return msgs
+    sizes = [len(_msg_text(m["content"])) for m in msgs]
+    if sum(sizes) <= MAX_HISTORY_CHARS:
+        return msgs
+    budget = MAX_HISTORY_CHARS // 2
+    kept = []
+    acc = 0
+    for m, sz in zip(reversed(msgs), reversed(sizes)):
+        if kept and acc + sz > budget:
+            break
+        kept.append(m)
+        acc += sz
+    kept.reverse()
+    while kept and kept[0]["role"] != "user":
+        kept.pop(0)
+    if not kept:
+        kept = [msgs[-1]]
+    if len(kept) < len(msgs):
+        first = kept[0]
+        kept[0] = {"role": "user",
+                   "content": "（これより前の会話は省略）\n\n" + _msg_text(first["content"])}
+        print(f"[RISU] history trimmed: {len(msgs)} -> {len(kept)} messages "
+              f"({sum(sizes)} -> {sum(len(_msg_text(m['content'])) for m in kept)} chars)")
+    return kept
+
+
+def _build_llm_messages(body: ChatInput) -> list[dict]:
+    """ChatInput → Claude API messages（履歴トリミング + キャッシュ境界 + 動的コンテキスト）"""
+    msgs = _trim_history([{"role": m.role, "content": m.content} for m in body.messages])
+    # ターン跨ぎのキャッシュ境界: 履歴の最後の assistant メッセージ
+    last_asst = None
+    for i, m in enumerate(msgs):
+        if m["role"] == "assistant":
+            last_asst = i
+    if last_asst is not None:
+        msgs[last_asst] = {"role": "assistant", "content": [
+            {"type": "text", "text": _msg_text(msgs[last_asst]["content"]),
+             "cache_control": _cache_ctl()},
+        ]}
+    # 動的コンテキストは最後の user メッセージの追加ブロック（system を不変に保つ）
+    if msgs and msgs[-1]["role"] == "user":
+        blocks = [{"type": "text", "text": _msg_text(msgs[-1]["content"])}]
+        ctx = _conversation_context_block(body).strip()
+        if ctx:
+            blocks.append({"type": "text", "text": ctx})
+        msgs[-1] = {"role": "user", "content": blocks}
+    return _mark_cache_tail(msgs)
+
+
+def _mark_cache_tail(msgs: list[dict]) -> list[dict]:
+    """リクエスト末尾メッセージの最後のブロックに cache_control を付ける（同一ターン内の
+    tool ラウンドで prefix がヒットする）．前のリクエストで付けた末尾の印は外す
+    （履歴 assistant の印は _tail_marked を持たないので残る）．breakpoint は API 上限 4 つ:
+    tools / system / 履歴 assistant / 末尾．"""
+    for m in msgs[:-1]:
+        c = m.get("content")
+        if isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict) and b.pop("_tail_marked", False):
+                    b.pop("cache_control", None)
+    last = msgs[-1]
+    c = last.get("content")
+    if isinstance(c, str):
+        last["content"] = [{"type": "text", "text": c}]
+        c = last["content"]
+    if isinstance(c, list) and c and isinstance(c[-1], dict):
+        if "cache_control" not in c[-1]:
+            c[-1]["cache_control"] = _cache_ctl()
+            c[-1]["_tail_marked"] = True
+    return msgs
+
+
+def _api_messages(msgs: list[dict]) -> list[dict]:
+    """内部フラグ（_tail_marked）を除いた API 送信用メッセージ"""
+    out = []
+    for m in msgs:
+        c = m.get("content")
+        if isinstance(c, list):
+            c = [({k: v for k, v in b.items() if k != "_tail_marked"} if isinstance(b, dict) else b)
+                 for b in c]
+        out.append({"role": m["role"], "content": c})
+    return out
+
+
+class _UsageTally:
+    """1 ターン（1 回の /chat）で使ったトークンの集計．done イベントでフロントに返す"""
+
+    def __init__(self):
+        self.calls = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.cache_read = 0
+        self.cache_creation = 0
+        self.cost_jpy = 0.0
+
+    def add(self, context: str, response) -> None:
+        u = _log_usage(context, response)
+        if not u:
+            return
+        self.calls += 1
+        self.input_tokens += u["input_tokens"]
+        self.output_tokens += u["output_tokens"]
+        self.cache_read += u["cache_read_input_tokens"]
+        self.cache_creation += u["cache_creation_input_tokens"]
+        self.cost_jpy += u["cost_jpy"]
+
+    def as_dict(self) -> dict:
+        total_in = self.input_tokens + self.cache_read + self.cache_creation
+        return {
+            "calls": self.calls,
+            "input_tokens": self.input_tokens,
+            "cache_read_tokens": self.cache_read,
+            "cache_creation_tokens": self.cache_creation,
+            "output_tokens": self.output_tokens,
+            "cache_hit_pct": round(self.cache_read / max(1, total_in) * 100),
+            "cost_jpy": round(self.cost_jpy, 2),
+        }
+
+
+# ──────────────────────────────────────────────
+# チャートの $data 参照
+#
+# LLM が get_simulation_data の配列を Chart.js 設定に書き写すと，出力トークン
+# （入力の 5 倍単価）を大量に使う．{"$data": "network_avg_speed"} のような参照を
+# サーバー側で実データに置き換える．
+# ──────────────────────────────────────────────
+def _resolve_chart_refs(obj, data_cache: dict, default_sim_id: str | None):
+    """chart JSON 内の {"$data": "<path>", "sim_id"?: "..."} を集計データで置換する"""
+    if isinstance(obj, dict):
+        if "$data" in obj and isinstance(obj["$data"], str):
+            sim_id = str(obj.get("sim_id") or default_sim_id or "")
+            data = data_cache.get(sim_id)
+            if data is None and sim_id:
+                data = _get_simulation_data(sim_id)
+                if data is not None:
+                    data_cache[sim_id] = data
+            cur = data
+            for part in obj["$data"].split("."):
+                if isinstance(cur, dict) and part in cur:
+                    cur = cur[part]
+                else:
+                    print(f"[RISU] chart $data unresolved: {obj['$data']!r} (sim {sim_id!r})")
+                    return []
+            return cur
+        return {k: _resolve_chart_refs(v, data_cache, default_sim_id) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_resolve_chart_refs(v, data_cache, default_sim_id) for v in obj]
+    return obj
+
+
+_CHART_PATTERN = None
+
+def _extract_charts(text: str, data_cache: dict, default_sim_id: str | None) -> tuple[list, str]:
+    """```chart ... ``` ブロックを抽出して $data を解決し，(charts, 本文) を返す"""
+    global _CHART_PATTERN
+    if _CHART_PATTERN is None:
+        import re
+        _CHART_PATTERN = re.compile(r'```\s*chart\w*\s*\n?(.*?)\n?\s*```', re.DOTALL | re.IGNORECASE)
+    charts = []
+    for m in _CHART_PATTERN.finditer(text):
+        try:
+            chart_json = json.loads(m.group(1))
+        except json.JSONDecodeError as e:
+            print(f"[RISU] chart JSON parse failed: {e}; raw={m.group(1)[:200]!r}")
+            continue
+        charts.append(_resolve_chart_refs(chart_json, data_cache, default_sim_id))
+    clean_text = _CHART_PATTERN.sub('', text).strip()
+    return charts, clean_text
+
+
+# ──────────────────────────────────────────────
+# run_simulation の入力展開（grid テンプレート / 需要自動生成）
+#
+# 「10×10 のグリッド」を LLM がノード 100 個・リンク 360 本を列挙して生成すると
+# 出力トークン 2 万以上・数十秒かかる．テンプレートを渡すとサーバー側で展開する．
+# ──────────────────────────────────────────────
+def _expand_grid(spec: dict) -> tuple[list[dict], list[dict], dict]:
+    nx = max(2, int(spec.get("nx", 3)))
+    ny = max(2, int(spec.get("ny", nx)))
+    spacing = float(spec.get("spacing", 500))
+    prefix = str(spec.get("name_prefix", "n"))
+    bidir = bool(spec.get("bidirectional", True))
+    if nx * ny > MAX_NODES:
+        raise ValueError(f"grid が大きすぎます: {nx}x{ny} > {MAX_NODES} ノード")
+    link_attrs = {k: spec[k] for k in ("free_flow_speed", "jam_density", "number_of_lanes", "capacity")
+                  if spec.get(k) is not None}
+    nodes = [{"name": f"{prefix}{i}_{j}", "x": i * spacing, "y": j * spacing}
+             for i in range(nx) for j in range(ny)]
+    links = []
+    def add(a, b):
+        links.append({"name": f"{a}-{b}", "start": a, "end": b, "length": spacing, **link_attrs})
+    for i in range(nx):
+        for j in range(ny):
+            a = f"{prefix}{i}_{j}"
+            if i + 1 < nx:
+                b = f"{prefix}{i+1}_{j}"; add(a, b)
+                if bidir: add(b, a)
+            if j + 1 < ny:
+                b = f"{prefix}{i}_{j+1}"; add(a, b)
+                if bidir: add(b, a)
+    info = {"type": "grid", "nx": nx, "ny": ny, "spacing": spacing,
+            "node_naming": f"{prefix}{{i}}_{{j}} (i=0..{nx-1}, j=0..{ny-1}, x=i*{spacing:g}, y=j*{spacing:g})",
+            "link_naming": f"{prefix}0_0-{prefix}1_0 のように 始点名-終点名"}
+    return nodes, links, info
+
+
+def _generate_demands_spec(nodes: list[dict], links: list[dict], spec: dict, tmax: int) -> list[dict]:
+    """OD 需要をサーバー側で生成する（rerun の generate_demands と run_simulation の auto_demands 共用）"""
+    import random as _random
+    strategy = spec.get("strategy", "random")
+    if len(nodes) < 2:
+        raise ValueError("需要の自動生成にはノードが 2 つ以上必要です")
+    t_start = float(spec.get("t_start", 0))
+    t_end = float(spec.get("t_end", tmax * 0.5))
+    if strategy == "boundary":
+        # ネットワーク周縁ノード全ペア（OSM インポートと同じロジック）
+        new_demands = _generate_osm_demands(nodes, links, tmax)
+        if spec.get("flow_per_pair") is not None:
+            for d in new_demands:
+                d["flow"] = float(spec["flow_per_pair"])
+        for d in new_demands:
+            d["t_start"] = t_start
+            d["t_end"] = t_end
+    elif strategy == "random":
+        n_pairs = max(1, int(spec.get("n_pairs", 10)))
+        if spec.get("flow_per_pair") is not None:
+            flow = float(spec["flow_per_pair"])
+        elif spec.get("flow_total") is not None:
+            flow = round(float(spec["flow_total"]) / n_pairs, 4)
+        else:
+            flow = 0.2
+        rng = _random.Random(spec.get("seed"))
+        names = [n["name"] for n in nodes]
+        new_demands = []
+        for _ in range(n_pairs):
+            orig, dest = rng.sample(names, 2)
+            new_demands.append({"orig": orig, "dest": dest,
+                                "t_start": t_start, "t_end": t_end, "flow": flow})
+    else:
+        raise ValueError(f"strategy は random / boundary（指定: {strategy}）")
+    return new_demands
+
+
+def _expand_run_simulation_args(fn_args: dict) -> tuple[dict, dict]:
+    """run_simulation の tool 入力を SimulationInput 用 dict に展開する．
+
+    戻り値: (scenario dict, 展開情報 dict — tool_result に含めて LLM に命名規則を伝える)
+    """
+    args = dict(fn_args)
+    info = {}
+    grid = args.pop("grid", None)
+    auto = args.pop("auto_demands", None)
+    nodes = list(args.get("nodes") or [])
+    links = list(args.get("links") or [])
+    if grid:
+        g_nodes, g_links, g_info = _expand_grid(grid)
+        nodes = g_nodes + nodes
+        links = g_links + links
+        info["grid"] = g_info
+    if not nodes or not links:
+        raise ValueError("nodes / links を指定するか，grid テンプレートを使ってください")
+    demands = list(args.get("demands") or [])
+    if auto:
+        tmax = int(args.get("tmax") or 3600)
+        gen = _generate_demands_spec(nodes, links, auto, tmax)
+        demands = demands + gen
+        info["auto_demands"] = {"strategy": auto.get("strategy", "random"), "generated": len(gen)}
+    if not demands:
+        raise ValueError("demands を指定するか auto_demands で自動生成してください")
+    args["nodes"], args["links"], args["demands"] = nodes, links, demands
+    return args, info
+
+
+async def _handle_run_simulation(fn_args: dict, body, *, source_round: str | None = None
+                                 ) -> tuple[str, str | None, bool]:
+    """run_simulation ツールの共通ハンドラ（stream / sync 両系統から使用）．
+
+    戻り値: (tool_result content, 新 sim_id または None, is_error)
+    """
+    try:
+        scenario, info = _expand_run_simulation_args(fn_args)
+        sim_input = SimulationInput(**scenario)
+        result = await _run_uxsim_async(sim_input)
+        sim_id = str(uuid.uuid4())[:8]
+        src = {
+            "type": "llm",
+            "llm_backend": "claude",
+            "tool": "run_simulation",
+            "llm_user_message": _last_user_message_text(body),
+        }
+        if source_round:
+            src["round"] = source_round
+        _store_sim(sim_id, result, src)
+        payload = {**result["stats"], "sim_id": sim_id,
+                   "network": {"nodes": len(scenario["nodes"]), "links": len(scenario["links"]),
+                               "demands": len(scenario["demands"])}}
+        payload.update(info)
+        return (json.dumps(payload, ensure_ascii=False), sim_id, False)
+    except HTTPException as e:
+        return (f"シミュレーション実行エラー: {e.detail}\n入力を修正して再度 run_simulation を呼んでください．",
+                None, True)
+    except Exception as e:
+        return (f"シミュレーション実行エラー: {str(e)}\n入力を修正して再度 run_simulation を呼んでください．",
+                None, True)
 
 
 # ──────────────────────────────────────────────
 # トークン使用量ロガー
 # ──────────────────────────────────────────────
 def _log_usage(context: str, response) -> dict:
-    """Claude レスポンスから usage を抽出してログ出力。将来 DB 保存フックに繋げられる"""
+    """Claude レスポンスから usage を抽出してログ出力．将来 DB 保存フックに繋げられる"""
     usage = getattr(response, "usage", None)
     if usage is None:
         return {}
@@ -2014,16 +2600,17 @@ def _log_usage(context: str, response) -> dict:
     out_tok = getattr(usage, "output_tokens", 0) or 0
     cache_read    = getattr(usage, "cache_read_input_tokens", 0) or 0
     cache_create  = getattr(usage, "cache_creation_input_tokens", 0) or 0
-    # Claude Sonnet 4 価格: $3 / $15 per MTok、キャッシュ読み: $0.30、キャッシュ書き: $3.75
+    # claude-sonnet-5 の概算単価: 入力 $2 / 出力 $10 per MTok，キャッシュ読み $0.20，キャッシュ書き $2.50．
+    # usage.input_tokens はキャッシュ読み・書きの分を含まない（重複して引くと負になる）．
     # JPY @ 150円/USD 概算
     cost_usd = (
-        (in_tok - cache_read) * 3 / 1_000_000
-        + cache_read * 0.30 / 1_000_000
-        + cache_create * 3.75 / 1_000_000
-        + out_tok * 15 / 1_000_000
+        in_tok * 2 / 1_000_000
+        + cache_read * 0.20 / 1_000_000
+        + cache_create * 2.50 / 1_000_000
+        + out_tok * 10 / 1_000_000
     )
     cost_jpy = cost_usd * 150
-    total_in = in_tok + cache_read
+    total_in = in_tok + cache_read + cache_create
     cache_pct = (cache_read / max(1, total_in)) * 100
     try:
         msg = (
@@ -2054,40 +2641,228 @@ def _log_usage(context: str, response) -> dict:
 # ──────────────────────────────────────────────
 MAX_TOOL_ROUNDS = int(os.getenv("RISU_MAX_TOOL_ROUNDS", "3"))
 
+# ──────────────────────────────────────────────
+# トークン節約の設定
+# ──────────────────────────────────────────────
+# LLM に送る会話履歴の文字数予算．超過したら古いターンから落とす（ヒステリシス付き，
+# _trim_history 参照）．0 で無制限．
+MAX_HISTORY_CHARS = int(os.getenv("RISU_MAX_HISTORY_CHARS", "24000"))
+# Prompt Caching の TTL: "5m"（既定）または "1h"．考えながら操作して 5 分以上空くことが
+# 多いなら "1h" の方が安い（書き込み単価は 2 倍だが，再作成が要らない）．
+CACHE_TTL = os.getenv("RISU_CACHE_TTL", "5m").strip() or "5m"
+
 
 def _sse_event(data: dict) -> str:
     """SSE イベント文字列を生成"""
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-async def _chat_claude_stream(body: ChatInput):
-    """Claude API チャット — SSE ストリーミングで進捗を返す"""
-    import anthropic
-    import re
+def _conversation_sim_id(body: ChatInput) -> str | None:
+    """会話に紐づく有効なシミュレーションIDを返す（なければ None）"""
+    sim_id = (body.last_sim_id or "").strip()
+    return sim_id if sim_id and sim_id in results_store else None
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    messages = [{"role": m.role, "content": m.content} for m in body.messages]
 
-    system = SYSTEM_PROMPT
-    if results_store:
-        last_sim_id = list(results_store.keys())[-1]
-        link_names = [f["properties"]["name"] for f in results_store[last_sim_id].get("geojson", {}).get("features", [])]
-        _sc = results_store[last_sim_id].get("_scenario") or {}
-        _sizes = (f"{len(_sc.get('nodes') or [])} ノード / {len(_sc.get('links') or [])} リンク / "
-                  f"{len(_sc.get('demands') or [])} 需要, tmax={_sc.get('tmax', '?')}s")
-        _more = f"（他 {len(link_names) - 20} 本）" if len(link_names) > 20 else ""
-        system += f"""
+def _conversation_context_block(body: ChatInput) -> str:
+    """システムプロンプト末尾に付けるコンテキスト注入文字列を生成．
+
+    会話に紐づく sim（フロントが /chat で送る last_sim_id）だけを対象にする．
+    results_store のグローバル最新を使うと，別会話や CSV アップロードで作られた
+    無関係なシナリオを LLM が rerun_simulation で流用してしまうため．
+    """
+    sim_id = _conversation_sim_id(body)
+    if not sim_id:
+        return ""
+    link_names = [f["properties"]["name"] for f in results_store[sim_id].get("geojson", {}).get("features", [])]
+    _sc = results_store[sim_id].get("_scenario") or {}
+    _sizes = (f"{len(_sc.get('nodes') or [])} ノード / {len(_sc.get('links') or [])} リンク / "
+              f"{len(_sc.get('demands') or [])} 需要, tmax={_sc.get('tmax', '?')}s")
+    _more = f"（他 {len(link_names) - 20} 本）" if len(link_names) > 20 else ""
+    return f"""
 
 【現在のコンテキスト】
-直前のシミュレーションID: {last_sim_id}
+この会話のシミュレーションID: {sim_id}
 ネットワーク規模: {_sizes}
 リンク名の例: {', '.join(link_names[:20])}{_more}
-この結果への修正・再実行・比較は rerun_simulation(base_sim_id="{last_sim_id}") を使うこと。"""
+この結果への修正・再実行・比較は rerun_simulation(base_sim_id="{sim_id}") を使うこと．
+これ以外の依頼（新しいネットワークの設計）は run_simulation でゼロから作ること．"""
 
-    chart_pattern = re.compile(r'```\s*chart\w*\s*\n?(.*?)\n?\s*```', re.DOTALL | re.IGNORECASE)
+
+# ──────────────────────────────────────────────
+# ツール実行の共通ディスパッチ
+# ──────────────────────────────────────────────
+class _ToolTurnState:
+    """1 ターン分のツール実行で持ち回る状態．
+
+    sim_id            このターンで最後に作られたシミュレーション ID
+    last_data_sim_id  get_simulation_data が最後に集計した sim_id（$data 解決の既定）
+    sim_data_cache    このターンで取得した集計データ（チャートの $data 参照解決用）
+    """
+
+    __slots__ = ("body", "sim_id", "last_data_sim_id", "sim_data_cache")
+
+    def __init__(self, body: ChatInput):
+        self.body = body
+        self.sim_id: str | None = None
+        self.last_data_sim_id: str | None = None
+        self.sim_data_cache: dict[str, dict] = {}
+
+
+def _tool_result(tool_use_id: str, content: str, is_err: bool = False) -> dict:
+    tr = {"type": "tool_result", "tool_use_id": tool_use_id, "content": content}
+    if is_err:
+        tr["is_error"] = True
+    return tr
+
+
+async def _dispatch_tool_blocks(tool_blocks, state: _ToolTurnState, *, follow_up: bool = False):
+    """tool_use ブロック群を実行する非同期ジェネレータ．
+
+    ストリーミング経路（_chat_claude_stream）と同期経路（_chat_claude）で
+    **同じコードを通す**ためにここへ集約している．以前は初回ラウンドと追加ラウンド ×
+    2 経路の計 4 箇所に同じ dispatch があり，片方だけ直すと挙動がずれる状態だった．
+
+    yield するもの:
+        ("progress", "メッセージ")   進捗．SSE 経路だけが転送し，同期経路は捨てる
+        ("results", [tool_result])   最後に 1 回だけ．API へ返す tool_result のリスト
+
+    follow_up=True は 2 ラウンド目以降．進捗の文言と，保存メタの "round" が変わる．
+
+    tool_use には**必ず対応する tool_result を返すこと**（Anthropic API の要求）．
+    未知のツール名でも結果を積む．
+    """
+    results = []
+
+    for tb in tool_blocks:
+        name = tb.name
+        args = tb.input
+
+        if name == "run_simulation":
+            yield ("progress", "追加シミュレーションを実行中..." if follow_up
+                   else "Step 2/3: UXsim でシミュレーション実行中...")
+            content, new_sim_id, is_err = await _handle_run_simulation(
+                args, state.body, source_round="follow_up" if follow_up else None)
+            if new_sim_id:
+                state.sim_id = new_sim_id
+            results.append(_tool_result(tb.id, content, is_err))
+
+        elif name == "rerun_simulation":
+            yield ("progress", "修正を適用して再実行中..." if follow_up
+                   else "Step 2/3: 修正を適用して再実行中...")
+            content, new_sim_id, is_err = await _handle_rerun_simulation(args, state.body)
+            if new_sim_id:
+                state.sim_id = new_sim_id
+            results.append(_tool_result(tb.id, content, is_err))
+
+        elif name == "get_network_info":
+            if not follow_up:
+                yield ("progress", "ネットワーク情報を照会中...")
+            content, is_err = _handle_get_network_info(args)
+            results.append(_tool_result(tb.id, content, is_err))
+
+        elif name == "import_osm_network":
+            place = args.get("place", "")
+            dist = args.get("distance_m", 500)
+            osm_tmax = args.get("tmax", 3600)
+            road_types = args.get("road_types", "drive")
+            yield ("progress",
+                   f"OpenStreetMap から「{place}」のデータを取得中..." if follow_up
+                   else f"Step 2/3: OpenStreetMap から「{place}」周辺のデータを取得中...")
+            try:
+                loop = asyncio.get_event_loop()
+                osm_result = await loop.run_in_executor(
+                    executor, _run_osm_import, place, dist, road_types
+                )
+                scenario = dict(osm_result)
+                link_geometries = scenario.pop("link_geometries", {})
+                scenario.pop("center", None)
+                scenario.pop("distance_m", None)
+                summary = scenario.pop("summary", "")
+                scenario["tmax"] = osm_tmax
+
+                if not scenario["demands"] and len(scenario["nodes"]) >= 2:
+                    scenario["demands"] = _generate_osm_demands(
+                        scenario["nodes"], scenario["links"], osm_tmax
+                    )
+
+                if not follow_up:
+                    yield ("progress", "Step 2/3: UXsim でシミュレーション実行中...")
+                result = await _run_uxsim_async(SimulationInput(**scenario))
+                _apply_link_geometries(result, link_geometries)
+                new_id = str(uuid.uuid4())[:8]
+                meta = {
+                    "type": "osm",
+                    "via": "llm",
+                    "llm_backend": "claude",
+                    "place": place,
+                    "distance_m": dist,
+                    "llm_user_message": _last_user_message_text(state.body),
+                }
+                if follow_up:
+                    meta["round"] = "follow_up"
+                _store_sim(new_id, result, meta)
+                state.sim_id = new_id
+
+                results.append(_tool_result(tb.id, json.dumps({
+                    **result["stats"],
+                    "sim_id": new_id,
+                    "summary": summary,
+                    "node_count": len(scenario["nodes"]),
+                    "link_count": len(scenario["links"]),
+                }, ensure_ascii=False)))
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                results.append(_tool_result(tb.id, f"OSMインポートエラー: {e!s}", True))
+
+        elif name == "get_simulation_data":
+            yield ("progress", "チャートデータを取得中..." if follow_up else "データを集計中...")
+            # sim_id が空または存在しない場合，このターンで実行した sim →
+            # 会話に紐づく sim の順でフォールバック（グローバル最新は使わない）
+            req_sim_id = args.get("sim_id", "")
+            if not req_sim_id or req_sim_id not in results_store:
+                req_sim_id = state.sim_id or _conversation_sim_id(state.body) or ""
+            sd = _get_simulation_data(req_sim_id,
+                                      points=args.get("points") or 30,
+                                      max_links=args.get("max_links", 20))
+            if sd:
+                state.sim_data_cache[req_sim_id] = sd
+                state.last_data_sim_id = req_sim_id
+                results.append(_tool_result(tb.id, json.dumps(sd, ensure_ascii=False)))
+            else:
+                results.append(_tool_result(
+                    tb.id,
+                    "データが見つかりません．まず run_simulation でシミュレーションを実行してください．"))
+
+        else:
+            results.append(_tool_result(tb.id, f"未知のツール: {name}"))
+
+    yield ("results", results)
+
+
+async def _collect_tool_results(tool_blocks, state: _ToolTurnState, *, follow_up: bool = False):
+    """_dispatch_tool_blocks の進捗を捨てて tool_result だけ取る（同期経路用）．"""
+    results = []
+    async for kind, payload in _dispatch_tool_blocks(tool_blocks, state, follow_up=follow_up):
+        if kind == "results":
+            results = payload
+    return results
+
+
+async def _chat_claude_stream(body: ChatInput):
+    """Claude API チャット — SSE ストリーミングで進捗を返す"""
+
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    # 履歴トリミング + キャッシュ境界 + 動的コンテキスト（system は不変に保つ）
+    messages = _build_llm_messages(body)
+    system = SYSTEM_PROMPT
+    usage = _UsageTally()
+    # ツール実行の状態（sim_id / 集計キャッシュ）は _dispatch_tool_blocks と共有する
+    state = _ToolTurnState(body)
 
     async def event_generator():
-        sim_id = None
         try:
             # ── 1回目: LLM 呼び出し（ストリーミング）──
             yield _sse_event({"type": "progress", "message": "Step 1/3: シナリオを設計中..."})
@@ -2098,7 +2873,7 @@ async def _chat_claude_stream(body: ChatInput):
                 model=CLAUDE_MODEL,
                 max_tokens=64000,
                 system=_cached_system(system),
-                messages=messages,
+                messages=_api_messages(messages),
                 tools=_cached_tools(),
             ) as first_stream:
                 for event in first_stream:
@@ -2110,182 +2885,60 @@ async def _chat_claude_stream(body: ChatInput):
                             yield _sse_event({"type": "text_delta", "text": event.delta.text})
 
                 response = first_stream.get_final_message()
-                _log_usage("stream first-round", response)
+                usage.add("stream first-round", response)
 
             # テキストのみの応答（ツール呼び出しなし）
             if response.stop_reason != "tool_use":
                 text = "".join(b.text for b in response.content if b.type == "text")
 
                 # シミュレーション意図がありそうならリトライ（tool_choice で強制）
-                last_user_msg = ""
-                for m in reversed(messages):
-                    if m["role"] == "user":
-                        last_user_msg = m["content"] if isinstance(m["content"], str) else ""
-                        break
+                last_user_msg = _last_user_message_text(body) or ""
                 sim_keywords = ["シミュレーション", "シミュレート", "実行", "グリッド", "ネットワーク", "渋滞", "ボトルネック", "道路", "交通"]
                 if any(k in last_user_msg for k in sim_keywords):
                     if first_streamed_text:
                         yield _sse_event({"type": "stream_end_partial"})
                     yield _sse_event({"type": "progress", "message": "Step 1/3: シナリオを再設計中..."})
+                    messages.append({"role": "assistant", "content": text})
+                    messages.append({"role": "user", "content": "run_simulation ツールを使って今すぐシミュレーションを実行してください．"})
                     response = client.messages.create(
                         model=CLAUDE_MODEL,
                         max_tokens=32000,
                         system=_cached_system(system),
-                        messages=messages + [
-                            {"role": "assistant", "content": text},
-                            {"role": "user", "content": "run_simulation ツールを使って今すぐシミュレーションを実行してください。"},
-                        ],
+                        messages=_api_messages(_mark_cache_tail(messages)),
                         tools=_cached_tools(),
                         tool_choice={"type": "tool", "name": "run_simulation"},
                     )
-                    _log_usage("stream retry (tool_choice)", response)
+                    usage.add("stream retry (tool_choice)", response)
                     if response.stop_reason != "tool_use":
-                        yield _sse_event({"type": "done", "role": "assistant", "content": text, "sim_id": None})
+                        yield _sse_event({"type": "done", "role": "assistant", "content": text,
+                                          "sim_id": None, "usage": usage.as_dict()})
                         return
                     # 下のツール実行に続行
                 else:
-                    yield _sse_event({"type": "done", "role": "assistant", "content": text, "sim_id": None})
+                    yield _sse_event({"type": "done", "role": "assistant", "content": text,
+                                      "sim_id": None, "usage": usage.as_dict()})
                     return
 
-            # ── ツール実行 ──
+            # ── ツール実行（同期経路と同じ _dispatch_tool_blocks を通す）──
             tool_blocks = [b for b in response.content if b.type == "tool_use"]
             tool_results = []
-
-            for tool_block in tool_blocks:
-                fn_name = tool_block.name
-                fn_args = tool_block.input
-
-                if fn_name == "run_simulation":
-                    yield _sse_event({"type": "progress", "message": "Step 2/3: UXsim でシミュレーション実行中..."})
-                    try:
-                        sim_input = SimulationInput(**fn_args)
-                        loop = asyncio.get_event_loop()
-                        result = await _run_uxsim_async(sim_input)
-                        sim_id = str(uuid.uuid4())[:8]
-                        _store_sim(sim_id, result, {
-                            "type": "llm",
-                            "llm_backend": "claude",
-                            "tool": "run_simulation",
-                            "llm_user_message": _last_user_message_text(body),
-                        })
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tool_block.id,
-                            "content": json.dumps({**result["stats"], "sim_id": sim_id}, ensure_ascii=False),
-                        })
-                    except Exception as e:
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tool_block.id,
-                            "content": f"シミュレーション実行エラー: {str(e)}\n入力を修正して再度 run_simulation を呼んでください。",
-                            "is_error": True,
-                        })
-
-                elif fn_name == "rerun_simulation":
-                    yield _sse_event({"type": "progress", "message": "Step 2/3: 修正を適用して再実行中..."})
-                    content, new_sim_id, is_err = await _handle_rerun_simulation(fn_args, body)
-                    if new_sim_id:
-                        sim_id = new_sim_id
-                    tr = {"type": "tool_result", "tool_use_id": tool_block.id, "content": content}
-                    if is_err:
-                        tr["is_error"] = True
-                    tool_results.append(tr)
-                elif fn_name == "get_network_info":
-                    yield _sse_event({"type": "progress", "message": "ネットワーク情報を照会中..."})
-                    content, is_err = _handle_get_network_info(fn_args)
-                    tr = {"type": "tool_result", "tool_use_id": tool_block.id, "content": content}
-                    if is_err:
-                        tr["is_error"] = True
-                    tool_results.append(tr)
-
-                elif fn_name == "import_osm_network":
-                    place = fn_args.get("place", "")
-                    dist = fn_args.get("distance_m", 500)
-                    osm_tmax = fn_args.get("tmax", 3600)
-                    road_types = fn_args.get("road_types", "drive")
-                    yield _sse_event({"type": "progress", "message": f"Step 2/3: OpenStreetMap から「{place}」周辺のデータを取得中..."})
-                    try:
-                        loop = asyncio.get_event_loop()
-                        osm_result = await loop.run_in_executor(
-                            executor, _run_osm_import, place, dist, road_types
-                        )
-                        scenario = dict(osm_result)
-                        link_geometries = scenario.pop("link_geometries", {})
-                        scenario.pop("center", None)
-                        scenario.pop("distance_m", None)
-                        summary = scenario.pop("summary", "")
-                        scenario["tmax"] = osm_tmax
-
-                        if not scenario["demands"] and len(scenario["nodes"]) >= 2:
-                            scenario["demands"] = _generate_osm_demands(
-                                scenario["nodes"], scenario["links"], osm_tmax
-                            )
-
-                        yield _sse_event({"type": "progress", "message": "Step 2/3: UXsim でシミュレーション実行中..."})
-                        sim_input = SimulationInput(**scenario)
-                        result = await _run_uxsim_async(sim_input)
-                        _apply_link_geometries(result, link_geometries)
-                        sim_id = str(uuid.uuid4())[:8]
-                        _store_sim(sim_id, result, {
-                            "type": "osm",
-                            "via": "llm",
-                            "llm_backend": "claude",
-                            "place": place,
-                            "distance_m": dist,
-                            "llm_user_message": _last_user_message_text(body),
-                        })
-
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tool_block.id,
-                            "content": json.dumps({
-                                **result["stats"],
-                                "sim_id": sim_id,
-                                "summary": summary,
-                                "node_count": len(scenario["nodes"]),
-                                "link_count": len(scenario["links"]),
-                            }, ensure_ascii=False),
-                        })
-                    except Exception as e:
-                        import traceback
-                        traceback.print_exc()
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tool_block.id,
-                            "content": f"OSMインポートエラー: {str(e)}",
-                            "is_error": True,
-                        })
-
-                elif fn_name == "get_simulation_data":
-                    yield _sse_event({"type": "progress", "message": "データを集計中..."})
-                    req_sim_id = fn_args.get("sim_id", "")
-                    # sim_id が空または存在しない場合、直前のシミュレーションIDを使う
-                    if (not req_sim_id or req_sim_id not in results_store) and results_store:
-                        req_sim_id = list(results_store.keys())[-1]
-                    sim_data = _get_simulation_data(req_sim_id)
-                    if sim_data:
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tool_block.id,
-                            "content": json.dumps(sim_data, ensure_ascii=False),
-                        })
-                    else:
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tool_block.id,
-                            "content": "データが見つかりません。まず run_simulation でシミュレーションを実行してください。",
-                        })
+            async for _kind, _payload in _dispatch_tool_blocks(tool_blocks, state):
+                if _kind == "progress":
+                    yield _sse_event({"type": "progress", "message": _payload})
+                else:
+                    tool_results = _payload
 
             # ── ツール結果を渡して最終回答をストリーミング生成 ──
             yield _sse_event({"type": "progress", "message": "Step 3/3: 結果を分析中..."})
 
             messages.append({"role": "assistant", "content": response.content})
             messages.append({"role": "user", "content": tool_results})
+            _mark_cache_tail(messages)
 
             # ストリーミングで最終回答を生成するヘルパー
             async def _stream_final_response(msgs):
-                """messages を渡して streaming 呼び出し。テキストは text_delta で逐次送信し、
-                ツール呼び出しがあれば蓄積して返す。最終テキストも返す。"""
+                """messages を渡して streaming 呼び出し．テキストは text_delta で逐次送信し，
+                ツール呼び出しがあれば蓄積して返す．最終テキストも返す．"""
                 collected_text = []
                 collected_tool_blocks = []
 
@@ -2293,7 +2946,7 @@ async def _chat_claude_stream(body: ChatInput):
                     model=CLAUDE_MODEL,
                     max_tokens=16000,
                     system=_cached_system(system),
-                    messages=msgs,
+                    messages=_api_messages(msgs),
                     tools=_cached_tools(),
                 ) as stream:
                     for event in stream:
@@ -2313,9 +2966,9 @@ async def _chat_claude_stream(body: ChatInput):
                                 if collected_tool_blocks:
                                     collected_tool_blocks[-1]["input_json"] += event.delta.partial_json
 
-                    # stream 終了後、最終 response を取得
+                    # stream 終了後，最終 response を取得
                     final_response = stream.get_final_message()
-                    _log_usage("stream post-tool", final_response)
+                    usage.add("stream post-tool", final_response)
 
                 # ツールブロックを anthropic オブジェクトとして返す
                 real_tool_blocks = [b for b in final_response.content if b.type == "tool_use"]
@@ -2340,122 +2993,16 @@ async def _chat_claude_stream(body: ChatInput):
                     break
                 yield _sse_event({"type": "stream_end_partial"})
                 next_tool_results = []
-                for tb in next_tool_blocks:
-                    if tb.name == "get_simulation_data":
-                        yield _sse_event({"type": "progress", "message": "チャートデータを取得中..."})
-                        req_sim_id = tb.input.get("sim_id", "")
-                        # sim_id が空または存在しない場合、直前のシミュレーションIDを使う
-                        if (not req_sim_id or req_sim_id not in results_store) and results_store:
-                            req_sim_id = list(results_store.keys())[-1]
-                        sd = _get_simulation_data(req_sim_id)
-                        next_tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tb.id,
-                            "content": json.dumps(sd, ensure_ascii=False) if sd else "データが見つかりません。まず run_simulation でシミュレーションを実行してください。",
-                        })
-                    elif tb.name == "run_simulation":
-                        yield _sse_event({"type": "progress", "message": "追加シミュレーションを実行中..."})
-                        try:
-                            si = SimulationInput(**tb.input)
-                            loop = asyncio.get_event_loop()
-                            r = await _run_uxsim_async(si)
-                            new_id = str(uuid.uuid4())[:8]
-                            _store_sim(new_id, r, {
-                                "type": "llm",
-                                "llm_backend": "claude",
-                                "tool": "run_simulation",
-                                "round": "follow_up",
-                                "llm_user_message": _last_user_message_text(body),
-                            })
-                            sim_id = new_id
-                            next_tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": tb.id,
-                                "content": json.dumps({**r["stats"], "sim_id": new_id}, ensure_ascii=False),
-                            })
-                        except Exception as e:
-                            next_tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": tb.id,
-                                "content": f"シミュレーション実行エラー: {str(e)}",
-                                "is_error": True,
-                            })
-                    elif tb.name == "rerun_simulation":
-                        yield _sse_event({"type": "progress", "message": "修正を適用して再実行中..."})
-                        content, new_sim_id, is_err = await _handle_rerun_simulation(tb.input, body)
-                        if new_sim_id:
-                            sim_id = new_sim_id
-                        tr = {"type": "tool_result", "tool_use_id": tb.id, "content": content}
-                        if is_err:
-                            tr["is_error"] = True
-                        next_tool_results.append(tr)
-                    elif tb.name == "get_network_info":
-                        content, is_err = _handle_get_network_info(tb.input)
-                        tr = {"type": "tool_result", "tool_use_id": tb.id, "content": content}
-                        if is_err:
-                            tr["is_error"] = True
-                        next_tool_results.append(tr)
-                    elif tb.name == "import_osm_network":
-                        _place = tb.input.get("place", "")
-                        _dist = tb.input.get("distance_m", 500)
-                        _tmax = tb.input.get("tmax", 3600)
-                        _road_types = tb.input.get("road_types", "drive")
-                        yield _sse_event({"type": "progress", "message": f"OpenStreetMap から「{_place}」のデータを取得中..."})
-                        try:
-                            loop = asyncio.get_event_loop()
-                            osm_r = await loop.run_in_executor(executor, _run_osm_import, _place, _dist, _road_types)
-                            _scenario = dict(osm_r)
-                            _link_geoms = _scenario.pop("link_geometries", {})
-                            _scenario.pop("center", None)
-                            _scenario.pop("distance_m", None)
-                            _summary = _scenario.pop("summary", "")
-                            _scenario["tmax"] = _tmax
-                            if not _scenario["demands"] and len(_scenario["nodes"]) >= 2:
-                                _scenario["demands"] = _generate_osm_demands(
-                                    _scenario["nodes"], _scenario["links"], _tmax
-                                )
-                            si = SimulationInput(**_scenario)
-                            r = await _run_uxsim_async(si)
-                            _apply_link_geometries(r, _link_geoms)
-                            new_id = str(uuid.uuid4())[:8]
-                            _store_sim(new_id, r, {
-                                "type": "osm",
-                                "via": "llm",
-                                "llm_backend": "claude",
-                                "place": _place,
-                                "distance_m": _dist,
-                                "round": "follow_up",
-                                "llm_user_message": _last_user_message_text(body),
-                            })
-                            sim_id = new_id
-                            next_tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": tb.id,
-                                "content": json.dumps({
-                                    **r["stats"], "sim_id": new_id,
-                                    "summary": _summary,
-                                    "node_count": len(_scenario["nodes"]),
-                                    "link_count": len(_scenario["links"]),
-                                }, ensure_ascii=False),
-                            })
-                        except Exception as e:
-                            import traceback
-                            traceback.print_exc()
-                            next_tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": tb.id,
-                                "content": f"OSMインポートエラー: {str(e)}",
-                                "is_error": True,
-                            })
+                async for _kind, _payload in _dispatch_tool_blocks(
+                        next_tool_blocks, state, follow_up=True):
+                    if _kind == "progress":
+                        yield _sse_event({"type": "progress", "message": _payload})
                     else:
-                        next_tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tb.id,
-                            "content": f"未知のツール: {tb.name}",
-                        })
+                        next_tool_results = _payload
 
                 messages.append({"role": "assistant", "content": stream_result["response"].content})
                 messages.append({"role": "user", "content": next_tool_results})
+                _mark_cache_tail(messages)
 
                 # 次ラウンドもストリーミング
                 yield _sse_event({"type": "stream_start"})
@@ -2468,52 +3015,46 @@ async def _chat_claude_stream(body: ChatInput):
                         next_tool_blocks = item["tool_blocks"]
                         stream_result = item
 
-            # チャート抽出
-            charts = []
-            for m in chart_pattern.finditer(final_text):
-                try:
-                    chart_json = json.loads(m.group(1))
-                    charts.append(chart_json)
-                except json.JSONDecodeError as e:
-                    print(f"[RISU] chart JSON parse failed: {e}; raw={m.group(1)[:200]!r}")
-            clean_text = chart_pattern.sub('', final_text).strip()
+            # チャート抽出（$data 参照はこのターンで取得した集計データで解決）
+            charts, clean_text = _extract_charts(
+                final_text, state.sim_data_cache,
+                state.last_data_sim_id or state.sim_id or _conversation_sim_id(body))
             if "```chart" in clean_text.lower() or "```\nchart" in clean_text.lower():
-                # 抽出漏れの兆候。ログに残してデバッグ可能に
+                # 抽出漏れの兆候．ログに残してデバッグ可能に
                 idx = clean_text.lower().find("```")
                 print(f"[RISU] WARN: chart fence still present after strip; near={clean_text[max(0,idx-20):idx+200]!r}")
             print(f"[RISU] chat done: charts={len(charts)}, clean_text_len={len(clean_text)}")
 
-            # sim_id が未設定の場合、直近のシミュレーション結果をフォールバック
-            if sim_id is None and results_store:
-                sim_id = list(results_store.keys())[-1]
-
-            resp = {"type": "done", "role": "assistant", "content": clean_text, "sim_id": sim_id}
+            # このターンでシミュレーションを実行していなければ sim_id は None のまま
+            # （グローバル最新へのフォールバックは無関係な結果を表示させるため廃止）
+            resp = {"type": "done", "role": "assistant", "content": clean_text, "sim_id": state.sim_id,
+                    "usage": usage.as_dict()}
             if charts:
                 resp["charts"] = charts
             yield _sse_event(resp)
 
         except anthropic.AuthenticationError:
             print("[RISU] CRITICAL: ANTHROPIC_API_KEY invalid!")
-            yield _sse_event({"type": "error", "message": "サーバー側で LLM に接続できません。運営にお問い合わせください。"})
+            yield _sse_event({"type": "error", "message": "サーバー側で LLM に接続できません．運営にお問い合わせください．"})
         except anthropic.RateLimitError:
-            yield _sse_event({"type": "error", "message": "LLM が混雑しています。しばらく待って再試行してください。"})
+            yield _sse_event({"type": "error", "message": "LLM が混雑しています．しばらく待って再試行してください．"})
         except anthropic.APIStatusError as e:
             status = getattr(e, "status_code", None) or getattr(e, "status", None)
             if status == 529:
-                yield _sse_event({"type": "error", "message": "LLM が一時的に過負荷です。1〜2 分後に再試行してください。"})
+                yield _sse_event({"type": "error", "message": "LLM が一時的に過負荷です．1〜2 分後に再試行してください．"})
             elif status and 500 <= status < 600:
-                yield _sse_event({"type": "error", "message": "LLM サーバー側のエラーです。しばらく後で再試行してください。"})
+                yield _sse_event({"type": "error", "message": "LLM サーバー側のエラーです．しばらく後で再試行してください．"})
             else:
                 print(f"[RISU] Claude APIStatusError {status}: {e}")
                 yield _sse_event({"type": "error", "message": f"LLM エラー（コード: {status}）"})
         except anthropic.APIConnectionError:
-            yield _sse_event({"type": "error", "message": "LLM に接続できません。ネットワーク接続を確認してください。"})
+            yield _sse_event({"type": "error", "message": "LLM に接続できません．ネットワーク接続を確認してください．"})
         except Exception as e:
             import traceback
             traceback.print_exc()
             # ユーザーには詳細を伏せる
             print(f"[RISU] chat error: {e.__class__.__name__}: {e}")
-            yield _sse_event({"type": "error", "message": "処理中にエラーが発生しました。もう一度お試しください。"})
+            yield _sse_event({"type": "error", "message": "処理中にエラーが発生しました．もう一度お試しください．"})
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -2524,25 +3065,12 @@ async def _chat_claude(body: ChatInput):
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-    # メッセージ変換（Claude API 形式）
-    messages = [{"role": m.role, "content": m.content} for m in body.messages]
-
-    # 直前のシミュレーションIDをシステムプロンプトに注入
+    # 履歴トリミング + キャッシュ境界 + 動的コンテキスト（system は不変に保つ）
+    messages = _build_llm_messages(body)
     system = SYSTEM_PROMPT
-    if results_store:
-        last_sim_id = list(results_store.keys())[-1]
-        link_names = [f["properties"]["name"] for f in results_store[last_sim_id].get("geojson", {}).get("features", [])]
-        _sc = results_store[last_sim_id].get("_scenario") or {}
-        _sizes = (f"{len(_sc.get('nodes') or [])} ノード / {len(_sc.get('links') or [])} リンク / "
-                  f"{len(_sc.get('demands') or [])} 需要, tmax={_sc.get('tmax', '?')}s")
-        _more = f"（他 {len(link_names) - 20} 本）" if len(link_names) > 20 else ""
-        system += f"""
-
-【現在のコンテキスト】
-直前のシミュレーションID: {last_sim_id}
-ネットワーク規模: {_sizes}
-リンク名の例: {', '.join(link_names[:20])}{_more}
-この結果への修正・再実行・比較は rerun_simulation(base_sim_id="{last_sim_id}") を使うこと。"""
+    usage = _UsageTally()
+    # ツール実行の状態はストリーミング経路と共通（_dispatch_tool_blocks）
+    state = _ToolTurnState(body)
 
     try:
         # 1回目：ツール付きリクエスト
@@ -2550,174 +3078,55 @@ async def _chat_claude(body: ChatInput):
             model=CLAUDE_MODEL,
             max_tokens=8192,
             system=_cached_system(system),
-            messages=messages,
+            messages=_api_messages(messages),
             tools=_cached_tools(),
         )
-        _log_usage("sync first-round", response)
+        usage.add("sync first-round", response)
 
         # テキストのみの応答（ツール呼び出しなし）
         if response.stop_reason != "tool_use":
             text = "".join(b.text for b in response.content if b.type == "text")
 
-            # LLM が「実行します」と言ったのにツールを呼ばなかった場合、再試行
+            # LLM が「実行します」と言ったのにツールを呼ばなかった場合，再試行
             sim_keywords = ["実行します", "作成します", "シミュレーション", "構築します"]
             if any(k in text for k in sim_keywords):
                 messages.append({"role": "assistant", "content": text})
-                messages.append({"role": "user", "content": "run_simulation ツールを呼び出して、今すぐシミュレーションを実行してください。テキストだけでなくツールを使ってください。"})
+                messages.append({"role": "user", "content": "run_simulation ツールを呼び出して，今すぐシミュレーションを実行してください．テキストだけでなくツールを使ってください．"})
                 retry = client.messages.create(
                     model=CLAUDE_MODEL,
                     max_tokens=8192,
                     system=_cached_system(system),
-                    messages=messages,
+                    messages=_api_messages(_mark_cache_tail(messages)),
                     tools=_cached_tools(),
                 )
-                _log_usage("sync retry", retry)
+                usage.add("sync retry", retry)
                 if retry.stop_reason == "tool_use":
                     response = retry
                     # 下のツール処理に続行
                 else:
-                    return {"role": "assistant", "content": text, "sim_id": None}
+                    return {"role": "assistant", "content": text, "sim_id": None, "usage": usage.as_dict()}
             else:
-                return {"role": "assistant", "content": text, "sim_id": None}
+                return {"role": "assistant", "content": text, "sim_id": None, "usage": usage.as_dict()}
 
         # ツール呼び出しがある場合（複数ツール呼び出しにも対応）
+        # dispatch はストリーミング経路と共通．進捗イベントはここでは捨てる．
         tool_blocks = [b for b in response.content if b.type == "tool_use"]
-        sim_id = None
-        tool_results = []
-
-        for tool_block in tool_blocks:
-            fn_name = tool_block.name
-            fn_args = tool_block.input
-
-            if fn_name == "run_simulation":
-                try:
-                    sim_input = SimulationInput(**fn_args)
-                    loop = asyncio.get_event_loop()
-                    result = await _run_uxsim_async(sim_input)
-                    sim_id = str(uuid.uuid4())[:8]
-                    _store_sim(sim_id, result, {
-                        "type": "llm",
-                        "llm_backend": "claude",
-                        "tool": "run_simulation",
-                        "llm_user_message": _last_user_message_text(body),
-                    })
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_block.id,
-                        "content": json.dumps({**result["stats"], "sim_id": sim_id}, ensure_ascii=False),
-                    })
-                except Exception as e:
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_block.id,
-                        "content": f"シミュレーション実行エラー: {str(e)}\n入力を修正して再度 run_simulation を呼んでください。",
-                        "is_error": True,
-                    })
-
-            elif fn_name == "rerun_simulation":
-                content, new_sim_id, is_err = await _handle_rerun_simulation(fn_args, body)
-                if new_sim_id:
-                    sim_id = new_sim_id
-                tr = {"type": "tool_result", "tool_use_id": tool_block.id, "content": content}
-                if is_err:
-                    tr["is_error"] = True
-                tool_results.append(tr)
-            elif fn_name == "get_network_info":
-                content, is_err = _handle_get_network_info(fn_args)
-                tr = {"type": "tool_result", "tool_use_id": tool_block.id, "content": content}
-                if is_err:
-                    tr["is_error"] = True
-                tool_results.append(tr)
-
-            elif fn_name == "import_osm_network":
-                try:
-                    place = fn_args.get("place", "")
-                    dist = fn_args.get("distance_m", 500)
-                    osm_tmax = fn_args.get("tmax", 3600)
-                    road_types = fn_args.get("road_types", "drive")
-                    loop = asyncio.get_event_loop()
-                    osm_result = await loop.run_in_executor(
-                        executor, _run_osm_import, place, dist, road_types
-                    )
-                    # シナリオ構築（ダミー需要追加）
-                    scenario = dict(osm_result)
-                    link_geometries = scenario.pop("link_geometries", {})
-                    scenario.pop("center", None)
-                    scenario.pop("distance_m", None)
-                    summary = scenario.pop("summary", "")
-                    scenario["tmax"] = osm_tmax
-
-                    if not scenario["demands"] and len(scenario["nodes"]) >= 2:
-                        scenario["demands"] = _generate_osm_demands(
-                            scenario["nodes"], scenario["links"], osm_tmax
-                        )
-
-                    sim_input = SimulationInput(**scenario)
-                    result = await _run_uxsim_async(sim_input)
-                    # 道路形状データを結果に追加
-                    _apply_link_geometries(result, link_geometries)
-                    sim_id = str(uuid.uuid4())[:8]
-                    _store_sim(sim_id, result, {
-                        "type": "osm",
-                        "via": "llm",
-                        "llm_backend": "claude",
-                        "place": place,
-                        "distance_m": dist,
-                        "llm_user_message": _last_user_message_text(body),
-                    })
-
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_block.id,
-                        "content": json.dumps({
-                            **result["stats"],
-                            "sim_id": sim_id,
-                            "summary": summary,
-                            "node_count": len(scenario["nodes"]),
-                            "link_count": len(scenario["links"]),
-                        }, ensure_ascii=False),
-                    })
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc()
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_block.id,
-                        "content": f"OSMインポートエラー: {str(e)}",
-                        "is_error": True,
-                    })
-
-            elif fn_name == "get_simulation_data":
-                sim_data = _get_simulation_data(fn_args.get("sim_id", ""))
-                if sim_data:
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_block.id,
-                        "content": json.dumps(sim_data, ensure_ascii=False),
-                    })
-                else:
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_block.id,
-                        "content": "データが見つかりません。シミュレーションIDを確認してください。",
-                    })
+        tool_results = await _collect_tool_results(tool_blocks, state)
 
         # ツール結果を渡して次の回答を生成（最大3ラウンド）
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
-
-        import re
-        chart_pattern = re.compile(r'```\s*chart\w*\s*\n?(.*?)\n?\s*```', re.DOTALL | re.IGNORECASE)
+        _mark_cache_tail(messages)
 
         for _round in range(MAX_TOOL_ROUNDS):
             resp_next = client.messages.create(
                 model=CLAUDE_MODEL,
                 max_tokens=16000,
                 system=_cached_system(system),
-                messages=messages,
+                messages=_api_messages(messages),
                 tools=_cached_tools(),
             )
-            _log_usage(f"sync round {_round + 1}", resp_next)
+            usage.add(f"sync round {_round + 1}", resp_next)
 
             # テキスト部分を収集
             final_text = "".join(b.text for b in resp_next.content if b.type == "text")
@@ -2727,137 +3136,28 @@ async def _chat_claude(body: ChatInput):
             if not next_tool_blocks:
                 break
 
-            next_tool_results = []
-            for tb in next_tool_blocks:
-                if tb.name == "run_simulation":
-                    try:
-                        si = SimulationInput(**tb.input)
-                        loop = asyncio.get_event_loop()
-                        r = await _run_uxsim_async(si)
-                        new_id = str(uuid.uuid4())[:8]
-                        _store_sim(new_id, r, {
-                            "type": "llm",
-                            "llm_backend": "claude",
-                            "tool": "run_simulation",
-                            "round": "follow_up",
-                            "llm_user_message": _last_user_message_text(body),
-                        })
-                        sim_id = new_id
-                        next_tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tb.id,
-                            "content": json.dumps({**r["stats"], "sim_id": new_id}, ensure_ascii=False),
-                        })
-                    except Exception as e:
-                        next_tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tb.id,
-                            "content": f"シミュレーション実行エラー: {str(e)}\n入力を修正して再度 run_simulation を呼んでください。",
-                            "is_error": True,
-                        })
-                elif tb.name == "rerun_simulation":
-                    content, new_sim_id, is_err = await _handle_rerun_simulation(tb.input, body)
-                    if new_sim_id:
-                        sim_id = new_sim_id
-                    tr = {"type": "tool_result", "tool_use_id": tb.id, "content": content}
-                    if is_err:
-                        tr["is_error"] = True
-                    next_tool_results.append(tr)
-                elif tb.name == "get_network_info":
-                    content, is_err = _handle_get_network_info(tb.input)
-                    tr = {"type": "tool_result", "tool_use_id": tb.id, "content": content}
-                    if is_err:
-                        tr["is_error"] = True
-                    next_tool_results.append(tr)
-                elif tb.name == "import_osm_network":
-                    try:
-                        _place = tb.input.get("place", "")
-                        _dist = tb.input.get("distance_m", 500)
-                        _tmax = tb.input.get("tmax", 3600)
-                        _road_types = tb.input.get("road_types", "drive")
-                        loop = asyncio.get_event_loop()
-                        osm_r = await loop.run_in_executor(
-                            executor, _run_osm_import, _place, _dist, _road_types
-                        )
-                        _scenario = dict(osm_r)
-                        _link_geoms = _scenario.pop("link_geometries", {})
-                        _scenario.pop("center", None)
-                        _scenario.pop("distance_m", None)
-                        _summary = _scenario.pop("summary", "")
-                        _scenario["tmax"] = _tmax
-                        if not _scenario["demands"] and len(_scenario["nodes"]) >= 2:
-                            _scenario["demands"] = _generate_osm_demands(
-                                _scenario["nodes"], _scenario["links"], _tmax
-                            )
-                        si = SimulationInput(**_scenario)
-                        r = await _run_uxsim_async(si)
-                        _apply_link_geometries(r, _link_geoms)
-                        new_id = str(uuid.uuid4())[:8]
-                        _store_sim(new_id, r, {
-                            "type": "osm",
-                            "via": "llm",
-                            "llm_backend": "claude",
-                            "place": _place,
-                            "distance_m": _dist,
-                            "round": "follow_up",
-                            "llm_user_message": _last_user_message_text(body),
-                        })
-                        sim_id = new_id
-                        next_tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tb.id,
-                            "content": json.dumps({
-                                **r["stats"], "sim_id": new_id,
-                                "summary": _summary,
-                                "node_count": len(_scenario["nodes"]),
-                                "link_count": len(_scenario["links"]),
-                            }, ensure_ascii=False),
-                        })
-                    except Exception as e:
-                        import traceback
-                        traceback.print_exc()
-                        next_tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tb.id,
-                            "content": f"OSMインポートエラー: {str(e)}",
-                            "is_error": True,
-                        })
-                elif tb.name == "get_simulation_data":
-                    sd = _get_simulation_data(tb.input.get("sim_id", ""))
-                    next_tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tb.id,
-                        "content": json.dumps(sd, ensure_ascii=False) if sd else "データが見つかりません。",
-                    })
-                else:
-                    next_tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tb.id,
-                        "content": f"未知のツール: {tb.name}",
-                    })
+            next_tool_results = await _collect_tool_results(
+                next_tool_blocks, state, follow_up=True)
 
             messages.append({"role": "assistant", "content": resp_next.content})
             messages.append({"role": "user", "content": next_tool_results})
+            _mark_cache_tail(messages)
 
-        # ```chart ... ``` ブロックからChart.js設定を抽出
-        charts = []
-        for m in chart_pattern.finditer(final_text):
-            try:
-                chart_json = json.loads(m.group(1))
-                charts.append(chart_json)
-            except json.JSONDecodeError:
-                pass
-        clean_text = chart_pattern.sub('', final_text).strip()
+        # ```chart ... ``` ブロックからChart.js設定を抽出（$data 参照を解決）
+        charts, clean_text = _extract_charts(
+            final_text, state.sim_data_cache,
+            state.last_data_sim_id or state.sim_id or _conversation_sim_id(body))
 
-        resp = {"role": "assistant", "content": clean_text, "sim_id": sim_id}
+        resp = {"role": "assistant", "content": clean_text, "sim_id": state.sim_id,
+                "usage": usage.as_dict()}
         if charts:
             resp["charts"] = charts
         return resp
 
     except anthropic.AuthenticationError:
-        raise HTTPException(401, detail="Anthropic API キーが無効です。ANTHROPIC_API_KEY を確認してください")
+        raise HTTPException(401, detail="Anthropic API キーが無効です．ANTHROPIC_API_KEY を確認してください")
     except anthropic.RateLimitError:
-        raise HTTPException(429, detail="Claude API のレートリミットに達しました。しばらく待ってください")
+        raise HTTPException(429, detail="Claude API のレートリミットに達しました．しばらく待ってください")
     except HTTPException:
         raise
     except Exception as e:
@@ -2912,7 +3212,6 @@ async def _chat_ollama(body: ChatInput):
                 fn_args = json.loads(fn_args)
 
             sim_input = SimulationInput(**fn_args)
-            loop = asyncio.get_event_loop()
             result = await _run_uxsim_async(sim_input)
             sim_id = str(uuid.uuid4())[:8]
             _store_sim(sim_id, result, {
@@ -2937,7 +3236,7 @@ async def _chat_ollama(body: ChatInput):
     except httpx.TimeoutException:
         raise HTTPException(504, detail="Ollama の応答がタイムアウトしました")
     except httpx.ConnectError:
-        raise HTTPException(502, detail="Ollama に接続できません。ollama serve が起動しているか確認してください")
+        raise HTTPException(502, detail="Ollama に接続できません．ollama serve が起動しているか確認してください")
     except Exception as e:
         raise HTTPException(500, detail=f"チャットエラー: {str(e)}")
 
@@ -2987,8 +3286,8 @@ def _get_int(row: dict, col: str | None, default: int = 1) -> int:
 
 def _parse_csv_scenario(content: str) -> dict:
     """
-    単一 CSV からシナリオを推定する。
-    カラム名を柔軟にマッチング。対応フォーマット:
+    単一 CSV からシナリオを推定する．
+    カラム名を柔軟にマッチング．対応フォーマット:
       1) RISU 独自形式: type 列で node/link/demand を区別
       2) ノード CSV: name/id + x/y 座標系カラム
       3) リンク CSV: start/from + end/to 系カラム
@@ -3051,9 +3350,9 @@ def _parse_csv_scenario(content: str) -> dict:
 
     # ============ ノード CSV 判定 ============
     # name/id + x/y 系カラムがあるか
-    # 識別子カラムの優先順位: ID 系 > name 系。
-    # GMNS 等では node_id が主キーで name は表示ラベル（重複可）のため、
-    # name を優先すると「ノード名が重複」エラーになる。
+    # 識別子カラムの優先順位: ID 系 > name 系．
+    # GMNS 等では node_id が主キーで name は表示ラベル（重複可）のため，
+    # name を優先すると「ノード名が重複」エラーになる．
     # （リンクの from_node_id / to_node_id も node_id を参照するので整合する）
     NODE_NAME_COLS = ["node_id", "id", "name", "node_name", "node"]
     NODE_X_COLS = ["x", "x_coord", "lon", "longitude", "lng", "経度"]
@@ -3087,7 +3386,7 @@ def _parse_csv_scenario(content: str) -> dict:
     col_le = _find_col(raw_fields, LINK_END_COLS)
 
     if col_ls and col_le:
-        # 識別子は ID 系を優先（link_id が主キー、name はラベルの可能性がある）
+        # 識別子は ID 系を優先（link_id が主キー，name はラベルの可能性がある）
         col_lname = _find_col(raw_fields, ["link_id", "id", "name", "link_name", "link"])
         col_length = _find_col(raw_fields, ["length", "distance", "dist", "長さ"])
         col_ffs = _find_col(raw_fields, ["free_flow_speed", "speed", "free_speed",
@@ -3144,7 +3443,7 @@ def _parse_csv_scenario(content: str) -> dict:
             })
         return {"format": "demand_csv", "demands": demands}
 
-    raise ValueError("CSV 形式を認識できません。ノード（name,x,y）、リンク（start,end,length）、または RISU CSV 形式を使用してください。")
+    raise ValueError("CSV 形式を認識できません．ノード（name,x,y），リンク（start,end,length），または RISU CSV 形式を使用してください．")
 
 
 def _gmns_to_scenario(
@@ -3235,7 +3534,7 @@ def _gmns_to_scenario(
                 # zone_id → node_id マッピング
                 orig_node = node_zone_map.get(orig_zone, orig_zone)
                 dest_node = node_zone_map.get(dest_zone, dest_zone)
-                # flow がすでに台/秒の場合はそのまま、volume が大きい場合は台/時→台/秒変換
+                # flow がすでに台/秒の場合はそのまま，volume が大きい場合は台/時→台/秒変換
                 flow = d.get("flow", 0)
                 if flow > 10:  # 10 台/秒超 → 台/時と推定
                     flow = flow / 3600.0
@@ -3259,25 +3558,25 @@ def _gmns_to_scenario(
 
 
 # OSM 道路種別プリセット
-# custom_filter は Overpass QL の highway タグフィルタ。
-# None のプリセットは network_type で取得する。
+# custom_filter は Overpass QL の highway タグフィルタ．
+# None のプリセットは network_type で取得する．
 _OSM_ROAD_PRESETS = {
-    # 高速道路・国道級のみ（広域・大半径向け。ノード数が大幅に減り高速）
+    # 高速道路・国道級のみ（広域・大半径向け．ノード数が大幅に減り高速）
     "major": '["highway"~"motorway|trunk|primary|motorway_link|trunk_link|primary_link"]',
-    # 幹線道路まで（major + 2次・3次幹線。都市スケールの標準）
+    # 幹線道路まで（major + 2次・3次幹線．都市スケールの標準）
     "arterial": '["highway"~"motorway|trunk|primary|secondary|tertiary'
                 '|motorway_link|trunk_link|primary_link|secondary_link|tertiary_link"]',
-    # 一般車道（住宅街の道路含む。サービス道路・駐車場内通路は除外）
+    # 一般車道（住宅街の道路含む．サービス道路・駐車場内通路は除外）
     "drive": None,
-    # 全車道（サービス道路・駐車場内通路含む。最も細かいが最も重い）
+    # 全車道（サービス道路・駐車場内通路含む．最も細かいが最も重い）
     "all": None,
 }
 _OSM_NETWORK_TYPE = {"drive": "drive", "all": "drive_service"}
 
 
 def _run_osm_import(place: str, distance_m: int = 1000, road_types: str = "drive") -> dict:
-    """OSM から道路ネットワークを取得して UXsim シナリオに変換。
-    OSMnx のグラフを直接活用し、道路形状・速度推定・車線数を取得する。
+    """OSM から道路ネットワークを取得して UXsim シナリオに変換．
+    OSMnx のグラフを直接活用し，道路形状・速度推定・車線数を取得する．
 
     road_types: "major" | "arterial" | "drive" | "all"（_OSM_ROAD_PRESETS 参照）
     """
@@ -3311,8 +3610,8 @@ def _run_osm_import(place: str, distance_m: int = 1000, road_types: str = "drive
         # 対象道路が範囲内に存在しない場合（郊外で major 指定など）
         raise ValueError(
             f"「{place}」周辺（半径{distance_m}m）で road_types='{road_types}' に該当する"
-            f"道路が見つかりませんでした。road_types を 'arterial' や 'drive' に広げるか、"
-            f"半径を大きくしてください。（{e.__class__.__name__}）"
+            f"道路が見つかりませんでした．road_types を 'arterial' や 'drive' に広げるか，"
+            f"半径を大きくしてください．（{e.__class__.__name__}）"
         ) from e
     G = ox.add_edge_speeds(G)       # highway 種別から速度推定 (speed_kph)
 
@@ -3335,7 +3634,7 @@ def _run_osm_import(place: str, distance_m: int = 1000, road_types: str = "drive
     scenario_links = []
     link_geometries = {}  # link_name -> [[x,y], [x,y], ...]
     link_idx = 0
-    for u, v, key, data in Gp.edges(keys=True, data=True):
+    for u, v, _key, data in Gp.edges(keys=True, data=True):
         u_name = node_name_map.get(u)
         v_name = node_name_map.get(v)
         if u_name is None or v_name is None:
@@ -3395,18 +3694,18 @@ def _run_osm_import(place: str, distance_m: int = 1000, road_types: str = "drive
         "center": {"lat": center_lat, "lon": center_lon},
         "distance_m": distance_m,
         "summary": (
-            f"OSM から「{place}」周辺（半径{distance_m}m、{_road_labels[road_types]}）の"
-            f"道路ネットワークを取得しました。"
-            f"{len(scenario_nodes)} ノード、{len(scenario_links)} リンク。"
+            f"OSM から「{place}」周辺（半径{distance_m}m，{_road_labels[road_types]}）の"
+            f"道路ネットワークを取得しました．"
+            f"{len(scenario_nodes)} ノード，{len(scenario_links)} リンク．"
         ),
     }
 
 
 def _generate_osm_demands(nodes: list[dict], links: list[dict], tmax: int = 3600) -> list[dict]:
-    """OSM ネットワークの境界ノードから多方向の需要を生成し、全道路を利用させる。
+    """OSM ネットワークの境界ノードから多方向の需要を生成し，全道路を利用させる．
 
-    ネットワーク周縁（境界）のノードを特定し、それら全ペア間に需要を設定する。
-    これにより交通がネットワーク全体に分散する。
+    ネットワーク周縁（境界）のノードを特定し，それら全ペア間に需要を設定する．
+    これにより交通がネットワーク全体に分散する．
     """
     if len(nodes) < 2:
         return []
@@ -3423,7 +3722,7 @@ def _generate_osm_demands(nodes: list[dict], links: list[dict], tmax: int = 3600
         degree[lk["start"]] = degree.get(lk["start"], 0) + 1
         degree[lk["end"]] = degree.get(lk["end"], 0) + 1
 
-    # 境界ノード候補: 次数が少ない（行き止まり・端点）ノード、
+    # 境界ノード候補: 次数が少ない（行き止まり・端点）ノード，
     # またはネットワーク中心から遠いノード
     node_by_name = {n["name"]: n for n in nodes}
     max_dist = max(math.hypot(n["x"] - cx, n["y"] - cy) for n in nodes) or 1
@@ -3433,13 +3732,13 @@ def _generate_osm_demands(nodes: list[dict], links: list[dict], tmax: int = 3600
     for n in nodes:
         d = math.hypot(n["x"] - cx, n["y"] - cy) / max_dist  # 0~1
         deg = degree.get(n["name"], 0)
-        # 次数1（行き止まり）=高スコア、次数2=中、次数3以上=低
+        # 次数1（行き止まり）=高スコア，次数2=中，次数3以上=低
         deg_score = 1.0 if deg <= 1 else (0.6 if deg == 2 else 0.3)
         scored.append((d * 0.6 + deg_score * 0.4, n["name"]))
 
     scored.sort(reverse=True)
 
-    # 上位ノードから境界ノードを選択（最大8個、最小4個）
+    # 上位ノードから境界ノードを選択（最大8個，最小4個）
     # 近すぎるノード同士は除外
     min_sep = max_dist * 0.3  # 中心からの最大距離の30%以上離れていること
     boundary_nodes = []
@@ -3554,7 +3853,6 @@ async def import_gmns(dataset: str = Form(...), tmax: int = Form(3600)):
     scenario["name"] = dataset
 
     sim_input = _scenario_to_input(scenario)
-    loop = asyncio.get_event_loop()
     result = await _run_uxsim_async(sim_input)
     sim_id = str(uuid.uuid4())[:8]
     _store_sim(sim_id, result, {"type": "gmns", "dataset_id": dataset})
@@ -3597,9 +3895,12 @@ async def upload_files(
             imported_from = payload.get("sim_id")
         else:
             scenario_dict = payload
+        # 道路形状（多点 LineString）が同梱されていれば描画に使う（OSM 取込と同じ仕組み）
+        link_geometries = scenario_dict.pop("link_geometries", None) if isinstance(scenario_dict, dict) else None
         sim_input = _scenario_to_input(scenario_dict)
-        loop = asyncio.get_event_loop()
         result = await _run_uxsim_async(sim_input)
+        if link_geometries:
+            _apply_link_geometries(result, link_geometries)
         sim_id = str(uuid.uuid4())[:8]
         source = {"type": "json", "filename": json_files[0]}
         if imported_from:
@@ -3608,7 +3909,7 @@ async def upload_files(
         return {
             "id": sim_id,
             "stats": result["stats"],
-            "message": f"JSON ファイルからシミュレーション実行完了"
+            "message": "JSON ファイルからシミュレーション実行完了"
                        + (f"（再現: {imported_from}）" if imported_from else ""),
         }
 
@@ -3633,7 +3934,6 @@ async def upload_files(
                 "demands": parsed["demands"],
             }
             sim_input = _scenario_to_input(scenario)
-            loop = asyncio.get_event_loop()
             result = await _run_uxsim_async(sim_input)
             sim_id = str(uuid.uuid4())[:8]
             _store_sim(sim_id, result, {
@@ -3644,14 +3944,14 @@ async def upload_files(
             return {
                 "id": sim_id,
                 "stats": result["stats"],
-                "message": f"RISU CSV からシミュレーション実行完了",
+                "message": "RISU CSV からシミュレーション実行完了",
             }
 
-        # 単一の GMNS node/link ファイルの場合、シミュレーションはせずネットワークだけ返す
+        # 単一の GMNS node/link ファイルの場合，シミュレーションはせずネットワークだけ返す
         return {
             "id": None,
             "parsed": parsed,
-            "message": f"GMNS {parsed['format']} を読み込みました。node.csv + link.csv + demand.csv を一緒にアップロードするとシミュレーションを実行します。",
+            "message": f"GMNS {parsed['format']} を読み込みました．node.csv + link.csv + demand.csv を一緒にアップロードするとシミュレーションを実行します．",
         }
 
     # 複数 CSV → GMNS セットとして処理
@@ -3688,7 +3988,6 @@ async def upload_files(
         }]
 
     sim_input = _scenario_to_input(scenario)
-    loop = asyncio.get_event_loop()
     result = await _run_uxsim_async(sim_input)
     sim_id = str(uuid.uuid4())[:8]
     _store_sim(sim_id, result, {
@@ -3710,7 +4009,7 @@ async def import_osm(place: str = Form(...), tmax: int = Form(3600),
     """OpenStreetMap から道路ネットワークを取得
 
     road_types: major（高速・国道級のみ） / arterial（幹線まで） /
-                drive（一般車道、デフォルト） / all（サービス道路含む全車道）
+                drive（一般車道，デフォルト） / all（サービス道路含む全車道）
     """
     # 入力バリデーション
     place = place.strip()
@@ -3790,10 +4089,21 @@ async def healthz():
 
 # ---- 静的ファイル（UI）----
 import os
+
 if os.path.exists("static"):
     app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8001, reload=True)
+
+    if RISU_HOST not in ("127.0.0.1", "localhost", "::1"):
+        # 認証が無いので，LAN に開くのは利用者の明示的な選択であるべき．
+        # 気づかないまま公開されている状態を作らないよう，起動時に警告する．
+        print(
+            f"[RISU] 警告: {RISU_HOST} で待ち受けます．RISU は認証を持たないため，"
+            "このネットワークから接続できる全員がシミュレーション実行・結果閲覧・"
+            "LLM 呼び出し（= API キーの課金）を行えます．"
+        )
+    print(f"[RISU] http://{'localhost' if RISU_HOST in ('127.0.0.1', '0.0.0.0') else RISU_HOST}:{RISU_PORT}")
+    uvicorn.run("server:app", host=RISU_HOST, port=RISU_PORT, reload=RISU_RELOAD)

@@ -6,11 +6,15 @@
 <title>RISU — Real-time Interactive Simulator for Urban mobility</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <meta property="og:title" content="RISU — 交通流シミュレーター">
-<meta property="og:description" content="自然言語で操作する交通シミュレーション。UXsim 搭載。">
+<meta property="og:description" content="自然言語で操作する交通シミュレーション．UXsim 搭載．">
 <meta property="og:image" content="/ss_grid_vehicle.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="description" content="RISU: 自然言語で操作する交通流シミュレーター（UXsim 搭載）">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<!-- Markdown レンダリング: marked 12.0.2 (MIT) + DOMPurify 3.1.6 (Apache-2.0 / MPL-2.0)．
+     ローカル利用のため CDN ではなく同梱する（オフラインでも動く）． -->
+<script src="/vendor/marked.umd.min.js"></script>
+<script src="/vendor/purify.min.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@300;400;500;600;700;800&family=Noto+Sans+JP:wght@300;400;500;700&display=swap');
 
@@ -293,6 +297,99 @@
     border-radius: 999px;
   }
   .msg.system::before { content: "— SYSTEM — "; color: var(--accent); font-weight: 700; }
+
+  /* ── Markdown レンダリング済み本文（assistant のみ） ──
+     .msg は white-space: pre-wrap だが，marked が改行を <br> に変換するため
+     md 本文では normal に戻す（戻さないとブロック余白と二重になる）．
+     marked が読み込めなかった場合は .md が付かず pre-wrap の生テキスト表示になる． */
+  .msg.assistant .body.md { white-space: normal; }
+  .msg.assistant .body.md > :first-child { margin-top: 0; }
+  .msg.assistant .body.md > :last-child  { margin-bottom: 0; }
+  .msg.assistant .body.md p { margin: 8px 0; }
+  .msg.assistant .body.md h1,
+  .msg.assistant .body.md h2,
+  .msg.assistant .body.md h3,
+  .msg.assistant .body.md h4,
+  .msg.assistant .body.md h5,
+  .msg.assistant .body.md h6 {
+    font-family: var(--sans);
+    font-weight: 700;
+    line-height: 1.4;
+    margin: 14px 0 6px;
+    letter-spacing: -.01em;
+  }
+  .msg.assistant .body.md h1 { font-size: 17px; }
+  .msg.assistant .body.md h2 { font-size: 15.5px; }
+  .msg.assistant .body.md h3 { font-size: 14.5px; }
+  .msg.assistant .body.md h4,
+  .msg.assistant .body.md h5,
+  .msg.assistant .body.md h6 { font-size: 13.5px; color: var(--ink-soft); }
+  .msg.assistant .body.md ul,
+  .msg.assistant .body.md ol { margin: 8px 0; padding-left: 22px; }
+  .msg.assistant .body.md li { margin: 3px 0; }
+  .msg.assistant .body.md li > p { margin: 2px 0; }
+  .msg.assistant .body.md strong { font-weight: 700; }
+  .msg.assistant .body.md em { font-style: italic; }
+  .msg.assistant .body.md code {
+    background: var(--paper2);
+    border: 1px solid var(--line-faint);
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+    font-family: var(--mono);
+    font-size: 12.5px;
+  }
+  .msg.assistant .body.md pre {
+    background: var(--paper2);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius-md);
+    padding: 10px 12px;
+    margin: 10px 0;
+    overflow-x: auto;
+  }
+  .msg.assistant .body.md pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 12px;
+    line-height: 1.6;
+  }
+  .msg.assistant .body.md blockquote {
+    border-left: 3px solid var(--accent);
+    margin: 10px 0;
+    padding: 2px 12px;
+    color: var(--sub);
+  }
+  .msg.assistant .body.md a {
+    color: var(--accent2);
+    border-bottom: 1px solid var(--accent2);
+  }
+  .msg.assistant .body.md hr {
+    border: none;
+    border-top: 1px solid var(--line-soft);
+    margin: 12px 0;
+  }
+  .msg.assistant .body.md table {
+    border-collapse: collapse;
+    margin: 10px 0;
+    font-size: 12.5px;
+    max-width: 100%;
+    display: block;
+    overflow-x: auto;
+  }
+  .msg.assistant .body.md th,
+  .msg.assistant .body.md td {
+    border: 1px solid var(--line-soft);
+    padding: 5px 9px;
+    text-align: left;
+    vertical-align: top;
+  }
+  .msg.assistant .body.md th {
+    background: var(--paper2);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: .04em;
+    white-space: nowrap;
+  }
   /* sim_id バッジ */
   .sim-badge {
     display: inline-block;
@@ -309,6 +406,14 @@
     border-radius: 999px;
   }
   .sim-badge:hover { transform: translateY(-1px); }
+  .usage-meta {
+    margin-top: 6px;
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: .04em;
+    color: var(--muted, #8a8a86);
+    opacity: .8;
+  }
   .sim-badge::before { content: "SIM: "; color: var(--accent); }
   .sim-badge:hover { background: var(--accent); border-color: var(--accent); }
 
@@ -706,9 +811,9 @@
     color: var(--accent);
     font-weight: 700;
   }
-  /* Chart.js は responsive + maintainAspectRatio:false で親要素の高さに合わせる。
-     親に高さが無いと canvas が高さ 0 になり「描画されない」状態になる。
-     canvas を専用の高さ固定ボックスで包むことで安定描画させる。 */
+  /* Chart.js は responsive + maintainAspectRatio:false で親要素の高さに合わせる．
+     親に高さが無いと canvas が高さ 0 になり「描画されない」状態になる．
+     canvas を専用の高さ固定ボックスで包むことで安定描画させる． */
   .msg .chart-wrap .chart-canvas-box {
     position: relative;
     height: 220px;
@@ -1367,7 +1472,7 @@
         <circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/>
       </svg>
       <div class="ph-title">シミュレーションを実行</div>
-      <div class="ph-sub">チャットで指示するか、ファイルをアップロードしてください</div>
+      <div class="ph-sub">チャットで指示するか，ファイルをアップロードしてください</div>
     </div>
     <!-- Canvas floating controls -->
     <div id="canvas-controls" hidden>
@@ -1384,7 +1489,7 @@
     <div id="canvas-tooltip" hidden></div>
     <!-- ── ネットワークエディタ ── -->
     <div id="edit-toolbar" hidden>
-      <button class="et-tool active" data-tool="select" title="クリックで選択、ドラッグで移動">選択</button>
+      <button class="et-tool active" data-tool="select" title="クリックで選択，ドラッグで移動">選択</button>
       <button class="et-tool" data-tool="addNode" title="空き地をクリックしてノード追加">ノード</button>
       <button class="et-tool" data-tool="addLink" title="ノードを順にクリックしてリンク作成（連続作成可）">リンク</button>
       <button class="et-tool" data-tool="delete" title="ノード / リンクをクリックで削除">削除</button>
@@ -1973,7 +2078,7 @@ function applyEditProp(field, value) {
       const v = parseFloat(value);
       if (isNaN(v) || value === '') delete n.flow_capacity; else n.flow_capacity = v;
     } else if (field === 'signal') {
-      const parts = value.split(/[,、\s]+/).map(s => parseFloat(s)).filter(v => !isNaN(v) && v > 0);
+      const parts = value.split(/[,，\s]+/).map(s => parseFloat(s)).filter(v => !isNaN(v) && v > 0);
       if (parts.length) n.signal = parts; else delete n.signal;
     }
   } else {
@@ -2093,7 +2198,7 @@ document.getElementById('et-run').addEventListener('click', async () => {
     showToast(`シミュレーション完了 (${d.id})`);
     exitEditMode();
     await loadResult(d.id);
-    addMsg('system', `エディタで作成したネットワークを実行しました（sim_id: ${d.id}、` +
+    addMsg('system', `エディタで作成したネットワークを実行しました（sim_id: ${d.id}，` +
       `${scenario.nodes.length} ノード / ${scenario.links.length} リンク / ${scenario.demands.length} 需要）`);
   } catch (e) {
     showToast(`実行エラー: ${e.message}`, 'error', 5000);
@@ -2260,7 +2365,7 @@ async function sendMessage() {
   addMsg('user', displayText);
 
   // チャット履歴にはテキストのみ追加（ファイル内容はサーバー側で処理）
-  const userContent = text || `添付ファイル（${fileNames.join(', ')}）を使ってシミュレーションを実行してください。`;
+  const userContent = text || `添付ファイル（${fileNames.join(', ')}）を使ってシミュレーションを実行してください．`;
   chatHistory.push({ role: 'user', content: userContent });
   input.value = '';
   input.style.height = '';
@@ -2291,8 +2396,8 @@ async function sendMessage() {
       const INLINE_LIMIT = 20000; // 20KB 超は LLM に埋め込まず参照渡し
 
       if (totalSize > INLINE_LIMIT) {
-        // ── 大きい添付: /upload で直接実行し、チャットには sim_id 参照だけを渡す ──
-        // （LLM にネットワーク全体を往復させるとサイズ超過になるため。
+        // ── 大きい添付: /upload で直接実行し，チャットには sim_id 参照だけを渡す ──
+        // （LLM にネットワーク全体を往復させるとサイズ超過になるため．
         //   以降の修正・再実行は LLM が rerun_simulation で行う）
         showStatus('添付ネットワークをアップロードして実行中...');
         const fd = new FormData();
@@ -2303,9 +2408,9 @@ async function sendMessage() {
         await loadResult(ud.id);
         addMsg('system', `添付ネットワークを実行しました（sim_id: ${ud.id}）`);
         const last = chatHistory[chatHistory.length - 1];
-        last.content += `\n\n[システム: 添付ファイル（${fileNames.join(', ')}）はサーバーで実行済み。` +
-          `sim_id="${ud.id}"、統計: ${JSON.stringify(ud.stats || {})}。` +
-          `このネットワークの内容は再送不要。修正・再実行は rerun_simulation(base_sim_id="${ud.id}") を使うこと]`;
+        last.content += `\n\n[システム: 添付ファイル（${fileNames.join(', ')}）はサーバーで実行済み．` +
+          `sim_id="${ud.id}"，統計: ${JSON.stringify(ud.stats || {})}．` +
+          `このネットワークの内容は再送不要．修正・再実行は rerun_simulation(base_sim_id="${ud.id}") を使うこと]`;
       } else {
         // ── 小さい添付: 従来どおりメッセージに埋め込む ──
         const fileParts = [];
@@ -2321,7 +2426,9 @@ async function sendMessage() {
     const res = await fetch(`${API}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: chatHistory }),
+      // last_sim_id: この会話で表示中の sim．サーバーはこれだけを
+      // LLM のコンテキスト（rerun_simulation のベース）として注入する
+      body: JSON.stringify({ messages: chatHistory, last_sim_id: lastSimId }),
     });
 
     if (!res.ok) {
@@ -2366,11 +2473,14 @@ async function sendMessage() {
                 streamingBody = streamingMsgEl.querySelector('.body');
               }
             } else if (evt.type === 'text_delta' && streamingBody) {
-              streamingBody.textContent += evt.text;
+              streamingBody._raw = (streamingBody._raw || '') + evt.text;
+              scheduleMdRender(streamingBody);
               messagesWrap.scrollTop = messagesWrap.scrollHeight;
             } else if (evt.type === 'stream_end_partial') {
               // 追加ツール実行 → ステータスバー再表示
               showStatus('追加処理中...');
+              // テキストを 1 文字も出さずにツール呼び出しへ進んだ場合，空の吹き出しが残るので消す
+              if (streamingMsgEl && streamingBody && !(streamingBody._raw || '').trim()) streamingMsgEl.remove();
               streamingMsgEl = null;
               streamingBody = null;
             } else if (evt.type === 'done') {
@@ -2389,43 +2499,12 @@ async function sendMessage() {
 
       // ストリーミング中のメッセージをクリーンアップ → 最終版で置き換え
       if (streamingMsgEl) streamingMsgEl.remove();
-      const msgEl = addMsg('assistant', data.content);
-
-      if (data.sim_id) {
-        const badge = document.createElement('div');
-        badge.className = 'sim-badge';
-        badge.textContent = `\u25B6 結果を表示  ID: ${data.sim_id}`;
-        badge.onclick = () => loadResult(data.sim_id);
-        msgEl.querySelector('.body').appendChild(badge);
-        loadResult(data.sim_id);
-      }
-      if (data.charts && data.charts.length) {
-        for (const chart of data.charts) renderChart(msgEl, chart);
-      } else if (data.chart) {
-        renderChart(msgEl, data.chart);
-      }
-      chatHistory.push({ role: 'assistant', content: data.content });
+      renderAssistantResponse(data);
 
     } else {
       // 従来の JSON レスポンス（mock / ollama）
       hideStatus();
-      const data = await res.json();
-      const msgEl = addMsg('assistant', data.content);
-
-      if (data.sim_id) {
-        const badge = document.createElement('div');
-        badge.className = 'sim-badge';
-        badge.textContent = `\u25B6 結果を表示  ID: ${data.sim_id}`;
-        badge.onclick = () => loadResult(data.sim_id);
-        msgEl.querySelector('.body').appendChild(badge);
-        loadResult(data.sim_id);
-      }
-      if (data.charts && data.charts.length) {
-        for (const chart of data.charts) renderChart(msgEl, chart);
-      } else if (data.chart) {
-        renderChart(msgEl, data.chart);
-      }
-      chatHistory.push({ role: 'assistant', content: data.content });
+      renderAssistantResponse(await res.json());
     }
   } catch(e) {
     hideStatus();
@@ -2452,6 +2531,77 @@ async function sendMessage() {
   btn.disabled = false;
 }
 
+// このターンの LLM トークン使用量を吹き出しの下に小さく表示（サーバーの done イベント usage）
+function appendUsageMeta(msgEl, usage) {
+  if (!usage || !msgEl) return;
+  const body = msgEl.querySelector('.body');
+  if (!body) return;
+  const k = n => (n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n));
+  const el = document.createElement('div');
+  el.className = 'usage-meta';
+  const cached = (usage.cache_read_tokens || 0);
+  const fresh = (usage.input_tokens || 0) + (usage.cache_creation_tokens || 0);
+  el.textContent = `tokens in ${k(fresh)} + cached ${k(cached)} (${usage.cache_hit_pct ?? 0}%) · out ${k(usage.output_tokens || 0)}` +
+    ` · ${usage.calls || 1} call${(usage.calls || 1) > 1 ? 's' : ''}` +
+    (usage.cost_jpy != null ? ` · ≈¥${usage.cost_jpy}` : '');
+  el.title = 'in: 今回課金された入力トークン / cached: キャッシュから読んだ入力トークン / out: 出力トークン';
+  body.parentNode.appendChild(el);
+}
+
+// ── Markdown レンダリング（assistant の吹き出しのみ） ──
+// marked でパースし DOMPurify でサニタイズしてから innerHTML に渡す．
+// ライブラリが読み込めなければ null を返し，呼び出し側が生テキストにフォールバックする．
+const _mdReady = (() => {
+  if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
+    console.warn('[RISU] marked / DOMPurify を読み込めませんでした．Markdown は生テキストで表示します');
+    return false;
+  }
+  const renderer = new marked.Renderer();
+  // 外部リンクは新規タブで開く（rel は tabnabbing 対策）
+  renderer.link = (href, title, text) => {
+    const t = title ? ` title="${title}"` : '';
+    return `<a href="${href}"${t} target="_blank" rel="noopener noreferrer">${text}</a>`;
+  };
+  // breaks: true — LLM は箇条書き内で単一改行を多用するので <br> に変換する
+  marked.setOptions({ gfm: true, breaks: true, renderer });
+  return true;
+})();
+
+function renderMarkdown(text) {
+  if (!_mdReady) return null;
+  try {
+    return DOMPurify.sanitize(marked.parse(String(text ?? '')), { ADD_ATTR: ['target', 'rel'] });
+  } catch (err) {
+    console.warn('[RISU] Markdown レンダリング失敗:', err);
+    return null;
+  }
+}
+
+// 本文要素に text を流し込む．生テキストは body._raw に必ず保持する
+// （ストリーミング中の追記と，空メッセージ判定が textContent に依存できなくなるため）．
+function setBody(body, text, markdown) {
+  body._raw = text;
+  const html = markdown ? renderMarkdown(text) : null;
+  if (html === null) {
+    body.classList.remove('md');   // .md が無いと CSS 側は pre-wrap のまま
+    body.textContent = text;
+  } else {
+    body.classList.add('md');
+    body.innerHTML = html;
+  }
+}
+
+// ストリーミング中の再レンダリングを 1 フレーム 1 回に間引く
+// （text_delta はトークン単位で飛んでくるので，都度 parse すると無駄が多い）．
+function scheduleMdRender(body) {
+  if (!body || body._mdPending) return;
+  body._mdPending = true;
+  requestAnimationFrame(() => {
+    body._mdPending = false;
+    if (body.isConnected) setBody(body, body._raw || '', true);
+  });
+}
+
 function addMsg(role, text, thinking = false) {
   const wrap = document.getElementById('messages');
   const div  = document.createElement('div');
@@ -2465,13 +2615,37 @@ function addMsg(role, text, thinking = false) {
   } else {
     const body = document.createElement('div');
     body.className = 'body';
-    body.textContent = text;
+    setBody(body, text, role === 'assistant');
     div.appendChild(body);
   }
 
   wrap.appendChild(div);
   wrap.scrollTop = wrap.scrollHeight;
   return div;
+}
+
+// LLM の最終応答を吹き出しに反映する（SSE 経路と JSON 経路で共通）．
+// sim バッジ / チャート / トークン使用量の付け方は両経路で同じなので，
+// ここに 1 本化しておく（以前は 2 か所に同じコードがあった）．
+function renderAssistantResponse(data) {
+  const msgEl = addMsg('assistant', data.content);
+
+  if (data.sim_id) {
+    const badge = document.createElement('div');
+    badge.className = 'sim-badge';
+    badge.textContent = `▶ 結果を表示  ID: ${data.sim_id}`;
+    badge.onclick = () => loadResult(data.sim_id);
+    msgEl.querySelector('.body').appendChild(badge);
+    loadResult(data.sim_id);
+  }
+  if (data.charts && data.charts.length) {
+    for (const chart of data.charts) renderChart(msgEl, chart);
+  } else if (data.chart) {
+    renderChart(msgEl, data.chart);
+  }
+  appendUsageMeta(msgEl, data.usage);
+  chatHistory.push({ role: 'assistant', content: data.content });
+  return msgEl;
 }
 
 // ── 結果ロード＆描画 ──
@@ -2510,22 +2684,45 @@ async function loadResult(simId) {
     // フレームを列指向 → TypedArray に変換（大幅なメモリ削減）
     const rawFrames = r.frames || {};
     framesData = {};
-    // frame_format が無くても、raw.ids が存在すれば columnar 形式とみなす
+    // frame_format が無くても，raw.ids が存在すれば columnar 形式とみなす．
+    // v3 は送出時に量子化・差分符号化された形式（サーバーの _encode_frames_v3）．
+    // ダウンロード済みの古い JSON は v2 のままなので両方を読めるようにしておく．
+    const isV3 = r.frame_format === 'columnar_v3';
     for (const k of Object.keys(rawFrames)) {
       const raw = rawFrames[k];
       let frame;
       if (raw && typeof raw === 'object' && !Array.isArray(raw) && Array.isArray(raw.ids)) {
-        // v2 コンパクト形式 → 直接 TypedArray にコピー
         const n = raw.ids.length;
-        frame = {
-          n,
-          ids:    new Uint32Array(raw.ids),
-          xs:     new Float32Array(raw.xs),
-          ys:     new Float32Array(raw.ys),
-          vs:     new Float32Array(raw.vs),
-          alphas: new Float32Array(raw.alphas),
-          li:     new Uint16Array(raw.li),
-        };
+        if (isV3) {
+          // v3: ids は差分符号化，vs は 0.1 m/s 単位，alphas は 0.001 単位の整数．
+          // 復元はこのループ 1 回だけ（60fps の描画経路には入らない）．
+          const ids = new Uint32Array(n), vs = new Float32Array(n), alphas = new Float32Array(n);
+          const rid = raw.ids, rv = raw.vs, ra = raw.alphas;
+          let acc = 0;
+          for (let i = 0; i < n; i++) {
+            acc += rid[i];
+            ids[i] = acc;
+            vs[i] = rv[i] * 0.1;
+            alphas[i] = ra[i] * 0.001;
+          }
+          frame = {
+            n, ids, vs, alphas,
+            xs: new Float32Array(raw.xs),
+            ys: new Float32Array(raw.ys),
+            li: new Uint16Array(raw.li),
+          };
+        } else {
+          // v2 コンパクト形式 → 直接 TypedArray にコピー
+          frame = {
+            n,
+            ids:    new Uint32Array(raw.ids),
+            xs:     new Float32Array(raw.xs),
+            ys:     new Float32Array(raw.ys),
+            vs:     new Float32Array(raw.vs),
+            alphas: new Float32Array(raw.alphas),
+            li:     new Uint16Array(raw.li),
+          };
+        }
       } else if (Array.isArray(raw)) {
         // 旧形式（array-of-objects）との互換: TypedArray に正規化
         const n = raw.length;
@@ -2601,7 +2798,7 @@ function currentPhaseIdx(sig, t) {
   const phases = Array.isArray(sig) ? sig : sig.phases;
   const phaseLog = (sig && sig.phase_log) || null;
   // UXsim の実 phase ログがあれば最優先（タイミングずれを完全排除）
-  // phase_log の time step は DELTAT(=tmax/log長)。t を比例配分でインデックス化。
+  // phase_log の time step は DELTAT(=tmax/log長)．t を比例配分でインデックス化．
   if (phaseLog && phaseLog.length) {
     const tmax = simTmax || phaseLog.length;
     const idx = Math.max(0, Math.min(phaseLog.length - 1,
@@ -2660,125 +2857,74 @@ function findNearestFrameIdx(tCurrent) {
 }
 
 // ── 車両のスクリーン座標を計算 ──
-function vehicleScreenPos(veh, linkDrawInfo, px, py) {
-  const info = veh.link ? linkDrawInfo[veh.link] : null;
-  if (!info) return [px(veh.x), py(veh.y)];
+// info: linkDrawInfo[link]（null なら生座標を投影），t: alpha (0~1)，
+// out: [sx, sy] を書き込む配列（毎車両の配列割り当てを避けるため呼び出し側で使い回す）
+function _posOnLink(info, t, x, y, px, py, out) {
+  if (!info) { out[0] = px(x); out[1] = py(y); return; }
 
-  const t = veh.alpha;
-
-  // 多点パス上の位置（OSM 道路形状）
+  // 多点パス上の位置（OSM 道路形状）: 静的レイヤー構築時に計算した累積長 segCum を
+  // 二分探索（毎車両・毎フレームで全セグメント長を再計算しない）
   if (info.multipoint && info.screenCoords) {
-    const sc = info.screenCoords;
-    // alpha(0~1) をパス全長に沿って補間
-    // まずセグメント長を計算
-    let totalLen = 0;
-    const segLens = [];
-    for (let i = 1; i < sc.length; i++) {
-      const sl = Math.hypot(sc[i][0]-sc[i-1][0], sc[i][1]-sc[i-1][1]);
-      segLens.push(sl);
-      totalLen += sl;
-    }
-    if (totalLen === 0) return [sc[0][0], sc[0][1]];
-    let target = t * totalLen;
-    let acc = 0;
-    for (let i = 0; i < segLens.length; i++) {
-      if (acc + segLens[i] >= target) {
-        const frac = (target - acc) / (segLens[i] || 1);
-        return [
-          sc[i][0] * (1-frac) + sc[i+1][0] * frac,
-          sc[i][1] * (1-frac) + sc[i+1][1] * frac,
-        ];
-      }
-      acc += segLens[i];
-    }
-    return [sc[sc.length-1][0], sc[sc.length-1][1]];
+    const sc = info.screenCoords, cum = info.segCum, total = info.totalLen;
+    if (!cum || !(total > 0)) { out[0] = sc[0][0]; out[1] = sc[0][1]; return; }
+    const target = t * total;
+    let lo = 1, hi = cum.length - 1;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (cum[m] >= target) hi = m; else lo = m + 1; }
+    const segLen = cum[lo] - cum[lo - 1];
+    const frac = Math.min(1, (target - cum[lo - 1]) / (segLen || 1));
+    out[0] = sc[lo - 1][0] * (1 - frac) + sc[lo][0] * frac;
+    out[1] = sc[lo - 1][1] * (1 - frac) + sc[lo][1] * frac;
+    return;
   }
 
   // 双方向: ベジェ曲線上
   if (info.bidir && info.cpx !== undefined) {
-    return [
-      (1-t)*(1-t)*info.ax + 2*(1-t)*t*info.cpx + t*t*info.bx,
-      (1-t)*(1-t)*info.ay + 2*(1-t)*t*info.cpy + t*t*info.by,
-    ];
+    const u = 1 - t;
+    out[0] = u * u * info.ax + 2 * u * t * info.cpx + t * t * info.bx;
+    out[1] = u * u * info.ay + 2 * u * t * info.cpy + t * t * info.by;
+    return;
   }
 
   // 直線
-  return [info.ax*(1-t) + info.bx*t, info.ay*(1-t) + info.by*t];
+  out[0] = info.ax * (1 - t) + info.bx * t;
+  out[1] = info.ay * (1 - t) + info.by * t;
 }
 
-// ── 描画フレーム ──
-// geoData ごとに不変な計算（座標バウンド・双方向判定）のキャッシュ。
-// 再生中は drawFrame が 60fps で呼ばれるため、毎フレームの全リンク走査を避ける。
-let _geoStaticCache = { ref: null, bbox: null, edgeSet: null };
-function _getGeoStatic(features) {
-  if (_geoStaticCache.ref !== geoData) {
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (const f of features) {
-      for (const [x, y] of f.geometry.coordinates) {
-        if (x < minX) minX = x; if (x > maxX) maxX = x;
-        if (y < minY) minY = y; if (y > maxY) maxY = y;
-      }
-    }
-    const edgeSet = new Set();
-    for (const f of features) {
-      const c = f.geometry.coordinates;
-      const [x0,y0] = c[0], [x1,y1] = c[c.length - 1];
-      edgeSet.add(`${x0},${y0}->${x1},${y1}`);
-    }
-    _geoStaticCache = { ref: geoData, bbox: { minX, maxX, minY, maxY }, edgeSet };
+// 互換 API（vehAt() の一時オブジェクトを受け取る版）
+function vehicleScreenPos(veh, linkDrawInfo, px, py) {
+  const out = [0, 0];
+  _posOnLink(veh.link ? linkDrawInfo[veh.link] : null, veh.alpha, veh.x, veh.y, px, py, out);
+  return out;
+}
+
+// ── 静的レイヤー（リンク・ノード・ラベル）のキャッシュ ──
+// 再生中 drawFrame は 60fps で呼ばれるが，リンク・ノードの描画結果はカメラ・キャンバス
+// サイズ・描画モード（LINK モードでは時刻フレーム）が変わらない限り同一なので，
+// オフスクリーンキャンバスに 1 回描き，以後は drawImage で貼る．
+// （OSM の数千リンク × 多点パスを毎フレーム stroke するのが従来の最大コストだった）
+// linkDrawInfo（車両位置計算用）と hitTargets（ホバー用）も同時にキャッシュする．
+let _staticLayer = { key: '', geo: null, canvas: null, linkDrawInfo: null, hitTargets: null };
+
+function _getStaticLayer(features, geoStatic, px, py, isLinkMode, colorKey, denseNetwork, dpr, tCurrent) {
+  const key = `${canvasEl.width}x${canvasEl.height}|${canvasW}x${canvasH}|${dpr}|` +
+              `${camZoom},${camPanX},${camPanY}|${drawMode}|${colorKey}`;
+  if (_staticLayer.geo === geoData && _staticLayer.key === key && _staticLayer.canvas) {
+    return _staticLayer;
   }
-  return _geoStaticCache;
-}
 
-function drawFrame() {
-  if (editMode) { drawEditFrame(); return; }  // 編集モード中は全呼び出し元をエディタ描画に委譲
-  if (!geoData) return;
-  if (canvasDirty) resizeCanvas();
-
-  const dpr = Math.min(1.5, window.devicePixelRatio || 1);
-  const ctx = canvasEl.getContext('2d');
+  let cv = _staticLayer.canvas;
+  if (!cv) cv = document.createElement('canvas');
+  if (cv.width !== canvasEl.width || cv.height !== canvasEl.height) {
+    cv.width = canvasEl.width; cv.height = canvasEl.height;
+  }
+  const ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, canvasW, canvasH);
 
-  const tRatio   = timeSlider.value / 1000;
-  const tCurrent = Math.round(simTmax * tRatio);
-  timeLabel.textContent = `t = ${tCurrent} s`;
-
-  const features = geoData.features;
-  if (!features.length) return;
-
-  const _geoStatic = _getGeoStatic(features);
-
-  // 座標バウンド（道路座標のみでスケール決定）
-  let { minX, maxX, minY, maxY } = _geoStatic.bbox;
-  // 少しマージンを追加（道路範囲の10%）
-  const marginX = (maxX - minX) * 0.1 || 100;
-  const marginY = (maxY - minY) * 0.1 || 100;
-  minX -= marginX; maxX += marginX;
-  minY -= marginY; maxY += marginY;
-
-  const pad = 60;
-  const rangeX = maxX - minX || 1, rangeY = maxY - minY || 1;
-  const baseScale = Math.min((canvasW - pad*2) / rangeX, (canvasH - pad*2) / rangeY);
-  const baseOffX = pad + (canvasW - pad*2 - rangeX * baseScale) / 2;
-  const baseOffY = pad + (canvasH - pad*2 - rangeY * baseScale) / 2;
-  // カメラ変換を適用
-  const scaleV = baseScale * camZoom;
-  const offX = baseOffX * camZoom + camPanX;
-  const offY = baseOffY * camZoom + camPanY;
-  const px = x => offX + (x - minX) * scaleV;
-  const py = y => (canvasH - baseOffY) * camZoom + camPanY - (y - minY) * scaleV;
-
-  // ヒットターゲットをリセット（このフレームで再構築）
-  hitTargets = { nodes: [], links: [] };
-
-  // 双方向リンク検出（キャッシュ済み）
-  const edgeSet = _geoStatic.edgeSet;
-
+  const hits = { nodes: [], links: [] };
+  const edgeSet = geoStatic.edgeSet;
   const ARC_OFFSET = 18;
   const linkDrawInfo = {};
-  const isLinkMode = drawMode === 'link';
-  const denseNetwork = features.length > 30; // OSM等の密なネットワーク
 
   // ── パスを描く汎用関数（多点 LineString 対応）──
   function traceLinkPath(coords) {
@@ -2816,7 +2962,7 @@ function drawFrame() {
     const bidir = edgeSet.has(`${x1},${y1}->${x0},${y0}`);
 
     if (isMultiPoint || denseNetwork) {
-      // 多点パス描画（OSM道路形状、または密なネットワーク）
+      // 多点パス描画（OSM道路形状，または密なネットワーク）
       traceLinkPath(coords);
       ctx.strokeStyle = color;
       ctx.lineWidth = isLinkMode ? 5 : 4;
@@ -2834,9 +2980,16 @@ function drawFrame() {
         ctx.fillText(linkName, mx, my - 8);
       }
 
-      // linkDrawInfo: 多点パスのスクリーン座標を保存（車両描画用）
+      // linkDrawInfo: 多点パスのスクリーン座標と累積長を保存（車両描画用）
       const screenCoords = coords.map(([cx,cy]) => [px(cx), py(cy)]);
-      linkDrawInfo[linkName] = { bidir, multipoint: true, screenCoords, ax, ay, bx, by };
+      const segCum = new Float64Array(screenCoords.length);
+      let acc = 0;
+      for (let i = 1; i < screenCoords.length; i++) {
+        acc += Math.hypot(screenCoords[i][0] - screenCoords[i-1][0],
+                          screenCoords[i][1] - screenCoords[i-1][1]);
+        segCum[i] = acc;
+      }
+      linkDrawInfo[linkName] = { bidir, multipoint: true, screenCoords, segCum, totalLen: acc, ax, ay, bx, by };
     } else if (bidir) {
       // 2点 + 双方向: 円弧描画
       const dx = bx - ax, dy = by - ay;
@@ -2910,7 +3063,7 @@ function drawFrame() {
     const linkName = f.properties.name;
     const info = linkDrawInfo[linkName];
     if (!info) continue;
-    hitTargets.links.push({
+    hits.links.push({
       name: linkName,
       properties: f.properties,
       info,  // ax/ay/bx/by/cpx/cpy/multipoint/screenCoords
@@ -2930,7 +3083,7 @@ function drawFrame() {
     // ヒットターゲットに登録（元ノード情報があれば名前と signal も）
     for (const np of Object.values(nodes)) {
       const meta = nodeByCoord[`${np.x0},${np.y0}`];
-      hitTargets.nodes.push({
+      hits.nodes.push({
         sx: np.sx, sy: np.sy,
         name: meta ? meta.name : null,
         x: np.x0, y: np.y0,
@@ -2949,132 +3102,291 @@ function drawFrame() {
     }
   }
 
+  _staticLayer = { key, geo: geoData, canvas: cv, linkDrawInfo, hitTargets: hits };
+  return _staticLayer;
+}
+
+// ── 車両位置の補間バッファ（フレームごとの割り当てを避けるため使い回す） ──
+// _vbuf: 補間済み車両の {ids, sx, sy, v, ffs}，n 台分が有効
+const _vbuf = { cap: 0, ids: null, sx: null, sy: null, v: null, ffs: null };
+function _ensureVbuf(n) {
+  if (_vbuf.cap >= n) return;
+  const cap = Math.max(1024, n * 2);
+  _vbuf.cap = cap;
+  _vbuf.ids = new Uint32Array(cap);
+  _vbuf.sx = new Float32Array(cap); _vbuf.sy = new Float32Array(cap);
+  _vbuf.v = new Float32Array(cap);  _vbuf.ffs = new Float32Array(cap);
+}
+const _posScratch = [0, 0];
+
+// フレーム内の ids が昇順か（サーバーは車両登録順に出力するので通常は昇順）．
+// 昇順なら 2 フレーム間の車両対応をマージ結合で O(nA+nB)・割り当てなしで取れる．
+function _frameIdsSorted(frame) {
+  if (frame._sorted === undefined) {
+    const ids = frame.ids; let ok = true;
+    for (let i = 1; i < frame.n; i++) if (ids[i] < ids[i-1]) { ok = false; break; }
+    frame._sorted = ok;
+  }
+  return frame._sorted;
+}
+function _frameIdIndex(frame) {
+  if (!frame._idIndex) {
+    const m = new Map();
+    for (let i = 0; i < frame.n; i++) m.set(frame.ids[i], i);
+    frame._idIndex = m;
+  }
+  return frame._idIndex;
+}
+
+// 時刻 tNow の車両位置をフレーム間線形補間して _vbuf に書き込み，台数を返す．
+function _interpolateVehicles(tNow, linkDrawInfo, px, py) {
+  const idxA = findNearestFrameIdx(tNow);
+  if (idxA < 0) return 0;
+  const tA = frameTimes[idxA];
+  const frameA = framesData[String(tA)] || EMPTY_FRAME;
+  const out = _posScratch;
+  const B = _vbuf;
+
+  const writeVeh = (n, frame, i, sx, sy, v) => {
+    B.ids[n] = frame.ids[i]; B.sx[n] = sx; B.sy[n] = sy; B.v[n] = v;
+    B.ffs[n] = linkFfsByIdx ? linkFfsByIdx[frame.li[i]] : 0;
+  };
+  const posOf = (frame, i) => {
+    const li = frame.li[i];
+    _posOnLink(linkDrawInfo[linkNames[li]] || null, frame.alphas[i], frame.xs[i], frame.ys[i], px, py, out);
+  };
+
+  // フレーム末尾 or 厳密一致 → 補間不要
+  if (tA >= tNow || idxA >= frameTimes.length - 1) {
+    _ensureVbuf(frameA.n);
+    for (let i = 0; i < frameA.n; i++) {
+      posOf(frameA, i);
+      writeVeh(i, frameA, i, out[0], out[1], frameA.vs[i]);
+    }
+    return frameA.n;
+  }
+
+  const tB = frameTimes[idxA + 1];
+  const frameB = framesData[String(tB)] || EMPTY_FRAME;
+  const frac = (tNow - tA) / (tB - tA);
+  const emitBOnly = frac > 0.5;  // B にだけいる車両（新規流入）は後半だけ描く
+  _ensureVbuf(frameA.n + frameB.n);
+  let n = 0;
+  const idsA = frameA.ids, idsB = frameB.ids;
+
+  const emitPair = (i, j) => {
+    posOf(frameA, i); const sxA = out[0], syA = out[1];
+    posOf(frameB, j);
+    writeVeh(n, frameA, i, sxA + (out[0] - sxA) * frac, syA + (out[1] - syA) * frac,
+             frameA.vs[i] + (frameB.vs[j] - frameA.vs[i]) * frac);
+    n++;
+  };
+  const emitA = (i) => { posOf(frameA, i); writeVeh(n, frameA, i, out[0], out[1], frameA.vs[i]); n++; };
+  const emitB = (j) => { posOf(frameB, j); writeVeh(n, frameB, j, out[0], out[1], frameB.vs[j]); n++; };
+
+  if (_frameIdsSorted(frameA) && _frameIdsSorted(frameB)) {
+    // マージ結合
+    let j = 0;
+    for (let i = 0; i < frameA.n; i++) {
+      const id = idsA[i];
+      while (j < frameB.n && idsB[j] < id) { if (emitBOnly) emitB(j); j++; }
+      if (j < frameB.n && idsB[j] === id) { emitPair(i, j); j++; }
+      else emitA(i);
+    }
+    if (emitBOnly) for (; j < frameB.n; j++) emitB(j);
+  } else {
+    // 非整列データ（旧形式）: id → index マップ
+    const mapB = _frameIdIndex(frameB);
+    const seen = new Uint8Array(frameB.n);
+    for (let i = 0; i < frameA.n; i++) {
+      const j = mapB.get(idsA[i]);
+      if (j !== undefined) { seen[j] = 1; emitPair(i, j); } else emitA(i);
+    }
+    if (emitBOnly) for (let j = 0; j < frameB.n; j++) if (!seen[j]) emitB(j);
+  }
+  return n;
+}
+
+// 車両ドットの描画: 色（速度比）を NB 段階に量子化し，同色をまとめて 1 パスで fill/stroke．
+// 1 台ごとに beginPath/fill/stroke すると数千台で描画コストの大半を占めるため．
+const _DOT_NB = 24;
+const _DOT_COLORS = Array.from({ length: _DOT_NB }, (_, b) => speedToColor(b / (_DOT_NB - 1), 1));
+const _dotBuckets = Array.from({ length: _DOT_NB }, () => []);
+function _drawVehicleDots(ctx, n, r) {
+  if (!n) return;
+  const B = _vbuf;
+  for (let b = 0; b < _DOT_NB; b++) _dotBuckets[b].length = 0;
+  for (let k = 0; k < n; k++) {
+    const ffs = B.ffs[k];
+    let ratio = ffs > 0 ? B.v[k] / ffs : 1;
+    ratio = ratio > 1 ? 1 : (ratio >= 0 ? ratio : 0);
+    _dotBuckets[Math.round(ratio * (_DOT_NB - 1))].push(k);
+  }
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+  const TAU = Math.PI * 2;
+  for (let b = 0; b < _DOT_NB; b++) {
+    const list = _dotBuckets[b];
+    if (!list.length) continue;
+    ctx.beginPath();
+    for (let q = 0; q < list.length; q++) {
+      const k = list[q], x = B.sx[k], y = B.sy[k];
+      ctx.moveTo(x + r, y);
+      ctx.arc(x, y, r, 0, TAU);
+    }
+    ctx.fillStyle = _DOT_COLORS[b];
+    ctx.fill();
+    ctx.stroke();
+  }
+}
+
+// ── 描画フレーム ──
+// geoData ごとに不変な計算（座標バウンド・双方向判定）のキャッシュ．
+// 再生中は drawFrame が 60fps で呼ばれるため，毎フレームの全リンク走査を避ける．
+let _geoStaticCache = { ref: null, bbox: null, edgeSet: null };
+function _getGeoStatic(features) {
+  if (_geoStaticCache.ref !== geoData) {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const f of features) {
+      for (const [x, y] of f.geometry.coordinates) {
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+    }
+    const edgeSet = new Set();
+    for (const f of features) {
+      const c = f.geometry.coordinates;
+      const [x0,y0] = c[0], [x1,y1] = c[c.length - 1];
+      edgeSet.add(`${x0},${y0}->${x1},${y1}`);
+    }
+    _geoStaticCache = { ref: geoData, bbox: { minX, maxX, minY, maxY }, edgeSet };
+  }
+  return _geoStaticCache;
+}
+
+function drawFrame() {
+  if (editMode) { drawEditFrame(); return; }  // 編集モード中は全呼び出し元をエディタ描画に委譲
+  if (!geoData) return;
+  if (canvasDirty) resizeCanvas();
+
+  const dpr = Math.min(1.5, window.devicePixelRatio || 1);
+  const ctx = canvasEl.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, canvasW, canvasH);
+
+  const tRatio   = timeSlider.value / 1000;
+  const tCurrent = Math.round(simTmax * tRatio);
+  timeLabel.textContent = `t = ${tCurrent} s`;
+
+  const features = geoData.features;
+  if (!features.length) return;
+
+  const _geoStatic = _getGeoStatic(features);
+
+  // 座標バウンド（道路座標のみでスケール決定）
+  let { minX, maxX, minY, maxY } = _geoStatic.bbox;
+  // 少しマージンを追加（道路範囲の10%）
+  const marginX = (maxX - minX) * 0.1 || 100;
+  const marginY = (maxY - minY) * 0.1 || 100;
+  minX -= marginX; maxX += marginX;
+  minY -= marginY; maxY += marginY;
+
+  const pad = 60;
+  const rangeX = maxX - minX || 1, rangeY = maxY - minY || 1;
+  const baseScale = Math.min((canvasW - pad*2) / rangeX, (canvasH - pad*2) / rangeY);
+  const baseOffX = pad + (canvasW - pad*2 - rangeX * baseScale) / 2;
+  const baseOffY = pad + (canvasH - pad*2 - rangeY * baseScale) / 2;
+  // カメラ変換を適用
+  const scaleV = baseScale * camZoom;
+  const offX = baseOffX * camZoom + camPanX;
+  const px = x => offX + (x - minX) * scaleV;
+  const py = y => (canvasH - baseOffY) * camZoom + camPanY - (y - minY) * scaleV;
+
+  const isLinkMode = drawMode === 'link';
+  const denseNetwork = features.length > 30; // OSM等の密なネットワーク
+
+  // ── 静的レイヤー（リンク・ノード）: キャッシュから貼る ──
+  // LINK モードの色は timeline の時刻グリッド（= frame_times）単位でしか変わらないので，
+  // 該当フレーム index をキーにする（フレーム情報が無ければ秒単位）．
+  const colorKey = isLinkMode ? (frameTimes.length ? findNearestFrameIdx(tCurrent) : tCurrent) : -1;
+  const layer = _getStaticLayer(features, _geoStatic, px, py, isLinkMode, colorKey, denseNetwork, dpr, tCurrent);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(layer.canvas, 0, 0);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const linkDrawInfo = layer.linkDrawInfo;
+  hitTargets = layer.hitTargets;
+
   // ── 車両描画 (vehicle / trail モード) ── フレーム間線形補間で滑らかに描画 ──
   if ((drawMode === 'vehicle' || drawMode === 'trail') && framesData && frameTimes.length) {
     const curIdx = findNearestFrameIdx(tCurrent);
     if (curIdx < 0) return;
 
-    // ── 補間された現在フレームの車両リストを生成（TypedArray フレーム対応） ──
-    function interpolateVehicles(tNow) {
-      const idxA = findNearestFrameIdx(tNow);
-      if (idxA < 0) return [];
-      const tA = frameTimes[idxA];
-      const frameA = framesData[String(tA)] || EMPTY_FRAME;
-
-      // フレーム末尾 or 厳密一致 → 補間不要
-      if (tA >= tNow || idxA >= frameTimes.length - 1) {
-        const result = new Array(frameA.n);
-        for (let i = 0; i < frameA.n; i++) {
-          const v = vehAt(frameA, i);
-          const [sx, sy] = vehicleScreenPos(v, linkDrawInfo, px, py);
-          result[i] = { id: v.id, sx, sy, v: v.v, ffs: v.ffs };
-        }
-        return result;
-      }
-
-      const tB = frameTimes[idxA + 1];
-      const frameB = framesData[String(tB)] || EMPTY_FRAME;
-      const frac = (tNow - tA) / (tB - tA);
-
-      // フレーム B を ID で索引
-      const mapB = new Map();
-      for (let i = 0; i < frameB.n; i++) {
-        const id = frameB.ids[i];
-        const v = vehAt(frameB, i);
-        const [sx, sy] = vehicleScreenPos(v, linkDrawInfo, px, py);
-        mapB.set(id, { sx, sy, v: v.v, ffs: v.ffs });
-      }
-
-      const result = [];
-      const seen = new Set();
-      for (let i = 0; i < frameA.n; i++) {
-        const vA = vehAt(frameA, i);
-        const [sxA, syA] = vehicleScreenPos(vA, linkDrawInfo, px, py);
-        if (mapB.has(vA.id)) {
-          const b = mapB.get(vA.id);
-          seen.add(vA.id);
-          result.push({
-            id: vA.id,
-            sx: sxA + (b.sx - sxA) * frac,
-            sy: syA + (b.sy - syA) * frac,
-            v:  vA.v + (b.v - vA.v) * frac,
-            ffs: vA.ffs,
-          });
-        } else {
-          result.push({ id: vA.id, sx: sxA, sy: syA, v: vA.v, ffs: vA.ffs });
-        }
-      }
-      for (let i = 0; i < frameB.n; i++) {
-        const id = frameB.ids[i];
-        if (!seen.has(id) && frac > 0.5) {
-          const vB = vehAt(frameB, i);
-          const [sx, sy] = vehicleScreenPos(vB, linkDrawInfo, px, py);
-          result.push({ id, sx, sy, v: vB.v, ffs: vB.ffs });
-        }
-      }
-      return result;
-    }
-
     // TRAIL モード: 過去フレームの軌跡を描画（TypedArray フレーム対応）
     if (drawMode === 'trail') {
       const startIdx = Math.max(0, curIdx - TRAIL_LENGTH);
       const trailMap = new Map();
+      const out = _posScratch;
 
       for (let fi = startIdx; fi <= curIdx; fi++) {
         const tKey = String(frameTimes[fi]);
         const frame = framesData[tKey];
         if (!frame || frame.n === 0) continue;
         for (let i = 0; i < frame.n; i++) {
-          const veh = vehAt(frame, i);
-          if (!trailMap.has(veh.id)) trailMap.set(veh.id, []);
-          const [sx, sy] = vehicleScreenPos(veh, linkDrawInfo, px, py);
-          trailMap.get(veh.id).push({ sx, sy, v: veh.v, ffs: veh.ffs });
+          const id = frame.ids[i], li = frame.li[i];
+          let tr = trailMap.get(id);
+          if (!tr) { tr = []; trailMap.set(id, tr); }
+          _posOnLink(linkDrawInfo[linkNames[li]] || null, frame.alphas[i], frame.xs[i], frame.ys[i], px, py, out);
+          tr.push(out[0], out[1], frame.vs[i], linkFfsByIdx ? linkFfsByIdx[li] : 0);  // 4 要素/点（オブジェクト割り当て回避）
         }
       }
 
       // 現在の補間位置もトレイル末尾に追加
-      const interpNow = interpolateVehicles(tCurrent);
-      for (const iv of interpNow) {
-        if (iv.id === undefined) continue;
-        if (!trailMap.has(iv.id)) trailMap.set(iv.id, []);
-        trailMap.get(iv.id).push(iv);
+      const nNow = _interpolateVehicles(tCurrent, linkDrawInfo, px, py);
+      for (let k = 0; k < nNow; k++) {
+        const id = _vbuf.ids[k];
+        let tr = trailMap.get(id);
+        if (!tr) { tr = []; trailMap.set(id, tr); }
+        tr.push(_vbuf.sx[k], _vbuf.sy[k], _vbuf.v[k], _vbuf.ffs[k]);
       }
 
-      for (const [vid, trail] of trailMap) {
-        if (trail.length < 2) continue;
-        const last = trail[trail.length - 1];
-        const baseColor = speedToColor(last.v, last.ffs);
-
-        for (let i = 1; i < trail.length; i++) {
-          const opacity = (i / trail.length) * 0.6 + 0.1;
-          const width = (i / trail.length) * 2.5 + 0.5;
-          ctx.beginPath();
-          ctx.moveTo(trail[i-1].sx, trail[i-1].sy);
-          ctx.lineTo(trail[i].sx, trail[i].sy);
-          ctx.strokeStyle = baseColor;
-          ctx.globalAlpha = opacity;
-          ctx.lineWidth = width;
-          ctx.lineCap = 'round';
-          ctx.stroke();
+      // 軌跡セグメントを (色バケット, 位置 i, 軌跡長) ごとにまとめて 1 回で stroke する．
+      // 線種は i / trail.length だけで決まるので，同じ (i, len) のセグメントは同一スタイル．
+      // （1 セグメントごとの beginPath/stroke は 1 万台 × 8 フレームで数百 ms かかった）
+      const groups = new Map();
+      for (const trail of trailMap.values()) {
+        const len = trail.length >> 2;  // 点数（[sx, sy, v, ffs] × len）
+        if (len < 2) continue;
+        const lastV = trail[(len - 1) * 4 + 2], lastFfs = trail[(len - 1) * 4 + 3];
+        let ratio = lastFfs > 0 ? lastV / lastFfs : 1;
+        ratio = ratio > 1 ? 1 : (ratio >= 0 ? ratio : 0);
+        const bucket = Math.round(ratio * (_DOT_NB - 1));
+        for (let i = 1; i < len; i++) {
+          const key = (bucket * 64 + len) * 64 + i;
+          let g = groups.get(key);
+          if (!g) { g = { bucket, i, len, pts: [] }; groups.set(key, g); }
+          const a = (i - 1) * 4, b = i * 4;
+          g.pts.push(trail[a], trail[a+1], trail[b], trail[b+1]);
         }
+      }
+      ctx.lineCap = 'round';
+      for (const g of groups.values()) {
+        const pts = g.pts;
+        ctx.beginPath();
+        for (let k = 0; k < pts.length; k += 4) {
+          ctx.moveTo(pts[k], pts[k+1]);
+          ctx.lineTo(pts[k+2], pts[k+3]);
+        }
+        ctx.strokeStyle = _DOT_COLORS[g.bucket];
+        ctx.globalAlpha = (g.i / g.len) * 0.6 + 0.1;
+        ctx.lineWidth = (g.i / g.len) * 2.5 + 0.5;
+        ctx.stroke();
       }
       ctx.globalAlpha = 1.0;
     }
 
-    // 現在位置の車両ドット（補間済み）
-    const interpVehs = interpolateVehicles(tCurrent);
-    if (interpVehs.length) {
-      for (const veh of interpVehs) {
-        const color = speedToColor(veh.v, veh.ffs);
-        ctx.beginPath();
-        ctx.arc(veh.sx, veh.sy, drawMode === 'trail' ? 3.5 : 4, 0, Math.PI*2);
-        ctx.fillStyle = color;
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(255,255,255,0.7)';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-      }
-    }
+    // 現在位置の車両ドット（補間済み，色ごとにバッチ描画）
+    const nVeh = _interpolateVehicles(tCurrent, linkDrawInfo, px, py);
+    _drawVehicleDots(ctx, nVeh, drawMode === 'trail' ? 3.5 : 4);
   }
 
   // ── 信号現示の可視化 ──
@@ -3138,7 +3450,7 @@ function drawFrame() {
 
         ctx.save();
         ctx.translate(cx, cy);
-        // ハウジングを進行方向に垂直にするため、進行方向 + 90° で回転
+        // ハウジングを進行方向に垂直にするため，進行方向 + 90° で回転
         ctx.rotate(Math.atan2(ty, tx) + Math.PI / 2);
         // ハウジング（角丸長方形）
         ctx.fillStyle = housingColor;
@@ -3418,7 +3730,7 @@ document.getElementById('user-input').addEventListener('input', function() {
   function showTooltip(hit, mx, my) {
     tooltip.innerHTML = buildTooltipHTML(hit);
     tooltip.hidden = false;
-    // 位置調整: カーソル右下、ただし画面端を回避
+    // 位置調整: カーソル右下，ただし画面端を回避
     const rect = canvasWrap.getBoundingClientRect();
     let left = mx + 14, top = my + 14;
     requestAnimationFrame(() => {
@@ -3479,7 +3791,7 @@ setTimeout(async () => {
     label.textContent = 'CONNECTED';
   } else {
     label.textContent = 'OFFLINE';
-    addMsg('system', 'API に接続できません。server.py を起動してください: python server.py');
+    addMsg('system', 'API に接続できません．server.py を起動してください: python server.py');
   }
 }, 500);
 
@@ -3774,8 +4086,8 @@ loadResult = async function(simId) {
   document.getElementById('stats-panel').hidden = false;
   document.getElementById('canvas-controls').hidden = false;
   updateZoomLabel();
-  drawSparkline();
   computeStatsSeries();
+  drawSparkline();
   drawAllStatCharts();
   updateStatValues();
   updateTimeLabel();
@@ -3793,38 +4105,55 @@ function computeStatsSeries() {
   const started = new Array(N);
   const completed = new Array(N);
   const avgSpeed = new Array(N);
-  const lastSeen = new Map();
-  // First pass: find last seen time for each vehicle
-  for (const t of frameTimes) {
-    const frame = framesData[String(t)] || EMPTY_FRAME;
-    for (let i = 0; i < frame.n; i++) lastSeen.set(frame.ids[i], t);
-  }
-  // Second pass: per-frame metrics
-  const runningSet = new Set();
-  const features = (geoData && geoData.features) || [];
+  const avgRatio = new Array(N);  // 平均 (速度 / 自由流速度)，sparkline 用
+
+  // 1 パス目: 各車両の最初・最後に見えたフレーム index
+  const firstSeen = new Map(), lastSeen = new Map();
   for (let i = 0; i < N; i++) {
-    const t = frameTimes[i];
-    const frame = framesData[String(t)] || EMPTY_FRAME;
+    const frame = framesData[String(frameTimes[i])] || EMPTY_FRAME;
     active[i] = frame.n;
-    for (let j = 0; j < frame.n; j++) runningSet.add(frame.ids[j]);
-    started[i] = runningSet.size;
-    let c = 0;
-    for (const id of runningSet) if (lastSeen.get(id) < t) c++;
-    completed[i] = c;
-    // avg speed from link timelines
-    let sum = 0, cnt = 0;
-    for (const f of features) {
-      const tl = f.properties.timeline || [];
-      let s = null;
-      for (let j = tl.length - 1; j >= 0; j--) {
-        if (tl[j].t <= t) { s = tl[j].speed; break; }
-      }
-      if (s != null) { sum += s; cnt++; }
+    const ids = frame.ids;
+    for (let j = 0; j < frame.n; j++) {
+      const id = ids[j];
+      if (!firstSeen.has(id)) firstSeen.set(id, i);
+      lastSeen.set(id, i);
     }
-    avgSpeed[i] = cnt ? sum / cnt : 0;
   }
+  // started[i] = 出現済み車両数（firstSeen ≤ i），completed[i] = 最後に見えたのが i より前の車両数
+  // （旧実装の「出現済み集合を毎フレーム走査」は O(N × 車両数) で大規模時に数秒かかった）
+  const firstCnt = new Int32Array(N), lastCnt = new Int32Array(N);
+  for (const i of firstSeen.values()) firstCnt[i]++;
+  for (const i of lastSeen.values()) lastCnt[i]++;
+  for (let i = 0, s = 0, c = 0; i < N; i++) {
+    s += firstCnt[i]; started[i] = s;
+    completed[i] = c; c += lastCnt[i];
+  }
+
+  // 平均速度: 各リンクの timeline を先頭から 1 回だけ走査（フレーム時刻も timeline も昇順）
+  const features = (geoData && geoData.features) || [];
+  const sum = new Float64Array(N), cnt = new Int32Array(N);
+  const rsum = new Float64Array(N), rcnt = new Int32Array(N);
+  for (const f of features) {
+    const tl = f.properties.timeline || [];
+    if (!tl.length) continue;
+    const ffs = f.properties.free_flow_speed;
+    let j = 0, cur = null;
+    for (let i = 0; i < N; i++) {
+      const t = frameTimes[i];
+      while (j < tl.length && tl[j].t <= t) { cur = tl[j].speed; j++; }
+      if (cur != null) {
+        sum[i] += cur; cnt[i]++;
+        if (ffs) { rsum[i] += Math.max(0, Math.min(1, cur / ffs)); rcnt[i]++; }
+      }
+    }
+  }
+  for (let i = 0; i < N; i++) {
+    avgSpeed[i] = cnt[i] ? sum[i] / cnt[i] : 0;
+    avgRatio[i] = rcnt[i] ? rsum[i] / rcnt[i] : 0;
+  }
+
   const totalTrips = lastSeen.size;
-  statsSeries = { active, avgSpeed, completed, started, totalTrips,
+  statsSeries = { active, avgSpeed, avgRatio, completed, started, totalTrips,
     maxActive: Math.max(1, ...active),
     maxSpeed: Math.max(1, ...avgSpeed),
     maxCompleted: Math.max(1, ...completed),
@@ -3843,8 +4172,8 @@ function currentFrameIdx() {
   return findNearestFrameIdx(t);
 }
 
-// テーマ色のキャッシュ（getComputedStyle は 60fps 描画では高コスト）。
-// テーマ切替（data-theme 変更）で自動的に再取得する。
+// テーマ色のキャッシュ（getComputedStyle は 60fps 描画では高コスト）．
+// テーマ切替（data-theme 変更）で自動的に再取得する．
 let _themeColorCache = { key: null, accent: '#dc4a1c', soft: '#d4d4d0', ink: '#171717' };
 function _getThemeColors() {
   const key = document.documentElement.dataset.theme || '';
@@ -3991,27 +4320,15 @@ function drawSparkline() {
   // Aggregate: for each frame time, compute avg link speed from timelines
   const features = geoData.features || [];
   if (!features.length || !frameTimes.length) return;
-  // Build per-time avg speed
+  // Build per-time avg speed ratio（computeStatsSeries が計算済みの avgRatio を間引いて使う）
   const N = Math.min(120, frameTimes.length);
   const step = Math.max(1, Math.floor(frameTimes.length / N));
-  const pts = [];
-  for (let i = 0; i < frameTimes.length; i += step) {
-    const t = frameTimes[i];
-    let sum = 0, count = 0;
-    for (const f of features) {
-      const tl = f.properties.timeline || [];
-      // find nearest timeline entry to t
-      let speed = null;
-      for (let j = tl.length - 1; j >= 0; j--) {
-        if (tl[j].t <= t) { speed = tl[j].speed; break; }
-      }
-      if (speed != null && f.properties.free_flow_speed) {
-        sum += Math.max(0, Math.min(1, speed / f.properties.free_flow_speed));
-        count++;
-      }
-    }
-    pts.push(count ? sum / count : 0);
+  if (!statsSeries || !statsSeries.avgRatio || statsSeries.avgRatio.length !== frameTimes.length) {
+    computeStatsSeries();
   }
+  const ratios = (statsSeries && statsSeries.avgRatio) || [];
+  const pts = [];
+  for (let i = 0; i < frameTimes.length; i += step) pts.push(ratios[i] || 0);
   if (!pts.length) return;
   // Draw as bars (congestion height = 1 - ratio)
   ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#dc4a1c';
@@ -4024,7 +4341,19 @@ function drawSparkline() {
 }
 window.addEventListener('resize', drawSparkline);
 
-// ── 起動時: 履歴からの復元オプションは表示しない。手動のみ ──
+// ── ?replay=<name>: 記録済みのチャットターンを再現表示する（開発時のスクリーンショット用）．
+//    /demo/replay.js があるときだけ動く．公開配布物には含まれないので通常は何も起きない．
+//    添付ファイル名は ?file= で渡す（省略時は replay.js 側の既定値）．
+(function () {
+  const rp = new URLSearchParams(location.search).get('replay');
+  if (!rp) return;
+  const s = document.createElement('script'); s.src = '/demo/replay.js?ts=' + Date.now();
+  const att = new URLSearchParams(location.search).get('file') || undefined;
+  s.onload = () => { if (typeof replayTurn === 'function') replayTurn(rp, { attachment: att }); };
+  document.head.appendChild(s);
+})();
+
+// ── 起動時: 履歴からの復元オプションは表示しない．手動のみ ──
 
 </script>
 </body>

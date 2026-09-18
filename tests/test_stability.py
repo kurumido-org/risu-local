@@ -1,8 +1,8 @@
 """
 RISU 安定性テスト
 ================
-これまでの開発で発見・修正した問題をテストとして記録。
-新機能追加時にこのテストが全て通ることを確認すること。
+これまでの開発で発見・修正した問題をテストとして記録．
+新機能追加時にこのテストが全て通ることを確認すること．
 
 テスト実行:
     cd risu-local
@@ -11,7 +11,7 @@ RISU 安定性テスト
     pytest tests/ -v
 
 注意: サーバー (python server.py) が起動している必要があるテストは
-      test_api_* で始まるもの。それ以外はサーバー不要。
+      test_api_* で始まるもの．それ以外はサーバー不要．
 """
 
 import json
@@ -118,8 +118,8 @@ class TestUXsimOutput:
 
     def test_link_timeline_format(self, result):
         """
-        タイムラインの各エントリに t と speed が含まれる。
-        [修正履歴] タイムラインを一度削除してしまい LINK モードが壊れた。
+        タイムラインの各エントリに t と speed が含まれる．
+        [修正履歴] タイムラインを一度削除してしまい LINK モードが壊れた．
         """
         for f in result["geojson"]["features"]:
             tl = f["properties"]["timeline"]
@@ -147,11 +147,11 @@ class TestUXsimOutput:
 
     def test_frame_key_consistency(self, result):
         """
-        frame_times の各値を str() したものが frames のキーに存在する。
-        [修正履歴] Python は "25.0" をキーにするが、
-        JS の String(25.0) は "25" になりマッチしなかった。
-        → フロントエンドで parseFloat 正規化で対処。
-        このテストはサーバー側のキー形式を記録する。
+        frame_times の各値を str() したものが frames のキーに存在する．
+        [修正履歴] Python は "25.0" をキーにするが，
+        JS の String(25.0) は "25" になりマッチしなかった．
+        → フロントエンドで parseFloat 正規化で対処．
+        このテストはサーバー側のキー形式を記録する．
         """
         frames = result["frames"]
         for t in result["frame_times"]:
@@ -160,10 +160,10 @@ class TestUXsimOutput:
 
     def test_vehicle_data_fields(self, result):
         """
-        フレームがコンパクト列指向フォーマット（columnar_v2）である。
-        各フレームは {ids, xs, ys, vs, alphas, li} の同じ長さの列を持つ。
-        [修正履歴] 旧形式は車両ごとの dict のリスト。ペイロード削減のため
-        列指向に移行した（li はリンク index、名前は link_names で解決）。
+        フレームがコンパクト列指向フォーマット（columnar_v2）である．
+        各フレームは {ids, xs, ys, vs, alphas, li} の同じ長さの列を持つ．
+        [修正履歴] 旧形式は車両ごとの dict のリスト．ペイロード削減のため
+        列指向に移行した（li はリンク index，名前は link_names で解決）．
         """
         assert result.get("frame_format") == "columnar_v2"
         assert "link_names" in result
@@ -182,7 +182,7 @@ class TestUXsimOutput:
         assert found_vehicle, "走行中の車両が1台も見つからない"
 
     def test_vehicle_speed_reasonable(self, result):
-        """車両速度が非負で、リンク自由流速度の2倍以内"""
+        """車両速度が非負で，リンク自由流速度の2倍以内"""
         ffs_by_name = {
             f["properties"]["name"]: f["properties"]["free_flow_speed"]
             for f in result["geojson"]["features"]
@@ -211,7 +211,7 @@ class TestUXsimOutput:
 class TestBidirectionalLinks:
     """
     [修正履歴] 双方向リンクが存在しないとフロントエンドで
-    円弧表示にならない。逆方向リンクの存在確認。
+    円弧表示にならない．逆方向リンクの存在確認．
     """
 
     @pytest.fixture(scope="class")
@@ -229,14 +229,13 @@ class TestBidirectionalLinks:
 
         for f in features:
             coords = f["geometry"]["coordinates"]
-            forward = (tuple(coords[0]), tuple(coords[1]))
             reverse = (tuple(coords[1]), tuple(coords[0]))
             if "r" in f["properties"]["name"]:
                 # 逆方向リンクには対応する順方向がある
                 assert reverse in edges, f"逆方向リンク {f['properties']['name']} の順方向が見つからない"
 
     def test_both_directions_have_vehicles(self, result):
-        """双方向需要がある場合、両方向にリンクに車両がいる"""
+        """双方向需要がある場合，両方向にリンクに車両がいる"""
         link_names = result["link_names"]
         link_names_with_vehicles = set()
         for key, cols in result["frames"].items():
@@ -255,8 +254,8 @@ class TestBidirectionalLinks:
 class TestScenarioValidation:
     """
     [修正履歴] 重複ノード名が UXsim の生エラー
-    「Node name X already used by another node」のまま 400 で返り、
-    どこを直せばいいか分からなかった。SimulationInput で事前検証する。
+    「Node name X already used by another node」のまま 400 で返り，
+    どこを直せばいいか分からなかった．SimulationInput で事前検証する．
     """
 
     def _nodes(self):
@@ -328,7 +327,7 @@ class TestScenarioValidation:
 class TestScenarioModifications:
     """
     _apply_modifications: 大規模ネットワークを LLM に往復させないための
-    差分命令エンジン。保存済みシナリオに小さなパッチを適用する。
+    差分命令エンジン．保存済みシナリオに小さなパッチを適用する．
     """
 
     def _base(self):
@@ -411,7 +410,9 @@ class TestScenarioModifications:
 
     def test_rerun_handler_end_to_end(self):
         """保存済みシナリオ → パッチ → 再実行 → 新 sim_id"""
-        import asyncio, types, json as _json
+        import asyncio
+        import types
+        import json as _json
         from server import _handle_rerun_simulation, _store_sim
 
         base_result = _run_uxsim(SimulationInput(**self._base()))
@@ -429,13 +430,14 @@ class TestScenarioModifications:
         payload = _json.loads(content)
         assert payload["base_sim_id"] == "rerun_base"
         assert payload["applied"]
-        # 新シナリオに capacity が反映され、渋滞で旅行時間が悪化している
+        # 新シナリオに capacity が反映され，渋滞で旅行時間が悪化している
         new_sc = results_store[new_id]["_scenario"]
         assert new_sc["links"][0]["capacity"] == 0.15
         assert payload["average_travel_time_s"] > base_result["stats"]["average_travel_time_s"]
 
     def test_rerun_handler_bad_sim_id(self):
-        import asyncio, types
+        import asyncio
+        import types
         from server import _handle_rerun_simulation
         content, new_id, is_err = asyncio.run(_handle_rerun_simulation(
             {"base_sim_id": "no_such_id", "modifications": []},
@@ -530,19 +532,68 @@ class TestNetworkInfo:
         assert is_err
 
 
+class TestConversationContext:
+    """/chat のコンテキスト注入は会話に紐づく sim（last_sim_id）だけを使うこと．
+
+    グローバル最新（results_store の末尾）を注入すると，別会話や
+    アップロードで作られた無関係なシナリオを LLM が流用してしまう．
+    """
+
+    @pytest.fixture()
+    def stored_sim(self):
+        sim_id = "ctx_test"
+        results_store[sim_id] = {
+            "geojson": {"features": [{"properties": {"name": "L1"}},
+                                     {"properties": {"name": "L2"}}]},
+            "_scenario": {"nodes": [{"name": "A"}, {"name": "B"}],
+                          "links": [{"name": "L1"}, {"name": "L2"}],
+                          "demands": [], "tmax": 600},
+        }
+        yield sim_id
+        results_store.pop(sim_id, None)
+
+    def _body(self, last_sim_id):
+        from server import ChatInput
+        return ChatInput(messages=[{"role": "user", "content": "hi"}],
+                         last_sim_id=last_sim_id)
+
+    def test_no_last_sim_id_injects_nothing(self, stored_sim):
+        # results_store に sim があっても，会話が指定しなければ注入しない
+        from server import _conversation_context_block
+        assert _conversation_context_block(self._body(None)) == ""
+
+    def test_valid_last_sim_id_injects_that_sim(self, stored_sim):
+        from server import _conversation_context_block
+        block = _conversation_context_block(self._body(stored_sim))
+        assert stored_sim in block
+        assert f'rerun_simulation(base_sim_id="{stored_sim}")' in block
+        assert "2 ノード / 2 リンク" in block
+
+    def test_unknown_last_sim_id_injects_nothing(self, stored_sim):
+        # サーバー再起動などで sim が消えた場合は注入しない
+        from server import _conversation_context_block
+        assert _conversation_context_block(self._body("gone123")) == ""
+
+    def test_conversation_sim_id_helper(self, stored_sim):
+        from server import _conversation_sim_id
+        assert _conversation_sim_id(self._body(stored_sim)) == stored_sim
+        assert _conversation_sim_id(self._body(None)) is None
+        assert _conversation_sim_id(self._body("  ")) is None
+
+
 # ============================================================
 # 2a. リンク容量テスト
 # ============================================================
 
 class TestLinkCapacity:
     """
-    link.capacity（台/s、リンク全体）で容量を明示制御できること。
-    UXsim の capacity_out にマップされ、下流端がボトルネックになる。
+    link.capacity（台/s，リンク全体）で容量を明示制御できること．
+    UXsim の capacity_out にマップされ，下流端がボトルネックになる．
     """
 
     def _run(self, capacity):
         # 注意: capacity（capacity_out）はリンク終点が目的地そのものの場合は
-        # 作用しない（車両は境界を通らず到着・消滅する）ため、
+        # 作用しない（車両は境界を通らず到着・消滅する）ため，
         # ボトルネックリンクの下流にもう 1 リンク置く
         link = {"name": "r1", "start": "A", "end": "B", "length": 1000}
         if capacity is not None:
@@ -581,9 +632,9 @@ class TestLinkCapacity:
 
 class TestSignalMetadata:
     """
-    [修正履歴] signals[].groups が交差点ごとにフィルタされておらず、
-    複数の信号交差点があると同じ信号機が交差点の数だけ重複描画された。
-    groups は「その交差点に流入する signal_group 付きリンク」のみを含むこと。
+    [修正履歴] signals[].groups が交差点ごとにフィルタされておらず，
+    複数の信号交差点があると同じ信号機が交差点の数だけ重複描画された．
+    groups は「その交差点に流入する signal_group 付きリンク」のみを含むこと．
     """
 
     @pytest.fixture(scope="class")
@@ -633,8 +684,8 @@ class TestSignalMetadata:
 
 class TestCSVParser:
     """
-    [修正履歴] 空セルで float("") エラーが発生した。
-    _f() / _i() ヘルパーで対処済み。
+    [修正履歴] 空セルで float("") エラーが発生した．
+    _f() / _i() ヘルパーで対処済み．
     """
 
     def test_risu_csv_basic(self):
@@ -654,9 +705,9 @@ class TestCSVParser:
 
     def test_node_csv_prefers_node_id_over_name(self):
         """
-        [修正履歴] node_id（主キー）と name（表示ラベル、重複可）の両方を持つ
-        GMNS 風データで、name を識別子に選んで「ノード名が重複」エラーになった。
-        ID 系カラムを優先する。
+        [修正履歴] node_id（主キー）と name（表示ラベル，重複可）の両方を持つ
+        GMNS 風データで，name を識別子に選んで「ノード名が重複」エラーになった．
+        ID 系カラムを優先する．
         """
         csv = (
             "node_id,name,x_coord,y_coord\n"
@@ -683,8 +734,8 @@ class TestCSVParser:
 
     def test_risu_csv_empty_cells(self):
         """
-        空セルが含まれる RISU CSV でエラーにならない。
-        [修正履歴] float("") で ValueError が発生した。
+        空セルが含まれる RISU CSV でエラーにならない．
+        [修正履歴] float("") で ValueError が発生した．
         """
         csv = (
             "type,name,x,y,start,end,length,free_flow_speed,number_of_lanes,orig,dest,t_start,t_end,flow\n"
@@ -748,8 +799,8 @@ class TestCSVParser:
 
 class TestSimulationDataAggregation:
     """
-    _get_simulation_data() がグラフ生成に十分なデータを返すことを検証。
-    [修正履歴] LLM がチャート生成するにはデータが必要。
+    _get_simulation_data() がグラフ生成に十分なデータを返すことを検証．
+    [修正履歴] LLM がチャート生成するにはデータが必要．
     """
 
     @pytest.fixture(scope="class")
@@ -802,8 +853,8 @@ class TestSimulationDataAggregation:
 
     def test_data_not_too_large(self, sim_data):
         """
-        JSON サイズが LLM のコンテキストに収まるサイズ。
-        間引きが機能していることを確認。
+        JSON サイズが LLM のコンテキストに収まるサイズ．
+        間引きが機能していることを確認．
         """
         json_str = json.dumps(sim_data)
         # 100KB 以下であること（LLM に渡せるサイズ）
@@ -817,9 +868,9 @@ class TestSimulationDataAggregation:
 class TestFrameKeyCompatibility:
     """
     [修正履歴] Python の str(round(25.0, 1)) = "25.0" だが
-    JavaScript の String(25.0) = "25"。
-    フロントエンドで parseFloat 正規化しているため、
-    サーバー側のキーが一貫していることを確認。
+    JavaScript の String(25.0) = "25"．
+    フロントエンドで parseFloat 正規化しているため，
+    サーバー側のキーが一貫していることを確認．
     """
 
     @pytest.fixture(scope="class")
@@ -838,15 +889,15 @@ class TestFrameKeyCompatibility:
 
     def test_js_string_conversion_mismatch_documented(self, result):
         """
-        Python の "25.0" と JS の "25" の不一致を文書化。
+        Python の "25.0" と JS の "25" の不一致を文書化．
         フロントエンドの loadResult() で正規化している:
             framesData[String(parseFloat(k))] = v
-        サーバー側は "25.0" 形式を返す。
+        サーバー側は "25.0" 形式を返す．
         """
         has_decimal_key = any("." in k for k in result["frames"].keys())
         assert has_decimal_key, (
-            "フレームキーが小数点を含んでいない。"
-            "フロントエンドの正規化ロジックとの整合性を確認すること。"
+            "フレームキーが小数点を含んでいない．"
+            "フロントエンドの正規化ロジックとの整合性を確認すること．"
         )
 
 
@@ -879,7 +930,7 @@ class TestToolDefinitions:
 
     def test_system_prompt_contains_risu(self):
         """
-        [修正履歴] AI の一人称を RISU に変更した。
+        [修正履歴] AI の一人称を RISU に変更した．
         """
         from server import SYSTEM_PROMPT
         assert "RISU" in SYSTEM_PROMPT
@@ -887,7 +938,7 @@ class TestToolDefinitions:
 
     def test_system_prompt_chart_instructions(self):
         """
-        [修正履歴] チャート生成の指示がシステムプロンプトに含まれる。
+        [修正履歴] チャート生成の指示がシステムプロンプトに含まれる．
         """
         from server import SYSTEM_PROMPT
         assert "chart" in SYSTEM_PROMPT.lower() or "チャート" in SYSTEM_PROMPT or "グラフ" in SYSTEM_PROMPT
@@ -899,8 +950,8 @@ class TestToolDefinitions:
 
 class TestAPIEndpoints:
     """
-    サーバーが起動している場合のみ実行。
-    pytest tests/ -v -k "api" で選択実行可。
+    サーバーが起動している場合のみ実行．
+    pytest tests/ -v -k "api" で選択実行可．
     """
 
     API = "http://localhost:8001"
@@ -1038,7 +1089,7 @@ class TestAPIEndpoints:
 
 class TestChartExtraction:
     """
-    LLM レスポンスからの ```chart ブロック抽出をテスト。
+    LLM レスポンスからの ```chart ブロック抽出をテスト．
     """
 
     def test_single_chart_extraction(self):
@@ -1121,9 +1172,9 @@ class TestEdgeCases:
 
     def test_frame_count_reasonable(self):
         """
-        フレーム数がtmaxに対して妥当な範囲にある。
-        _run_uxsim はフレームを間引きしない（全ステップを返す）。
-        間引きは _get_simulation_data で行われる（最大40点サンプリング）。
+        フレーム数がtmaxに対して妥当な範囲にある．
+        _run_uxsim はフレームを間引きしない（全ステップを返す）．
+        間引きは _get_simulation_data で行われる（最大40点サンプリング）．
         """
         scenario = SimulationInput(
             name="long_sim",
@@ -1137,3 +1188,1330 @@ class TestEdgeCases:
         n_frames = len(result["frame_times"])
         # フレーム数はtmax / recording_interval 程度（100〜500の範囲）
         assert 50 <= n_frames <= 600, f"Unexpected frame count: {n_frames}"
+
+
+# ============================================================
+# 9. 後処理パイプライン（ベクトル化・間引き・/results キャッシュ）
+# ============================================================
+
+class TestPostProcessingPipeline:
+    """
+    [修正履歴] 大規模ネットワークで後処理（frames / timeline 生成）が UXsim 本体と
+    同程度に遅く，/results の JSON が数百 MB になってブラウザで開けなかった．
+    後処理を numpy 一括処理に置き換え，フレーム点数に上限（車両サンプリング）を設け，
+    /results は gzip 済みバイト列を executor で 1 回だけ生成してキャッシュする．
+    """
+
+    def test_select_frames_no_thinning_when_small(self):
+        import numpy as np
+        from server import _select_frames
+        tk = np.array([0, 50, 50, 100, 150, 150, 150], dtype=np.int64)
+        kept, fidx = _select_frames(tk, max_frames=200)
+        assert kept.tolist() == [0, 50, 100, 150]
+        assert fidx.tolist() == [0, 1, 1, 2, 3, 3, 3]
+
+    def test_select_frames_thins_to_max(self):
+        import numpy as np
+        from server import _select_frames
+        # 0.1 秒精度キーで 1000 ユニーク時刻 → max 200 なら 5 個おき
+        tk = np.repeat(np.arange(1000, dtype=np.int64) * 50, 3)
+        kept, fidx = _select_frames(tk, max_frames=200)
+        assert kept.size == 200
+        assert kept.tolist() == (np.arange(0, 1000, 5) * 50).tolist()
+        # 落ちた点は -1，残った点は kept への index
+        assert ((fidx == -1) | (kept[np.maximum(fidx, 0)] == tk)).all()
+        assert (fidx >= 0).sum() == 200 * 3
+
+    def test_select_frames_matches_unique_fallback(self):
+        """LUT 経路と np.unique 経路（想定外に大きな時刻）は同じ結果を返す"""
+        import numpy as np
+        import server
+        rng = np.random.default_rng(0)
+        tk = rng.integers(0, 3000, size=5000, dtype=np.int64) * 10
+        kept_a, fidx_a = server._select_frames(tk, 100)
+        # 巨大な値を足して汎用経路を強制し，同じオフセットを引いて比較
+        off = 60_000_000
+        kept_b, fidx_b = server._select_frames(tk + off, 100)
+        assert (kept_b - off).tolist() == kept_a.tolist()
+        assert fidx_b.tolist() == fidx_a.tolist()
+
+    @pytest.fixture(scope="class")
+    def result(self):
+        return _run_uxsim(GRID_BIDIRECTIONAL_SCENARIO)
+
+    def test_frames_are_numpy_columns_sorted_by_vehicle(self, result):
+        """frames の列は numpy 配列で，フレーム内の ids は昇順（フロントのマージ結合前提）"""
+        import numpy as np
+        assert result["vehicle_sample_step"] == 1
+        assert list(result["frames"].keys()) == [str(t) for t in result["frame_times"]]
+        for cols in result["frames"].values():
+            for c in ("ids", "xs", "ys", "vs", "alphas", "li"):
+                assert isinstance(cols[c], np.ndarray)
+            ids = cols["ids"]
+            assert (np.diff(ids) >= 0).all()
+
+    def test_timeline_matches_frame_grid(self, result):
+        """リンク timeline の t は frame_times と同じグリッド"""
+        for f in result["geojson"]["features"]:
+            tl = f["properties"]["timeline"]
+            assert [e["t"] for e in tl] == result["frame_times"]
+
+    def test_vehicle_sampling_when_over_point_limit(self, monkeypatch):
+        """総点数が上限を超えたら車両を等間隔サンプリングし，timeline / 統計は変わらない"""
+        import server
+        base = _run_uxsim(GRID_BIDIRECTIONAL_SCENARIO)
+        total = sum(int(len(c["ids"])) for c in base["frames"].values())
+        monkeypatch.setattr(server, "MAX_FRAME_POINTS", max(1, total // 3))
+        sampled = _run_uxsim(GRID_BIDIRECTIONAL_SCENARIO)
+        step = sampled["vehicle_sample_step"]
+        assert step >= 2
+        sampled_total = sum(int(len(c["ids"])) for c in sampled["frames"].values())
+        assert sampled_total <= total // 3 + 1
+        # サンプリング対象は vid % step == 0 の車両だけ
+        for cols in sampled["frames"].values():
+            assert (cols["ids"] % step == 0).all()
+        # フレーム時刻・timeline・統計は間引き前と同一
+        assert sampled["frame_times"] == base["frame_times"]
+        assert sampled["stats"]["total_trips"] == base["stats"]["total_trips"]
+        tl_b = {f["properties"]["name"]: f["properties"]["timeline"] for f in base["geojson"]["features"]}
+        tl_s = {f["properties"]["name"]: f["properties"]["timeline"] for f in sampled["geojson"]["features"]}
+        assert tl_s == tl_b
+        # LLM 向け集計は台数を補正し，注記を付ける
+        sid = "test_sampling"
+        results_store[sid] = sampled
+        try:
+            sd = _get_simulation_data(sid)
+            assert "vehicle_sample_note" in sd
+            json.dumps(sd)  # 標準 json で直列化できる（numpy 型が漏れていない）
+            results_store["test_sampling_base"] = base
+            sd_base = _get_simulation_data("test_sampling_base")
+            # 補正後の台数は step の倍数で，系列全体では元の台数と同程度
+            # （個々の時刻はサンプリング誤差が大きいので合計で比較）
+            assert all(a % step == 0 for a in sd["network_vehicle_count"])
+            n = len(sd["network_vehicle_count"])
+            assert abs(sum(sd["network_vehicle_count"]) - sum(sd_base["network_vehicle_count"])) <= step * n
+        finally:
+            results_store.pop(sid, None)
+            results_store.pop("test_sampling_base", None)
+
+    def test_results_endpoint_gzip_cached(self):
+        """/results は gzip 済みバイト列を返し，2 回目はキャッシュを使う．identity でも同じ内容．"""
+        from fastapi.testclient import TestClient
+        import server
+        sid = "test_results_gz"
+        server._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        try:
+            c = TestClient(server.app)
+            r = c.get(f"/results/{sid}", headers={"Accept-Encoding": "gzip"})
+            assert r.status_code == 200
+            assert r.headers.get("content-encoding") == "gzip"
+            assert results_store[sid]["_enc_cache"].get("gzip"), "gzip 結果がキャッシュされていない"
+            d = r.json()
+            # 送出時は columnar_v3（量子化＋ids 差分符号化）．
+            # results_store 側は v2 のまま（TestFrameWireEncodingV3 を参照）．
+            assert d["sim_id"] == sid and d["result"]["frame_format"] == "columnar_v3"
+            assert d["result"]["vehicle_sample_step"] == 1
+            fk = str(d["result"]["frame_times"][-1])
+            cols = d["result"]["frames"][fk]
+            assert isinstance(cols["ids"], list) and len(cols["ids"]) == len(cols["xs"])
+            r2 = c.get(f"/results/{sid}", headers={"Accept-Encoding": "gzip"})
+            assert r2.content == r.content
+            r3 = c.get(f"/results/{sid}", headers={"Accept-Encoding": "identity"})
+            assert r3.headers.get("content-encoding") is None
+            assert r3.json() == d
+            # 軽量エンベロープ（scenario のみ）は従来通り
+            r4 = c.get(f"/results/{sid}/scenario")
+            assert r4.status_code == 200 and "result" not in r4.json()
+        finally:
+            results_store.pop(sid, None)
+
+    def test_envelope_json_stdlib_parseable(self):
+        """orjson が直列化した numpy 列は標準 json で読み戻せる（クライアント互換）"""
+        import server
+        sid = "test_env_json"
+        server._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        try:
+            d = json.loads(server._envelope_json_bytes(sid))
+            assert d["result"]["link_names"] == results_store[sid]["link_names"]
+            assert d["result"]["frame_times"] == results_store[sid]["frame_times"]
+        finally:
+            results_store.pop(sid, None)
+
+
+# ============================================================
+# 10. LLM とのやり取りのトークン節約
+# ============================================================
+
+class TestLLMTokenSaving:
+    """
+    [修正履歴] 動的シミュレーションでは毎ターン rerun が走り，sim_id 入りの
+    【現在のコンテキスト】を system に足していたため system 以降のキャッシュが毎回無効化，
+    さらに会話履歴にはキャッシュ境界が無く tool ラウンドごとに全額再課金されていた．
+    - system は不変，動的コンテキストは最後の user メッセージの追加ブロック
+    - 履歴の最後の assistant と リクエスト末尾に cache_control
+    - 履歴は文字数予算でトリミング（ヒステリシス付き）
+    - グリッド網は grid テンプレートでサーバー展開（LLM の出力トークン削減）
+    - チャートは {"$data": ...} 参照で配列の書き写しを不要に
+    """
+
+    def _body(self, msgs, last_sim_id=None):
+        from server import ChatInput
+        return ChatInput(messages=msgs, last_sim_id=last_sim_id)
+
+    def test_system_prompt_stays_static_and_context_goes_to_last_user(self):
+        import server
+        sid = "tok_ctx"
+        results_store[sid] = {
+            "geojson": {"features": [{"properties": {"name": "L1"}}]},
+            "_scenario": {"nodes": [{"name": "A"}], "links": [{"name": "L1"}], "demands": [], "tmax": 600},
+        }
+        try:
+            body = self._body([
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+            ], last_sim_id=sid)
+            msgs = server._build_llm_messages(body)
+            assert [m["role"] for m in msgs] == ["user", "assistant", "user"]
+            # 履歴の最後の assistant にキャッシュ境界
+            a1 = msgs[1]["content"]
+            assert isinstance(a1, list) and a1[0]["text"] == "a1" and "cache_control" in a1[0]
+            # 最後の user: 本文ブロック + コンテキストブロック（末尾に cache_control）
+            u2 = msgs[2]["content"]
+            assert u2[0]["text"] == "u2" and "cache_control" not in u2[0]
+            assert sid in u2[1]["text"] and "cache_control" in u2[1]
+            # 送信用には内部フラグが残らない
+            api = server._api_messages(msgs)
+            assert all("_tail_marked" not in b for m in api for b in m["content"])
+            # コンテキストが無い場合は本文ブロックだけ（末尾にキャッシュ境界）
+            msgs2 = server._build_llm_messages(self._body([{"role": "user", "content": "hi"}]))
+            assert len(msgs2[0]["content"]) == 1 and "cache_control" in msgs2[0]["content"][0]
+        finally:
+            results_store.pop(sid, None)
+
+    def test_tail_cache_mark_moves_with_rounds(self):
+        import server
+        msgs = server._build_llm_messages(self._body([{"role": "user", "content": "hi"}]))
+        msgs.append({"role": "assistant", "content": [{"type": "text", "text": "calling"}]})
+        msgs.append({"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "{}"}]})
+        server._mark_cache_tail(msgs)
+        # 末尾の印は tool_result に移り，以前の末尾（user "hi"）からは外れる
+        assert "cache_control" in msgs[-1]["content"][-1]
+        assert "cache_control" not in msgs[0]["content"][0]
+
+    def test_trim_history_hysteresis_and_first_role(self, monkeypatch):
+        import server
+        monkeypatch.setattr(server, "MAX_HISTORY_CHARS", 1000)
+        msgs = []
+        for i in range(20):
+            msgs.append({"role": "user", "content": f"u{i} " + "x" * 100})
+            msgs.append({"role": "assistant", "content": f"a{i} " + "y" * 100})
+        msgs.append({"role": "user", "content": "last"})
+        kept = server._trim_history(msgs)
+        assert kept[0]["role"] == "user"
+        assert kept[-1]["content"] == "last"
+        assert "省略" in kept[0]["content"]
+        total = sum(len(m["content"]) for m in kept)
+        assert total <= 1000 // 2 + 200  # 予算の半分まで落とす（先頭の注記分は許容）
+        # 予算内なら手を付けない
+        small = msgs[-3:]
+        assert server._trim_history(small) is small
+
+    def test_grid_template_and_auto_demands(self):
+        import server
+        args = {"grid": {"nx": 4, "ny": 3, "spacing": 250, "free_flow_speed": 15},
+                "auto_demands": {"strategy": "random", "n_pairs": 5, "flow_per_pair": 0.1, "seed": 1},
+                "tmax": 1200}
+        scenario, info = server._expand_run_simulation_args(args)
+        assert len(scenario["nodes"]) == 12
+        # 双方向: 横 (3×3) + 縦 (4×2) = 17 本 × 2
+        assert len(scenario["links"]) == 34
+        assert all(l["length"] == 250 and l["free_flow_speed"] == 15 for l in scenario["links"])
+        assert len(scenario["demands"]) == 5
+        assert info["grid"]["nx"] == 4 and "n{i}_{j}" in info["grid"]["node_naming"]
+        assert info["auto_demands"]["generated"] == 5
+        # SimulationInput として妥当で，実行できる
+        r = _run_uxsim(SimulationInput(**scenario))
+        assert r["stats"]["total_trips"] > 0
+        # 片方向グリッド
+        one, _ = server._expand_run_simulation_args(
+            {"grid": {"nx": 3, "bidirectional": False}, "demands": [
+                {"orig": "n0_0", "dest": "n2_2", "t_start": 0, "t_end": 100, "flow": 0.2}]})
+        assert len(one["links"]) == 12
+        # nodes/links も demands も無ければエラー
+        with pytest.raises(ValueError):
+            server._expand_run_simulation_args({"nodes": [], "links": [], "demands": []})
+        with pytest.raises(ValueError):
+            server._expand_run_simulation_args({"grid": {"nx": 3}})
+
+    def test_generate_demands_shared_with_rerun(self):
+        from server import _apply_modifications
+        sc = {"nodes": [{"name": f"n{i}", "x": i * 100, "y": 0} for i in range(6)],
+              "links": [{"name": f"l{i}", "start": f"n{i}", "end": f"n{i+1}", "length": 100} for i in range(5)],
+              "demands": [], "tmax": 600}
+        out, applied = _apply_modifications(sc, [
+            {"action": "generate_demands", "strategy": "random", "n_pairs": 4, "seed": 7, "flow_total": 0.8}])
+        assert len(out["demands"]) == 4 and all(d["flow"] == 0.2 for d in out["demands"])
+        with pytest.raises(ValueError):
+            _apply_modifications(sc, [{"action": "generate_demands", "strategy": "nope"}])
+
+    def test_chart_data_refs_resolved(self):
+        import server
+        sid = "tok_chart"
+        server._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        try:
+            cache = {}
+            text = ('結果です．\n```chart\n{"type":"line","data":{"labels":{"$data":"time_labels"},'
+                    '"datasets":[{"label":"v","data":{"$data":"network_avg_speed"}},'
+                    '{"label":"r1","data":{"$data":"link_speeds.r1","sim_id":"%s"}},'
+                    '{"label":"missing","data":{"$data":"nope.x"}}]}}\n```\n以上．' % sid)
+            charts, clean = server._extract_charts(text, cache, sid)
+            assert clean == "結果です．\n\n以上．".replace("\n\n", "\n\n") or "chart" not in clean
+            assert len(charts) == 1
+            d = charts[0]["data"]
+            sd = server._get_simulation_data(sid)
+            assert d["labels"] == sd["time_labels"]
+            assert d["datasets"][0]["data"] == sd["network_avg_speed"]
+            assert d["datasets"][1]["data"] == sd["link_speeds"]["r1"]
+            assert d["datasets"][2]["data"] == []  # 未解決は空配列
+            assert sid in cache  # 未取得なら _get_simulation_data で補う
+        finally:
+            results_store.pop(sid, None)
+
+    def test_simulation_data_is_compact(self):
+        import server
+        sid = "tok_compact"
+        server._store_sim(sid, _run_uxsim(GRID_BIDIRECTIONAL_SCENARIO), {"type": "manual"})
+        try:
+            sd = server._get_simulation_data(sid)
+            assert len(sd["time_labels"]) <= 30
+            assert len(sd["link_speeds"]) <= 20
+            sd2 = server._get_simulation_data(sid, points=10, max_links=0)
+            assert len(sd2["time_labels"]) <= 10 and sd2["link_speeds"] == {}
+            assert len(json.dumps(sd)) < 8000
+        finally:
+            results_store.pop(sid, None)
+
+    def test_stream_chat_end_to_end_with_fake_client(self, monkeypatch):
+        """偽 Anthropic クライアントで /chat ストリーミングの流れを検証:
+        grid テンプレートで実行 → get_simulation_data → $data 参照チャート → usage 付き done．
+        各リクエストの messages にキャッシュ境界が正しく付くことも確認．"""
+        import anthropic
+        import server
+        from types import SimpleNamespace as NS
+
+        captured = []
+
+        class FakeStream:
+            def __init__(self, response):
+                self._r = response
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def __iter__(self):
+                for b in self._r.content:
+                    if b.type == "text":
+                        yield NS(type="content_block_delta", delta=NS(type="text_delta", text=b.text))
+                    else:
+                        yield NS(type="content_block_start", index=0,
+                                 content_block=NS(type="tool_use", id=b.id, name=b.name))
+            def get_final_message(self):
+                return self._r
+
+        usage = NS(input_tokens=100, output_tokens=20, cache_read_input_tokens=50,
+                   cache_creation_input_tokens=10)
+        responses = [
+            NS(stop_reason="tool_use", usage=usage, content=[
+                NS(type="text", text="RISUが実行します"),
+                NS(type="tool_use", id="t1", name="run_simulation",
+                   input={"grid": {"nx": 3, "spacing": 300},
+                          "auto_demands": {"strategy": "boundary"}, "tmax": 600}),
+            ]),
+            NS(stop_reason="tool_use", usage=usage, content=[
+                NS(type="tool_use", id="t2", name="get_simulation_data", input={"sim_id": ""}),
+            ]),
+            NS(stop_reason="end_turn", usage=usage, content=[
+                NS(type="text", text='完了．\n```chart\n{"type":"line","data":{"labels":{"$data":"time_labels"},'
+                                     '"datasets":[{"data":{"$data":"network_avg_speed"}}]}}\n```'),
+            ]),
+        ]
+
+        class FakeMessages:
+            def stream(self, **kw):
+                captured.append(kw)
+                return FakeStream(responses[len(captured) - 1])
+            def create(self, **kw):
+                raise AssertionError("create は呼ばれないはず")
+
+        class FakeClient:
+            def __init__(self, *a, **kw):
+                self.messages = FakeMessages()
+
+        monkeypatch.setattr(anthropic, "Anthropic", FakeClient)
+        monkeypatch.setattr(server, "ANTHROPIC_API_KEY", "dummy")
+
+        body = server.ChatInput(messages=[
+            {"role": "user", "content": "前の話"}, {"role": "assistant", "content": "前の返事"},
+            {"role": "user", "content": "3x3 グリッドで実行してグラフも"}])
+
+        import asyncio as _aio
+        async def run():
+            resp = await server._chat_claude_stream(body)
+            events = []
+            async for chunk in resp.body_iterator:
+                for line in chunk.split("\n\n"):
+                    if line.startswith("data: "):
+                        events.append(json.loads(line[6:]))
+            return events
+        events = _aio.run(run())
+        done = [e for e in events if e["type"] == "done"][0]
+        try:
+            assert done["sim_id"] in results_store
+            assert done["usage"]["calls"] == 3 and done["usage"]["output_tokens"] == 60
+            assert done["usage"]["cache_read_tokens"] == 150
+            assert len(done["charts"]) == 1
+            sd = server._get_simulation_data(done["sim_id"])
+            assert done["charts"][0]["data"]["labels"] == sd["time_labels"]
+            assert "```" not in done["content"]
+            # ─ リクエスト構造 ─
+            assert len(captured) == 3
+            for kw in captured:
+                assert kw["system"][0]["text"] == server.SYSTEM_PROMPT  # system は不変
+                assert "cache_control" in kw["system"][0]
+                assert "cache_control" in kw["tools"][-1]
+                msgs = kw["messages"]
+                # 末尾メッセージの最後のブロックにキャッシュ境界，内部フラグは無い
+                last_blocks = msgs[-1]["content"]
+                assert "cache_control" in last_blocks[-1] and "_tail_marked" not in last_blocks[-1]
+                # 履歴の assistant にもキャッシュ境界
+                assert "cache_control" in msgs[1]["content"][0]
+                n_marks = sum(1 for m in msgs for b in m["content"]
+                              if isinstance(b, dict) and "cache_control" in b)
+                assert n_marks == 2, f"messages 内の breakpoint は 2 つ（履歴 assistant + 末尾）: {n_marks}"
+            # 2 回目以降は tool_result が末尾
+            assert captured[1]["messages"][-1]["content"][-1]["type"] == "tool_result"
+            # grid 展開結果（命名規則）が tool_result で LLM に伝わる
+            tr1 = json.loads(captured[1]["messages"][-1]["content"][-1]["content"])
+            assert tr1["network"]["nodes"] == 9 and "n{i}_{j}" in tr1["grid"]["node_naming"]
+        finally:
+            results_store.pop(done["sim_id"], None)
+
+
+class TestStoreLimitAndUsageCost:
+    def test_results_store_evicts_oldest(self, monkeypatch):
+        import server
+        monkeypatch.setattr(server, "MAX_RESULTS", 2)
+        base = _run_uxsim(BOTTLENECK_SCENARIO)
+        ids = ["evict_a", "evict_b", "evict_c"]
+        try:
+            for sid in ids:
+                server._store_sim(sid, dict(base), {"type": "manual"})
+            assert "evict_a" not in results_store
+            assert "evict_b" in results_store and "evict_c" in results_store
+        finally:
+            for sid in ids:
+                results_store.pop(sid, None)
+
+    def test_usage_cost_never_negative_with_cached_input(self):
+        """新 API の usage は input_tokens にキャッシュ分を含まない．以前の式は負の円額を出した"""
+        from types import SimpleNamespace as NS
+        import server
+        u = server._log_usage("test", NS(usage=NS(input_tokens=2, output_tokens=190,
+                                                  cache_read_input_tokens=8234,
+                                                  cache_creation_input_tokens=1359)))
+        assert u["cost_jpy"] > 0
+        tally = server._UsageTally()
+        tally.add("t", NS(usage=NS(input_tokens=2, output_tokens=10, cache_read_input_tokens=10000,
+                                   cache_creation_input_tokens=0)))
+        d = tally.as_dict()
+        assert d["cache_hit_pct"] >= 99 and d["cost_jpy"] > 0
+
+
+# ============================================================
+# 素の UXsim で実行するパイプライン（uxsim_bridge + scripts/run_scenario.py）
+# ============================================================
+
+class TestStandalonePipeline:
+    """RISU サーバーを介さずシナリオを UXsim で実行する経路のテスト．
+
+    server.py の _run_uxsim と scripts/run_scenario.py は同じ uxsim_bridge.build_world
+    を通る．ここが割れるとサーバーとオフライン実行で結果が変わるので，
+    構築結果の同一性と，生成スクリプトが実際に import できることを確認する．
+    """
+
+    SCENARIO_DICT = {
+        "name": "pipeline_test",
+        "tmax": 1000,
+        "deltan": 5,
+        "nodes": [
+            {"name": "A", "x": 0, "y": 0},
+            {"name": "B", "x": 2000, "y": 0, "flow_capacity": 0.4},
+            {"name": "C", "x": 4000, "y": 0},
+        ],
+        "links": [
+            {"name": "AB", "start": "A", "end": "B", "length": 2000},
+            {"name": "BC", "start": "B", "end": "C", "length": 2000, "free_flow_speed": 10},
+        ],
+        "demands": [
+            {"orig": "A", "dest": "C", "t_start": 0, "t_end": 400, "flow": 0.6},
+        ],
+    }
+
+    def test_bridge_imports_without_server(self):
+        """uxsim_bridge は FastAPI / anthropic を引っ張らない（素の Python から使える）．"""
+        import subprocess
+
+        code = (
+            "import sys; import uxsim_bridge; "
+            "mods = set(sys.modules); "
+            "assert 'fastapi' not in mods, 'fastapi を読み込んでいる'; "
+            "assert 'anthropic' not in mods, 'anthropic を読み込んでいる'; "
+            "print('ok')"
+        )
+        r = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=os.path.dirname(os.path.dirname(__file__)),
+            capture_output=True, text=True,
+        )
+        assert r.returncode == 0, r.stderr
+        assert "ok" in r.stdout
+
+    def test_scenario_from_dict_accepts_envelope(self):
+        """エンベロープ {"scenario": {...}} でも生シナリオでも同じ結果になる．"""
+        from uxsim_bridge import scenario_from_dict
+
+        raw = scenario_from_dict(self.SCENARIO_DICT)
+        env = scenario_from_dict({"scenario": self.SCENARIO_DICT, "source": {"type": "t"}})
+        assert [n.name for n in raw.nodes] == [n.name for n in env.nodes]
+        assert raw.tmax == env.tmax == 1000
+
+    def test_scenario_from_dict_applies_defaults(self):
+        """省略された link 属性に SimulationInput と同じ既定値が入る．"""
+        from uxsim_bridge import scenario_from_dict
+
+        sc = scenario_from_dict(self.SCENARIO_DICT)
+        ab = next(lk for lk in sc.links if lk.name == "AB")
+        assert ab.free_flow_speed == 20.0
+        assert ab.jam_density == 0.2
+        assert ab.number_of_lanes == 1
+        assert ab.capacity is None and ab.signal_group is None
+
+    def test_scenario_from_dict_rejects_incomplete(self):
+        from uxsim_bridge import scenario_from_dict
+
+        with pytest.raises(ValueError, match="links"):
+            scenario_from_dict({"nodes": [], "demands": []})
+
+    def test_bridge_matches_server_run(self):
+        """build_world 経由の素の実行と _run_uxsim の統計が一致する．"""
+        from uxsim_bridge import build_world, scenario_from_dict
+
+        # サーバー経路
+        server_res = _run_uxsim(SimulationInput(**self.SCENARIO_DICT))
+        s = server_res["stats"]
+
+        # 素の UXsim 経路
+        W = build_world(scenario_from_dict(self.SCENARIO_DICT),
+                        disable_basic_analysis=True)
+        W.exec_simulation()
+        from server import _trip_stats
+        total, completed, avg_tt = _trip_stats(W)
+
+        assert total == s["total_trips"]
+        assert completed == s["completed_trips"]
+        if avg_tt is not None and s["average_travel_time_s"] is not None:
+            assert abs(avg_tt - s["average_travel_time_s"]) < 1.0
+
+    def test_emitted_script_is_valid_python(self, tmp_path):
+        r"""--emit が出すスクリプトが構文的に正しく，単体で World を組めること．
+
+        Windows パス（C:\Users\...）を docstring に埋めると \U が unicode
+        エスケープと解釈されて SyntaxError になる回帰があったため，
+        バックスラッシュを含む生成元パスで検証する．
+        """
+        import ast
+        import importlib.util
+
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts"))
+        import run_scenario
+
+        out = tmp_path / "emitted.py"
+        run_scenario.emit_python(
+            {"scenario": self.SCENARIO_DICT},
+            str(out),
+            source=r"C:\Users\test\Unicode\tmp\scenario.json",  # \U \t が含まれる
+        )
+        text = out.read_text(encoding="utf-8")
+        ast.parse(text)  # SyntaxError なら失敗
+
+        # 実際に import して World を組めるか
+        spec = importlib.util.spec_from_file_location("emitted_mod", out)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        W = mod.build()
+        assert len(W.NODES) == 3
+        assert len(W.LINKS) == 2
+
+    def test_emitted_script_preserves_optional_attrs(self, tmp_path):
+        """flow_capacity / free_flow_speed など省略可能な属性が生成物に残る．"""
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts"))
+        import run_scenario
+
+        out = tmp_path / "emitted2.py"
+        run_scenario.emit_python({"scenario": self.SCENARIO_DICT}, str(out), source="test")
+        text = out.read_text(encoding="utf-8")
+        assert '"flow_capacity": 0.4' in text
+        assert '"free_flow_speed": 10' in text
+
+
+# ============================================================
+# 送出時のフレーム量子化（columnar_v3）
+# ============================================================
+
+class TestFrameWireEncodingV3:
+    """/results が返す columnar_v3 のエンコード/デコード整合性．
+
+    v3 は「送出時だけ」の表現で，results_store 側は v2（素の値）のまま．
+    サーバー内の消費側（_get_simulation_data 等）が壊れないことも確認する．
+    """
+
+    @classmethod
+    def setup_class(cls):
+        from server import _store_sim
+        cls.res = _run_uxsim(BOTTLENECK_SCENARIO)
+        cls.sim_id = "wire_v3_test"
+        _store_sim(cls.sim_id, cls.res)
+
+    @classmethod
+    def teardown_class(cls):
+        results_store.pop(cls.sim_id, None)
+
+    @staticmethod
+    def _decode_v3(f):
+        """フロント側 (`isV3` ブランチ) と同じ復元を Python で行う．"""
+        import numpy as np
+        ids = np.cumsum(np.asarray(f["ids"], dtype=np.int64))
+        return {
+            "ids": ids,
+            "xs": np.asarray(f["xs"], dtype=np.float64),
+            "ys": np.asarray(f["ys"], dtype=np.float64),
+            "vs": np.asarray(f["vs"], dtype=np.float64) * 0.1,
+            "alphas": np.asarray(f["alphas"], dtype=np.float64) * 0.001,
+            "li": np.asarray(f["li"]),
+        }
+
+    def test_roundtrip_matches_within_tolerance(self):
+        """量子化 → 復元で，描画に影響しない誤差に収まること．"""
+        import numpy as np
+        from server import _encode_frames_v3
+
+        src = self.res["frames"]
+        enc = _encode_frames_v3(src)
+        assert set(enc.keys()) == set(src.keys())
+
+        for k in src:
+            got = self._decode_v3(enc[k])
+            orig = src[k]
+            # ids と li は完全一致でなければならない（差分符号化は可逆）
+            np.testing.assert_array_equal(got["ids"], np.asarray(orig["ids"]))
+            np.testing.assert_array_equal(got["li"], np.asarray(orig["li"]))
+            # xs/ys は 1 m 丸め，vs は 0.1 m/s，alphas は 0.001
+            assert np.max(np.abs(got["xs"] - np.asarray(orig["xs"]))) <= 0.5
+            assert np.max(np.abs(got["ys"] - np.asarray(orig["ys"]))) <= 0.5
+            assert np.max(np.abs(got["vs"] - np.asarray(orig["vs"]))) <= 0.05
+            assert np.max(np.abs(got["alphas"] - np.asarray(orig["alphas"]))) <= 0.0005
+
+    def test_ids_delta_is_reversible_on_sorted_ids(self):
+        """フレーム内 ids が昇順である前提（差分符号化の条件）を守っていること．"""
+        import numpy as np
+        for f in self.res["frames"].values():
+            ids = np.asarray(f["ids"])
+            assert np.all(np.diff(ids) >= 0), "フレーム内 ids が昇順でない"
+
+    def test_envelope_marks_v3_and_shrinks(self):
+        """エンベロープの frame_format が v3 になり，バイト数が v2 より小さいこと．"""
+        import orjson
+        from server import _build_envelope, _envelope_json_bytes
+
+        v2_env = _build_envelope(self.sim_id, include_result=True)
+        assert v2_env["result"]["frame_format"] == "columnar_v2"
+        v2_bytes = orjson.dumps(
+            v2_env, option=orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_NON_STR_KEYS)
+
+        v3_bytes = _envelope_json_bytes(self.sim_id)
+        assert b'"columnar_v3"' in v3_bytes
+        assert len(v3_bytes) < len(v2_bytes), (
+            f"v3 が v2 より大きい: {len(v3_bytes)} >= {len(v2_bytes)}")
+
+    def test_results_store_is_not_mutated(self):
+        """送出用の変換が results_store の配列を書き換えないこと．
+
+        CLAUDE.md の「結果 dict は保存後に変更しないこと」を守る
+        （_enc_cache は一度作ると使い回されるため，壊すと以後ずっと壊れる）．
+        """
+        import numpy as np
+        from server import _envelope_json_bytes
+
+        before = {k: np.asarray(v["xs"]).copy() for k, v in self.res["frames"].items()}
+        _envelope_json_bytes(self.sim_id)
+        for k, arr in before.items():
+            np.testing.assert_array_equal(np.asarray(self.res["frames"][k]["xs"]), arr)
+        assert results_store[self.sim_id]["frame_format"] == "columnar_v2"
+
+    def test_simulation_data_still_works(self):
+        """サーバー内の集計（LLM に渡すデータ）が素の値を読めていること．"""
+        data = _get_simulation_data(self.sim_id)
+        assert data is not None
+        assert data.get("network_avg_speed")
+        # 速度が 0.1 m/s 単位の「整数」になっていない（=量子化が漏れていない）
+        speeds = [s for s in data["network_avg_speed"] if s]
+        assert speeds, "速度データが空"
+
+
+# ============================================================
+# ツール実行の共通ディスパッチ（_dispatch_tool_blocks）
+# ============================================================
+
+class TestToolDispatch:
+    """ストリーミング経路と同期経路が通る共通 dispatch のテスト．
+
+    以前は初回ラウンド・追加ラウンド × 2 経路の計 4 箇所に同じ dispatch が
+    コピーされており，片方だけ直すと挙動がずれる状態だった．共通化したので
+    「両経路が同じ結果を返すこと」をここで固定する．
+    """
+
+    @staticmethod
+    def _tb(name, args, tid="tu_1"):
+        """anthropic の tool_use ブロック相当のダミー．"""
+        import types
+        return types.SimpleNamespace(name=name, input=args, id=tid, type="tool_use")
+
+    @staticmethod
+    def _body(messages=None, last_sim_id=None):
+        from server import ChatInput
+        return ChatInput(
+            messages=messages or [{"role": "user", "content": "テスト"}],
+            last_sim_id=last_sim_id,
+        )
+
+    def _run(self, blocks, *, follow_up=False, body=None):
+        """dispatch を回して (progress メッセージ列, tool_results, state) を返す．"""
+        import asyncio
+        from server import _ToolTurnState, _dispatch_tool_blocks
+
+        state = _ToolTurnState(body or self._body())
+        progress, results = [], []
+
+        async def go():
+            async for kind, payload in _dispatch_tool_blocks(blocks, state, follow_up=follow_up):
+                if kind == "progress":
+                    progress.append(payload)
+                else:
+                    results.append(payload)
+
+        asyncio.run(go())
+        assert len(results) == 1, "results は最後に 1 回だけ yield されるべき"
+        return progress, results[0], state
+
+    # ── API 不変条件 ──────────────────────────────
+
+    def test_every_tool_use_gets_exactly_one_result(self):
+        """tool_use には必ず 1 対 1 で tool_result を返す（Anthropic API の要求）．
+
+        欠けると API が 400 を返すので，未知のツール名でも結果を積む必要がある．
+        共通化前は同期経路の初回ラウンドにこの else 分岐が無く，
+        未知ツールを呼ばれるとリクエストが壊れる状態だった．
+        """
+        blocks = [
+            self._tb("get_network_info", {"sim_id": "nope"}, "a"),
+            self._tb("get_simulation_data", {"sim_id": "nope"}, "b"),
+            self._tb("totally_unknown_tool", {}, "c"),
+        ]
+        _, results, _ = self._run(blocks)
+        assert [r["tool_use_id"] for r in results] == ["a", "b", "c"]
+        assert all(r["type"] == "tool_result" for r in results)
+        assert all(isinstance(r["content"], str) for r in results)
+
+    def test_unknown_tool_is_reported_not_dropped(self):
+        _, results, _ = self._run([self._tb("no_such_tool", {}, "x")])
+        assert len(results) == 1
+        assert "未知のツール" in results[0]["content"]
+        assert "no_such_tool" in results[0]["content"]
+
+    # ── 実際のツール ──────────────────────────────
+
+    def test_run_simulation_populates_sim_id(self):
+        blocks = [self._tb("run_simulation", {
+            "name": "dispatch_test", "tmax": 600, "deltan": 5,
+            "nodes": [{"name": "A", "x": 0, "y": 0}, {"name": "B", "x": 1000, "y": 0}],
+            "links": [{"name": "AB", "start": "A", "end": "B", "length": 1000}],
+            "demands": [{"orig": "A", "dest": "B", "t_start": 0, "t_end": 300, "flow": 0.4}],
+        }, "r1")]
+        _, results, state = self._run(blocks)
+        try:
+            assert state.sim_id, "run_simulation 後に sim_id が入っていない"
+            assert state.sim_id in results_store
+            assert not results[0].get("is_error"), results[0]["content"]
+        finally:
+            results_store.pop(state.sim_id, None)
+
+    def test_get_simulation_data_fills_cache_for_chart_refs(self):
+        """get_simulation_data の結果が $data 解決用キャッシュに入ること．"""
+        from server import _store_sim
+        sid = "dispatch_data_test"
+        _store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        try:
+            _, results, state = self._run(
+                [self._tb("get_simulation_data", {"sim_id": sid}, "d1")])
+            assert state.last_data_sim_id == sid
+            assert sid in state.sim_data_cache
+            assert "network_avg_speed" in results[0]["content"]
+        finally:
+            results_store.pop(sid, None)
+
+    def test_get_simulation_data_missing_is_not_an_exception(self):
+        _, results, state = self._run(
+            [self._tb("get_simulation_data", {"sim_id": "does_not_exist"}, "d2")])
+        assert "データが見つかりません" in results[0]["content"]
+        assert state.last_data_sim_id is None
+        assert state.sim_data_cache == {}
+
+    # ── 進捗イベント ──────────────────────────────
+
+    def test_progress_messages_differ_between_rounds(self):
+        """初回ラウンドは Step 表記，追加ラウンドは別文言（SSE の見た目を保つ）．"""
+        blocks = [self._tb("get_simulation_data", {"sim_id": "x"}, "p1")]
+        first, _, _ = self._run(blocks, follow_up=False)
+        later, _, _ = self._run(blocks, follow_up=True)
+        assert first == ["データを集計中..."]
+        assert later == ["チャートデータを取得中..."]
+
+    def test_sync_path_helper_drops_progress(self):
+        """_collect_tool_results は進捗を捨てて results だけ返す．"""
+        import asyncio
+        from server import _ToolTurnState, _collect_tool_results
+
+        state = _ToolTurnState(self._body())
+        blocks = [self._tb("get_simulation_data", {"sim_id": "x"}, "s1")]
+        results = asyncio.run(_collect_tool_results(blocks, state))
+        assert isinstance(results, list) and len(results) == 1
+        assert results[0]["tool_use_id"] == "s1"
+
+    def test_both_paths_produce_identical_results(self):
+        """同じ入力なら，進捗を拾う経路（SSE）と捨てる経路（同期）で
+        tool_result が完全に一致すること．共通化の目的そのもの．"""
+        import asyncio
+        from server import _ToolTurnState, _collect_tool_results
+
+        blocks = [
+            self._tb("get_network_info", {"sim_id": "nope"}, "a"),
+            self._tb("get_simulation_data", {"sim_id": "nope"}, "b"),
+            self._tb("unknown", {}, "c"),
+        ]
+        _, streamed, _ = self._run(blocks)
+        sync = asyncio.run(_collect_tool_results(blocks, _ToolTurnState(self._body())))
+        assert streamed == sync
+
+
+# ============================================================
+# ストリーミング経路の通しテスト（Anthropic クライアントをスタブ化）
+# ============================================================
+
+class _FakeUsage:
+    input_tokens = 100
+    output_tokens = 50
+    cache_read_input_tokens = 0
+    cache_creation_input_tokens = 0
+
+
+class _FakeBlock:
+    """anthropic の content block 相当．"""
+
+    def __init__(self, type_, *, text=None, name=None, input=None, id=None):
+        self.type = type_
+        self.text = text
+        self.name = name
+        self.input = input
+        self.id = id
+
+
+class _FakeMessage:
+    def __init__(self, content, stop_reason):
+        self.content = content
+        self.stop_reason = stop_reason
+        self.usage = _FakeUsage()
+
+
+class _FakeStream:
+    """client.messages.stream(...) の戻り値（context manager かつ iterable）．"""
+
+    def __init__(self, message, events):
+        self._message = message
+        self._events = events
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def __iter__(self):
+        return iter(self._events)
+
+    def get_final_message(self):
+        return self._message
+
+
+class _FakeMessages:
+    def __init__(self, script):
+        # script: 呼び出しごとに返す _FakeMessage のリスト
+        self._script = list(script)
+        self.calls = []
+
+    def _next(self, kind, kwargs):
+        self.calls.append((kind, kwargs))
+        if not self._script:
+            raise AssertionError("スタブの応答が尽きた（想定より多く API を呼んでいる）")
+        return self._script.pop(0)
+
+    def create(self, **kwargs):
+        return self._next("create", kwargs)
+
+    def stream(self, **kwargs):
+        msg = self._next("stream", kwargs)
+        events = []
+        for b in msg.content:
+            if b.type == "text":
+                events.append(types_ns(
+                    type="content_block_delta",
+                    delta=types_ns(type="text_delta", text=b.text),
+                ))
+        return _FakeStream(msg, events)
+
+
+def types_ns(**kw):
+    import types
+    return types.SimpleNamespace(**kw)
+
+
+class _FakeAnthropic:
+    def __init__(self, script):
+        self.messages = _FakeMessages(script)
+
+
+class TestChatStreamingPath:
+    """_chat_claude_stream を SSE ごと通して検証する．
+
+    共通化した _dispatch_tool_blocks をストリーミング経路が正しく配線できているか
+    （state 経由の sim_id 引き回し，進捗イベントの転送，done イベントの中身）を見る．
+    実 API は呼ばない．
+    """
+
+    @staticmethod
+    def _collect_sse(body, script):
+        """スタブ化したクライアントで event_generator を回し，SSE イベントを集める．"""
+        import asyncio
+        import sys
+
+        import server
+
+        anthropic_mod = sys.modules.get("anthropic")
+        if anthropic_mod is None:
+            import anthropic as anthropic_mod  # noqa: F811
+
+        orig = anthropic_mod.Anthropic
+        anthropic_mod.Anthropic = lambda **kw: _FakeAnthropic(script)
+        try:
+            async def go():
+                resp = await server._chat_claude_stream(body)
+                chunks = []
+                async for c in resp.body_iterator:
+                    chunks.append(c if isinstance(c, str) else c.decode("utf-8"))
+                return "".join(chunks)
+
+            raw = asyncio.run(go())
+        finally:
+            anthropic_mod.Anthropic = orig
+
+        events = []
+        for part in raw.split("\n\n"):
+            part = part.strip()
+            if part.startswith("data: "):
+                events.append(json.loads(part[6:]))
+        return events
+
+    @staticmethod
+    def _body(text="テスト"):
+        from server import ChatInput
+        return ChatInput(messages=[{"role": "user", "content": text}], last_sim_id=None)
+
+    def test_text_only_response_streams_and_finishes(self):
+        """ツールを呼ばない応答: text_delta が流れ，done で content が返る．"""
+        script = [_FakeMessage([_FakeBlock("text", text="こんにちは．RISUです．")], "end_turn")]
+        events = self._collect_sse(self._body("こんにちは"), script)
+
+        kinds = [e["type"] for e in events]
+        assert "stream_start" in kinds
+        assert "done" in kinds
+        deltas = "".join(e["text"] for e in events if e["type"] == "text_delta")
+        assert deltas == "こんにちは．RISUです．"
+        done = next(e for e in events if e["type"] == "done")
+        assert done["content"] == "こんにちは．RISUです．"
+        assert done["sim_id"] is None
+        assert "usage" in done
+
+    def test_tool_round_sets_sim_id_and_emits_progress(self):
+        """run_simulation を経由すると done に sim_id が乗り，進捗が流れること．
+
+        共通 dispatch が state.sim_id に書き，ストリーミング側がそれを読む配線の確認．
+        """
+        scenario = {
+            "name": "sse_test", "tmax": 600, "deltan": 5,
+            "nodes": [{"name": "A", "x": 0, "y": 0}, {"name": "B", "x": 1000, "y": 0}],
+            "links": [{"name": "AB", "start": "A", "end": "B", "length": 1000}],
+            "demands": [{"orig": "A", "dest": "B", "t_start": 0, "t_end": 300, "flow": 0.4}],
+        }
+        script = [
+            # 1回目: tool_use
+            _FakeMessage([_FakeBlock("tool_use", name="run_simulation",
+                                     input=scenario, id="tu_a")], "tool_use"),
+            # ツール結果を受けた最終回答（ストリーミング）
+            _FakeMessage([_FakeBlock("text", text="シミュレーションが完了しました．")], "end_turn"),
+        ]
+        events = self._collect_sse(self._body("道路を作って"), script)
+        done = next(e for e in events if e["type"] == "done")
+        try:
+            assert done["sim_id"], "done に sim_id が乗っていない"
+            assert done["sim_id"] in results_store
+            assert done["content"] == "シミュレーションが完了しました．"
+            progress = [e["message"] for e in events if e["type"] == "progress"]
+            assert any("UXsim" in m for m in progress), progress
+        finally:
+            results_store.pop(done.get("sim_id"), None)
+
+    def test_unknown_tool_does_not_break_the_stream(self):
+        """未知ツールでも tool_result が返り，ストリームが done まで到達する．"""
+        script = [
+            _FakeMessage([_FakeBlock("tool_use", name="bogus_tool",
+                                     input={}, id="tu_b")], "tool_use"),
+            _FakeMessage([_FakeBlock("text", text="対応していない操作でした．")], "end_turn"),
+        ]
+        events = self._collect_sse(self._body("なにか"), script)
+        assert [e["type"] for e in events].count("done") == 1
+        done = next(e for e in events if e["type"] == "done")
+        assert done["sim_id"] is None
+        assert done["content"] == "対応していない操作でした．"
+
+    def test_api_error_becomes_error_event_not_crash(self):
+        """スタブを尽きさせて例外を起こし，error イベントで終わることを確認．"""
+        events = self._collect_sse(self._body("x"), [])
+        assert events and events[-1]["type"] == "error"
+        assert "message" in events[-1]
+
+
+# ============================================================
+# ライセンス衛生（MIT で公開できる状態を保つ）
+# ============================================================
+
+class TestLicenseHygiene:
+    """RISU を MIT で配布できる前提を壊さないためのテスト．
+
+    uxsim は PyQt5 (GPL v3) を必須依存として宣言しているため，pip install すると
+    環境には入る．RISU 自身がそれを import しない限り，MIT 配布の妨げにはならない．
+    「いつのまにか import されるようになっていた」を検知するのがここの目的．
+    詳細は THIRD_PARTY_LICENSES.md を参照．
+    """
+
+    GPL_MODULES = ("PyQt5", "PyQt6", "PySide2", "PySide6")
+
+    def test_risu_does_not_import_qt(self):
+        """server.py を読み込み，シミュレーションを流しても Qt を import しない．"""
+        import subprocess
+
+        code = f'''
+import sys, os
+os.environ["LLM_BACKEND"] = "mock"
+import server
+sc = server.SimulationInput(
+    name="lic", tmax=300, deltan=5,
+    nodes=[{{"name": "A", "x": 0, "y": 0}}, {{"name": "B", "x": 500, "y": 0}}],
+    links=[{{"name": "AB", "start": "A", "end": "B", "length": 500}}],
+    demands=[{{"orig": "A", "dest": "B", "t_start": 0, "t_end": 100, "flow": 0.3}}],
+)
+res = server._run_uxsim(sc)
+server._store_sim("lic", res)
+server._envelope_json_bytes("lic")
+server._get_simulation_data("lic")
+qt = [m for m in sys.modules if m.split(".")[0] in {self.GPL_MODULES!r}]
+print("QT:" + ",".join(sorted(qt)))
+'''
+        r = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=os.path.dirname(os.path.dirname(__file__)),
+            capture_output=True, text=True,
+        )
+        assert r.returncode == 0, r.stderr
+        line = next(ln for ln in r.stdout.splitlines() if ln.startswith("QT:"))
+        loaded = [m for m in line[3:].split(",") if m]
+        assert not loaded, (
+            f"GPL ライセンスの Qt モジュールが読み込まれた: {loaded}．"
+            "MIT 配布の前提が崩れるので，依存の追加を見直すこと"
+        )
+
+    def test_risu_runs_without_qt_installed(self):
+        """PyQt5 が入っていない環境でも全経路が動くこと．
+
+        利用者が `pip uninstall PyQt5` しても RISU が壊れない，という
+        THIRD_PARTY_LICENSES.md の記述を裏付ける．
+        """
+        import subprocess
+
+        code = '''
+import sys, os
+
+class _Block:
+    BAD = ("PyQt5", "PyQt6", "PySide2", "PySide6")
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] in self.BAD:
+            raise ImportError(name + " は未インストールという想定")
+        return None
+
+sys.meta_path.insert(0, _Block())
+os.environ["LLM_BACKEND"] = "mock"
+import server
+sc = server.SimulationInput(
+    name="noqt", tmax=300, deltan=5,
+    nodes=[{"name": "A", "x": 0, "y": 0}, {"name": "B", "x": 500, "y": 0}],
+    links=[{"name": "AB", "start": "A", "end": "B", "length": 500}],
+    demands=[{"orig": "A", "dest": "B", "t_start": 0, "t_end": 100, "flow": 0.3}],
+)
+res = server._run_uxsim(sc)
+server._store_sim("noqt", res)
+assert b'"columnar_v3"' in server._envelope_json_bytes("noqt")
+assert server._get_simulation_data("noqt")
+
+from uxsim_bridge import build_world, scenario_from_dict
+W = build_world(scenario_from_dict({
+    "name": "b", "tmax": 200, "deltan": 5,
+    "nodes": [{"name": "A", "x": 0, "y": 0}, {"name": "B", "x": 500, "y": 0}],
+    "links": [{"name": "AB", "start": "A", "end": "B", "length": 500}],
+    "demands": [{"orig": "A", "dest": "B", "t_start": 0, "t_end": 100, "flow": 0.3}],
+}), disable_basic_analysis=True)
+W.exec_simulation()
+print("OK")
+'''
+        r = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=os.path.dirname(os.path.dirname(__file__)),
+            capture_output=True, text=True,
+        )
+        assert r.returncode == 0, r.stderr
+        assert "OK" in r.stdout
+
+    def test_bundled_vendor_files_keep_license_headers(self):
+        """同梱している marked / DOMPurify のライセンス表記が消えていないこと．
+
+        MIT / Apache-2.0 いずれも著作権表示の保持が条件なので，
+        ミニファイ済みファイルの先頭コメントを削ってはいけない．
+        """
+        root = os.path.dirname(os.path.dirname(__file__))
+        vendor = os.path.join(root, "static", "vendor")
+        expected = {
+            "marked.umd.min.js": ("marked", "license", "Do NOT use SRI"),
+            "purify.min.js": ("DOMPurify", "license"),
+        }
+        for fname, needles in expected.items():
+            path = os.path.join(vendor, fname)
+            assert os.path.exists(path), f"{fname} が無い"
+            head = open(path, encoding="utf-8").read(600)
+            assert any(n.lower() in head.lower() for n in needles), (
+                f"{fname} の先頭にライセンス表記が見当たらない")
+
+    def test_third_party_licenses_doc_exists(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        for fname in ("LICENSE", "THIRD_PARTY_LICENSES.md"):
+            path = os.path.join(root, fname)
+            assert os.path.exists(path), f"{fname} が無い"
+        text = open(os.path.join(root, "LICENSE"), encoding="utf-8").read()
+        assert "MIT License" in text
+
+
+# ============================================================
+# /results の圧縮方式ネゴシエーション（zstd / gzip / identity）
+# ============================================================
+
+class TestResultsEncodingNegotiation:
+    """Accept-Encoding に応じて圧縮方式を選ぶ経路のテスト．
+
+    zstd は gzip より小さく速い（grid20 相当で 16.1MB/0.47s → 5.4MB/0.07s）ので
+    優先するが，zstandard が無い環境・zstd 非対応のクライアントでも
+    必ず動かなければならない．フォールバックの網羅がここの目的．
+    """
+
+    @classmethod
+    def setup_class(cls):
+        import server
+        cls.sid = "test_enc_negotiation"
+        server._store_sim(cls.sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+
+    @classmethod
+    def teardown_class(cls):
+        results_store.pop(cls.sid, None)
+
+    @staticmethod
+    def _client():
+        from fastapi.testclient import TestClient
+        import server
+        return TestClient(server.app)
+
+    # ── 選択ロジック単体 ──────────────────────────
+
+    def test_negotiate_prefers_zstd_when_available(self):
+        import server
+        if server._zstd is None:
+            pytest.skip("zstandard 未インストール")
+        assert server._negotiate_encoding("gzip, deflate, br, zstd") == "zstd"
+        assert server._negotiate_encoding("ZSTD") == "zstd", "大文字small文字を無視すべき"
+
+    def test_negotiate_falls_back_to_gzip(self):
+        import server
+        assert server._negotiate_encoding("gzip, deflate, br") == "gzip"
+        assert server._negotiate_encoding("gzip") == "gzip"
+
+    def test_negotiate_identity_when_nothing_supported(self):
+        import server
+        assert server._negotiate_encoding("") == "identity"
+        assert server._negotiate_encoding("identity") == "identity"
+        assert server._negotiate_encoding(None) == "identity"
+
+    def test_negotiate_uses_gzip_if_zstandard_missing(self, monkeypatch):
+        """zstandard が入っていない環境では zstd を要求されても gzip になる．"""
+        import server
+        monkeypatch.setattr(server, "_zstd", None)
+        assert server._negotiate_encoding("gzip, deflate, br, zstd") == "gzip"
+
+    # ── エンドポイントの実挙動 ────────────────────
+
+    def test_all_encodings_return_identical_payload(self):
+        """圧縮方式が変わっても中身は同一（TestClient が透過的に解凍する）．"""
+        import server
+        c = self._client()
+        base = c.get(f"/results/{self.sid}", headers={"Accept-Encoding": "identity"})
+        assert base.status_code == 200
+        assert base.headers.get("content-encoding") is None
+        expected = base.json()
+
+        gz = c.get(f"/results/{self.sid}", headers={"Accept-Encoding": "gzip"})
+        assert gz.headers.get("content-encoding") == "gzip"
+        assert gz.json() == expected
+
+        if server._zstd is not None:
+            zs = c.get(f"/results/{self.sid}", headers={"Accept-Encoding": "gzip, zstd"})
+            assert zs.headers.get("content-encoding") == "zstd"
+            # TestClient(httpx) が zstd を解凍できない場合は自前で解凍して比較する
+            try:
+                got = zs.json()
+            except Exception:
+                got = json.loads(server._zstd.ZstdDecompressor().decompress(zs.content))
+            assert got == expected
+
+    def test_vary_header_is_set_exactly_once(self):
+        """キャッシュが方式違いを取り違えないよう Vary を返す．重複させないこと．
+
+        非圧縮の応答には GZipMiddleware が Vary を足すので，自前でも付けると
+        `Vary: Accept-Encoding, Accept-Encoding` になる（実際にそうなっていた）．
+        """
+        c = self._client()
+        for ae in ("identity", "gzip", "gzip, zstd"):
+            r = c.get(f"/results/{self.sid}", headers={"Accept-Encoding": ae})
+            vary = r.headers.get("vary", "")
+            tokens = [t.strip().lower() for t in vary.split(",") if t.strip()]
+            assert tokens == ["accept-encoding"], f"Vary が不正（{ae}）: {vary!r}"
+
+    def test_cache_is_per_encoding_and_reused(self):
+        """方式ごとに別キャッシュを持ち，2 回目は再圧縮しない．"""
+        import server
+        sid = "test_enc_cache"
+        server._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        try:
+            c = self._client()
+            r1 = c.get(f"/results/{sid}", headers={"Accept-Encoding": "gzip"})
+            cache = results_store[sid]["_enc_cache"]
+            assert set(cache) == {"gzip"}, "要求していない方式まで作っている"
+
+            r2 = c.get(f"/results/{sid}", headers={"Accept-Encoding": "gzip"})
+            assert r2.content == r1.content
+            assert results_store[sid]["_enc_cache"]["gzip"] is cache["gzip"], "再圧縮している"
+
+            if server._zstd is not None:
+                c.get(f"/results/{sid}", headers={"Accept-Encoding": "zstd"})
+                assert set(results_store[sid]["_enc_cache"]) == {"gzip", "zstd"}
+        finally:
+            results_store.pop(sid, None)
+
+    def test_zstd_payload_is_smaller_than_gzip(self):
+        """zstd を選ぶ意味があること（同じ結果で実際に小さい）．"""
+        import server
+        if server._zstd is None:
+            pytest.skip("zstandard 未インストール")
+        gz = server._envelope_compressed_bytes(self.sid, "gzip")
+        zs = server._envelope_compressed_bytes(self.sid, "zstd")
+        assert len(zs) < len(gz), f"zstd={len(zs)} >= gzip={len(gz)}"
+
+    def test_gzip_wrapper_still_works(self):
+        """既存の _envelope_gzip_bytes（後方互換ラッパー）が生きていること．"""
+        import server
+        assert server._envelope_gzip_bytes(self.sid) == \
+            server._envelope_compressed_bytes(self.sid, "gzip")
+
+
+# ============================================================
+# 待ち受け設定（認証が無いので既定は localhost に限定する）
+# ============================================================
+
+class TestBindDefaults:
+    """RISU は認証を持たないため，既定で外部に開いてはいけない．
+
+    0.0.0.0 で待ち受けると，同一 LAN の誰でもシミュレーション実行・結果閲覧・
+    /chat 経由の LLM 呼び出し（= サーバー所有者の API キーでの課金）ができてしまう．
+    「うっかり公開」を防ぐため，既定値をここで固定する．
+    """
+
+    def test_default_host_is_loopback_only(self):
+        import server
+        assert server.RISU_HOST == "127.0.0.1", (
+            f"既定の待ち受けが {server.RISU_HOST} になっている．"
+            "認証が無いので既定は 127.0.0.1 でなければならない"
+        )
+
+    def test_default_reload_is_off(self):
+        """オートリロードは開発用．既定で有効だとプロセスが 2 つ起動する．"""
+        import server
+        assert server.RISU_RELOAD is False
+
+    def test_host_and_port_are_overridable(self, monkeypatch):
+        """別マシンから使いたい人は環境変数で明示的に開ける．"""
+        import importlib
+
+        import server as _s
+        monkeypatch.setenv("RISU_HOST", "0.0.0.0")
+        monkeypatch.setenv("RISU_PORT", "9000")
+        monkeypatch.setenv("RISU_RELOAD", "1")
+        try:
+            reloaded = importlib.reload(_s)
+            assert reloaded.RISU_HOST == "0.0.0.0"
+            assert reloaded.RISU_PORT == 9000
+            assert reloaded.RISU_RELOAD is True
+        finally:
+            monkeypatch.delenv("RISU_HOST", raising=False)
+            monkeypatch.delenv("RISU_PORT", raising=False)
+            monkeypatch.delenv("RISU_RELOAD", raising=False)
+            importlib.reload(_s)   # 他のテストに影響しないよう戻す
+
+    def test_cors_default_is_localhost_only(self):
+        """CORS も既定は localhost のみ（ブラウザ経由の横取りを防ぐ）．"""
+        import server
+        assert all("localhost" in o or "127.0.0.1" in o for o in server.ALLOWED_ORIGINS), \
+            f"CORS の既定に外部オリジンが含まれている: {server.ALLOWED_ORIGINS}"
