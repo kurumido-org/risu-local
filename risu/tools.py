@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from .aggregate import get_simulation_data
 from .importers import run_osm_import
 from .results import results_store, store_sim
-from .runtime import executor
+from .runtime import executor, log
 from .scenario_ops import apply_modifications, expand_run_simulation_args, generate_osm_demands
 from .schema import ChatInput, SimulationInput
 from .simulation import apply_link_geometries, run_uxsim_async, validate_scenario_size
@@ -382,8 +382,7 @@ async def dispatch_tool_blocks(tool_blocks, state: ToolTurnState, *, follow_up: 
                     "link_count": len(scenario["links"]),
                 }, ensure_ascii=False)))
             except Exception as e:
-                import traceback
-                traceback.print_exc()
+                log.exception("unexpected error")
                 results.append(_tool_result(tb.id, f"OSMインポートエラー: {e!s}", True))
 
         elif name == "get_simulation_data":

@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -14,7 +16,9 @@ __all__ = [
     "RISU_SCHEMA_VERSION",
     "RISU_VERSION",
     "RUNTIME_STATUS",
+    "configure_logging",
     "executor",
+    "log",
 ]
 
 # ──────────────────────────────────────────────
@@ -22,6 +26,24 @@ __all__ = [
 # ──────────────────────────────────────────────
 # .env の読込は，以下の os.environ.get より必ず先に行うこと
 load_dotenv()
+
+# ── ログ ──
+# サーバー全体で logger "risu" を使う（print しない）．uvicorn のログと同じ stderr に出る．
+# レベルは RISU_LOG_LEVEL（既定 INFO，DEBUG で詳細）．propagate は既定のままなので，
+# pytest の caplog（root に付く）でも拾える．
+log = logging.getLogger("risu")
+
+
+def configure_logging() -> None:
+    level = os.getenv("RISU_LOG_LEVEL", "INFO").upper()
+    log.setLevel(getattr(logging, level, logging.INFO))
+    if not log.handlers:
+        h = logging.StreamHandler()
+        h.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s risu: %(message)s", "%H:%M:%S"))
+        log.addHandler(h)
+
+
+configure_logging()
 
 # ──────────────────────────────────────────────
 # 再現性のためのバージョン情報 / DL JSON スキーマ

@@ -857,6 +857,7 @@ curl -X POST http://localhost:8001/simulate \
 | `RISU_MAX_UPLOAD_BYTES` | `10485760` | アップロード上限（10MB） |
 | `RISU_MAX_RESULTS` | `30` | メモリに保持する結果の件数．超えると古い順に破棄（永続化していればディスクから戻る） |
 | `RISU_RESULTS_DIR` | — | 設定すると結果をこのディレクトリに保存し，再起動後も読める（[§3.6](#36-結果の保存)） |
+| `RISU_LOG_LEVEL` | `INFO` | サーバーログの詳細度（`DEBUG` / `INFO` / `WARNING`）．ログは `risu:` の接頭辞で stderr に出る |
 
 ### 可視化・転送
 

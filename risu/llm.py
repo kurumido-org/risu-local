@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 from .aggregate import get_simulation_data
 from .prompts import CLAUDE_TOOLS, MOCK_SCENARIOS, SYSTEM_PROMPT, mock_llm_response
 from .results import store_sim
+from .runtime import log
 from .schema import ChatInput, SimulationInput
 from .simulation import run_uxsim_async
 from .tools import (
@@ -171,7 +172,7 @@ def trim_history(msgs: list[dict]) -> list[dict]:
         first = kept[0]
         kept[0] = {"role": "user",
                    "content": "（これより前の会話は省略）\n\n" + _msg_text(first["content"])}
-        print(f"[RISU] history trimmed: {len(msgs)} -> {len(kept)} messages "
+        log.info(f"history trimmed: {len(msgs)} -> {len(kept)} messages "
               f"({sum(sizes)} -> {sum(len(_msg_text(m['content'])) for m in kept)} chars)")
     return kept
 
@@ -291,7 +292,7 @@ def _resolve_chart_refs(obj, data_cache: dict, default_sim_id: str | None):
                 if isinstance(cur, dict) and part in cur:
                     cur = cur[part]
                 else:
-                    print(f"[RISU] chart $data unresolved: {obj['$data']!r} (sim {sim_id!r})")
+                    log.warning(f"chart $data unresolved: {obj['$data']!r} (sim {sim_id!r})")
                     return []
             return cur
         return {k: _resolve_chart_refs(v, data_cache, default_sim_id) for k, v in obj.items()}
@@ -313,7 +314,7 @@ def extract_charts(text: str, data_cache: dict, default_sim_id: str | None) -> t
         try:
             chart_json = json.loads(m.group(1))
         except json.JSONDecodeError as e:
-            print(f"[RISU] chart JSON parse failed: {e}; raw={m.group(1)[:200]!r}")
+            log.warning(f"chart JSON parse failed: {e}; raw={m.group(1)[:200]!r}")
             continue
         charts.append(_resolve_chart_refs(chart_json, data_cache, default_sim_id))
     clean_text = _CHART_PATTERN.sub('', text).strip()
@@ -345,20 +346,14 @@ def log_usage(context: str, response) -> dict:
     total_in = in_tok + cache_read + cache_create
     cache_pct = (cache_read / max(1, total_in)) * 100
     try:
-        msg = (
-            f"[RISU usage] {context}: "
+        # logging のハンドラは encode 失敗を握りつぶすので，cp932 コンソールでも落ちない
+        log.info(
+            f"usage {context}: "
             f"in={in_tok}+cache_read={cache_read}+cache_create={cache_create}/out={out_tok} "
             f"(cache {cache_pct:.0f}%) ~JPY {cost_jpy:.2f}"
         )
-        # Windows cp932 コンソール対策: エンコード不能文字は置換
-        try:
-            print(msg)
-        except UnicodeEncodeError:
-            import sys
-            sys.stdout.buffer.write(msg.encode("utf-8", errors="replace") + b"\n")
-            sys.stdout.flush()
     except Exception as e:
-        print(f"[RISU usage] log failed: {e!r}")
+        log.warning(f"usage log failed: {e!r}")
     return {
         "input_tokens": in_tok,
         "output_tokens": out_tok,
@@ -562,8 +557,8 @@ async def chat_claude_stream(body: ChatInput):
             if "```chart" in clean_text.lower() or "```\nchart" in clean_text.lower():
                 # 抽出漏れの兆候．ログに残してデバッグ可能に
                 idx = clean_text.lower().find("```")
-                print(f"[RISU] WARN: chart fence still present after strip; near={clean_text[max(0,idx-20):idx+200]!r}")
-            print(f"[RISU] chat done: charts={len(charts)}, clean_text_len={len(clean_text)}")
+                log.warning(f"chart fence still present after strip; near={clean_text[max(0,idx-20):idx+200]!r}")
+            log.info(f"chat done: charts={len(charts)}, clean_text_len={len(clean_text)}")
 
             # このターンでシミュレーションを実行していなければ sim_id は None のまま
             # （グローバル最新へのフォールバックは無関係な結果を表示させるため廃止）
@@ -574,7 +569,7 @@ async def chat_claude_stream(body: ChatInput):
             yield _sse_event(resp)
 
         except anthropic.AuthenticationError:
-            print("[RISU] CRITICAL: ANTHROPIC_API_KEY invalid!")
+            log.critical("ANTHROPIC_API_KEY invalid!")
             yield _sse_event({"type": "error", "message": "サーバー側で LLM に接続できません．運営にお問い合わせください．"})
         except anthropic.RateLimitError:
             yield _sse_event({"type": "error", "message": "LLM が混雑しています．しばらく待って再試行してください．"})
@@ -585,15 +580,14 @@ async def chat_claude_stream(body: ChatInput):
             elif status and 500 <= status < 600:
                 yield _sse_event({"type": "error", "message": "LLM サーバー側のエラーです．しばらく後で再試行してください．"})
             else:
-                print(f"[RISU] Claude APIStatusError {status}: {e}")
+                log.error(f"Claude APIStatusError {status}: {e}")
                 yield _sse_event({"type": "error", "message": f"LLM エラー（コード: {status}）"})
         except anthropic.APIConnectionError:
             yield _sse_event({"type": "error", "message": "LLM に接続できません．ネットワーク接続を確認してください．"})
         except Exception as e:
-            import traceback
-            traceback.print_exc()
+            log.exception("unexpected error")
             # ユーザーには詳細を伏せる
-            print(f"[RISU] chat error: {e.__class__.__name__}: {e}")
+            log.error(f"chat error: {e.__class__.__name__}: {e}")
             yield _sse_event({"type": "error", "message": "処理中にエラーが発生しました．もう一度お試しください．"})
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
@@ -701,8 +695,7 @@ async def _chat_claude(body: ChatInput):
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        log.exception("unexpected error")
         raise HTTPException(500, detail=f"Claude エラー: {str(e)}")
 
 

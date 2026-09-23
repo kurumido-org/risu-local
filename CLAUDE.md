@@ -246,7 +246,7 @@ MCP（`mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
   毎回変わってキャッシュが当たらない）．フロントは tool_use / tool_result を履歴に
   残さない（最終テキストのみ）．
 - **計測**: 1 ターンの使用量は `UsageTally` が集計し，done イベントの `usage` で
-  フロントへ（吹き出し下の `.usage-meta`）．サーバーログにも `[RISU usage]` が出る．
+  フロントへ（吹き出し下の `.usage-meta`）．サーバーログにも `usage ...` が出る（logger `risu`）．
 - **テスト**: `TestLLMTokenSaving`（8 件）・`TestConversationContext`（4 件）．
 
 ### 3.5 結果データの表現 — 保存は v2，送出は v3
@@ -359,7 +359,8 @@ MCP（`mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
 | **LLM ツールを足す** | `dispatch_tool_blocks` に分岐を 1 つ（§3.2）．`CLAUDE_TOOLS` の定義と `SYSTEM_PROMPT` の指示も更新．tool_result を必ず返す |
 | **フレームの精度・形式を変える** | サーバーの `encode_frames_v3` とフロントの `isV3` を**同時に**（§3.5）．v2 読み込み経路は残す |
 | **圧縮方式を変える** | `negotiate_encoding` と `_enc_cache` のキー．非圧縮応答に `Vary` を付けない（§5） |
-| **SYSTEM_PROMPT を変える** | system に動的な文字列を入れない（§3.4）．トークン量は `[RISU usage]` で確認 |
+| **SYSTEM_PROMPT を変える** | system に動的な文字列を入れない（§3.4）．トークン量はログの `usage` 行で確認 |
+| **ログを出す** | `from .runtime import log` で logger `risu` を使う（`print` は `TestLogging` が弾く）．info = 通常の進行，warning = 劣化して続行，error = 失敗．`RISU_LOG_LEVEL` で制御 |
 | **依存を追加する** | `requirements.txt`（上限付き）+ `pyproject.toml`．`requirements.lock.txt` は clean な venv の `pip freeze` で作り直す（手順はファイル冒頭）．ライセンスは THIRD_PARTY_LICENSES.md に追記．CI の `licenses` ジョブが GPL 系を弾く |
 | **CI が依存の更新で落ちた** | 週次 / 手動実行は最新版で走る（`LOCK_ARGS=--upgrade`）．push/PR は lock 固定なので，落ちたら「依存が動いた」と分かる．直したら lock を作り直す |
 | **`uxsim_bridge.py` を触る** | FastAPI / pydantic / anthropic を import しないこと（§3.1） |

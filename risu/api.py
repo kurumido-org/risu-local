@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import traceback as _tb
 import uuid
 from contextlib import asynccontextmanager
 
@@ -32,7 +31,7 @@ from .results import (
     results_store,
     store_sim,
 )
-from .runtime import RUNTIME_STATUS, executor
+from .runtime import RUNTIME_STATUS, executor, log
 from .scenario_ops import generate_osm_demands
 from .schema import ChatInput, ChatMessage, SimulationInput, scenario_to_input
 from .simulation import MAX_TMAX, apply_link_geometries, run_uxsim_async, startup_selfcheck, validate_scenario_size
@@ -65,7 +64,7 @@ RISU_RELOAD = os.getenv("RISU_RELOAD", "").lower() in ("1", "true", "yes")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if RESULTS_DIR:
-        print(f"[RISU] results dir: {os.path.abspath(RESULTS_DIR)} "
+        log.info(f"results dir: {os.path.abspath(RESULTS_DIR)} "
               f"({len(persisted_ids())} persisted results, loaded on demand)")
     if os.getenv("RISU_STARTUP_SELFCHECK", "1").lower() not in ("0", "false", "no"):
         await asyncio.get_event_loop().run_in_executor(executor, startup_selfcheck)
@@ -98,10 +97,8 @@ async def global_exception_handler(request, exc):
     # HTTPException は FastAPI が処理するが，念のため
     if isinstance(exc, HTTPException):
         raise exc
-    trace = _tb.format_exc()
     path = request.url.path if request else "?"
-    print(f"[RISU unhandled] path={path} error={exc.__class__.__name__}: {exc}")
-    print(trace)
+    log.error(f"unhandled: path={path} error={exc.__class__.__name__}: {exc}", exc_info=exc)
     return _JSONResp(
         status_code=500,
         content={

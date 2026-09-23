@@ -32,7 +32,7 @@ try:
 except ImportError:  # orjson 未インストール時は標準 JSON にフォールバック
     orjson = None
 
-from .runtime import RISU_SCHEMA_VERSION, RISU_VERSION, UXSIM_VERSION, executor
+from .runtime import RISU_SCHEMA_VERSION, RISU_VERSION, UXSIM_VERSION, executor, log
 
 # ──────────────────────────────────────────────
 # グローバル状態（本番はRedis等に置き換える）
@@ -124,7 +124,7 @@ def store_sim(sim_id: str, result: dict, source: dict | None = None) -> None:
     }
     # 追加と追い出し（古い順．永続化していればディスクから戻る）は 1 つのロック区間で
     for old_id in results_store.put(sim_id, result, MAX_RESULTS):
-        print(f"[RISU] results_store evicted {old_id} (limit {MAX_RESULTS})")
+        log.info(f"results_store evicted {old_id} (limit {MAX_RESULTS})")
     # 永続化は executor で（圧縮に数百 ms かかることがあり，イベントループを塞がない）．
     # 戻り値の Future はテストが完了を待つために使う．
     if RESULTS_DIR:
@@ -182,10 +182,10 @@ def _persist_sim(sim_id: str) -> str | None:
         with open(tmp, "wb") as f:
             f.write(blob)
         os.replace(tmp, path)
-        print(f"[RISU] persisted {sim_id} -> {path} ({len(blob)/1e6:.1f}MB)")
+        log.info(f"persisted {sim_id} -> {path} ({len(blob)/1e6:.1f}MB)")
         return path
     except Exception as e:   # 永続化の失敗でシミュレーション自体は失敗させない
-        print(f"[RISU] persist {sim_id} failed: {e.__class__.__name__}: {e}")
+        log.warning(f"persist {sim_id} failed: {e.__class__.__name__}: {e}")
         return None
 
 
@@ -262,7 +262,7 @@ def _load_persisted(path: str) -> dict:
     enc = "zstd" if path.endswith(".zst") else ("gzip" if path.endswith(".gz") else None)
     if enc:
         result["_enc_cache"] = {enc: blob}
-    print(f"[RISU] loaded persisted result {os.path.basename(path)} ({len(blob)/1e6:.1f}MB)")
+    log.info(f"loaded persisted result {os.path.basename(path)} ({len(blob)/1e6:.1f}MB)")
     return result
 
 
@@ -415,7 +415,7 @@ def envelope_compressed_bytes(sim_id: str, encoding: str) -> bytes:
         blob = gzip.compress(data, compresslevel=RESULTS_GZIP_LEVEL)
     with results_store.lock:
         blob = cache.setdefault(encoding, blob)   # 先に入れた方を採用
-    print(f"[RISU] /results/{sim_id}: json={len(data)/1e6:.1f}MB ({t1-t0:.2f}s) "
+    log.info(f"/results/{sim_id}: json={len(data)/1e6:.1f}MB ({t1-t0:.2f}s) "
           f"{encoding}={len(blob)/1e6:.1f}MB ({time.perf_counter()-t1:.2f}s)")
     return blob
 

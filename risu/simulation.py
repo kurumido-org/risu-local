@@ -8,14 +8,13 @@ import asyncio
 import math
 import os
 import time
-import traceback as _tb
 from typing import Any, NamedTuple
 
 from fastapi import HTTPException
 
 from uxsim_bridge import build_world
 
-from .runtime import RUNTIME_STATUS, UXSIM_VERSION, executor
+from .runtime import RUNTIME_STATUS, UXSIM_VERSION, executor, log
 from .schema import SimulationInput
 
 # モジュール外から使う名前（他モジュール・server.py・scripts・tests）．これ以外は内部実装．
@@ -82,8 +81,7 @@ async def run_uxsim_async(scenario) -> dict:
         raise HTTPException(400, detail=f"シナリオが不正です: {e}")
     except Exception as e:
         # その他の UXsim 内部エラー
-        print(f"[RISU uxsim error] {e.__class__.__name__}: {e}")
-        print(_tb.format_exc())
+        log.error(f"uxsim error: {e.__class__.__name__}: {e}", exc_info=e)
         raise HTTPException(
             500,
             detail=f"シミュレーション計算エラー: {e.__class__.__name__}",
@@ -253,7 +251,7 @@ def _collect_run_points(W, n_links: int, max_frames: int) -> _RunPoints:
             )
         except Exception as e:  # 内部 API 変更時は遅い経路にフォールバック
             RUNTIME_STATUS["fast_path_error"] = f"{e.__class__.__name__}: {e}"
-            print(f"[RISU] flat vehicle log fast path unavailable ({e.__class__.__name__}: {e}); "
+            log.warning(f"flat vehicle log fast path unavailable ({e.__class__.__name__}: {e}); "
                   f"falling back to per-vehicle logs")
 
     link_idx_map = {lk.name: i for i, lk in enumerate(W.LINKS)}
@@ -450,7 +448,7 @@ def run_uxsim(scenario: SimulationInput) -> dict:
         if MAX_FRAME_POINTS > 0 and fidx.size > MAX_FRAME_POINTS:
             vehicle_sample_step = int(math.ceil(fidx.size / MAX_FRAME_POINTS))
             keep = (vid_all % vehicle_sample_step) == 0
-            print(f"[RISU] frame points {fidx.size:,} > {MAX_FRAME_POINTS:,}: "
+            log.info(f"frame points {fidx.size:,} > {MAX_FRAME_POINTS:,}: "
                   f"sampling every {vehicle_sample_step} vehicles -> {int(keep.sum()):,} points")
             fidx, li_all, vid_all = fidx[keep], li_all[keep], vid_all[keep]
             x_all, v_all = x_all[keep], v_all[keep]
@@ -507,7 +505,7 @@ def run_uxsim(scenario: SimulationInput) -> dict:
     for f in features:
         c = f["geometry"]["coordinates"]
         coord_pairs.add((c[0][0], c[0][1], c[1][0], c[1][1]))
-    print(f"[RISU] Simulation done: {len(W.NODES)} nodes, {len(W.LINKS)} links, "
+    log.info(f"Simulation done: {len(W.NODES)} nodes, {len(W.LINKS)} links, "
           f"{len(features)} GeoJSON features, {len(coord_pairs)} unique coord pairs "
           f"(exec={elapsed:.2f}s, post={post_elapsed:.2f}s, backend={backend}, "
           f"fast_path={'on' if rp.fast_path else 'OFF'})")
@@ -563,7 +561,7 @@ def run_uxsim(scenario: SimulationInput) -> dict:
                 "deltat":   float(W.DELTAT),
             })
     except Exception as e:
-        print(f"[RISU] signal metadata extraction failed: {e}")
+        log.warning(f"signal metadata extraction failed: {e}")
         signals = []
 
     return {
@@ -611,12 +609,12 @@ def startup_selfcheck() -> None:
         )
         rt = run_uxsim(tiny)["_runtime"]
     except Exception as e:  # 起動は止めない
-        print(f"[RISU] startup self-check failed: {e.__class__.__name__}: {e}")
+        log.warning(f"startup self-check failed: {e.__class__.__name__}: {e}")
         return
     if rt["backend"] == "cpp" and rt["fast_path"]:
-        print(f"[RISU] uxsim {rt['uxsim_version']}: backend=cpp, vehicle-log fast path=on")
+        log.info(f"uxsim {rt['uxsim_version']}: backend=cpp, vehicle-log fast path=on")
     else:
-        print(f"[RISU] WARNING: uxsim {rt['uxsim_version']}: backend={rt['backend']}, "
+        log.warning(f"uxsim {rt['uxsim_version']}: backend={rt['backend']}, "
               f"fast path=OFF -> 後処理が車両別ログのフォールバックになり数万台で数秒遅くなります．"
               f"CLAUDE.md §3.6 の内部 API を確認してください"
               + (f" ({RUNTIME_STATUS['fast_path_error']})" if RUNTIME_STATUS.get("fast_path_error") else ""))

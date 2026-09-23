@@ -214,3 +214,44 @@ class TestPackageLayout:
             visit(m, [])
         assert edges["runtime"] == set() and edges["schema"] == set()
         assert "api" not in {d for m, ds in edges.items() if m != "api" for d in ds}
+
+
+class TestLogging:
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    """サーバーは print ではなく logger "risu" を使う（uvicorn と同じ出力先，レベル制御，caplog で検証可）．"""
+
+    def test_no_print_in_package(self):
+        import ast
+        pkg = os.path.join(self.ROOT, "risu")
+        offenders = []
+        for f in sorted(os.listdir(pkg)):
+            if not f.endswith(".py"):
+                continue
+            tree = ast.parse(open(os.path.join(pkg, f), encoding="utf-8").read())
+            for n in ast.walk(tree):
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "print":
+                    offenders.append(f"{f}:{n.lineno}")
+        assert offenders == [], f"print() は使わず risu.runtime.log を使う: {offenders}"
+
+    def test_simulation_logs_through_risu_logger(self, caplog):
+        import logging
+
+        from helpers import BOTTLENECK_SCENARIO
+        from risu.simulation import run_uxsim
+        with caplog.at_level(logging.INFO, logger="risu"):
+            run_uxsim(BOTTLENECK_SCENARIO)
+        msgs = [r.getMessage() for r in caplog.records if r.name == "risu"]
+        assert any("Simulation done" in m for m in msgs), msgs
+
+    def test_log_level_from_env(self, monkeypatch):
+        import logging
+
+        import risu.runtime
+        monkeypatch.setenv("RISU_LOG_LEVEL", "DEBUG")
+        try:
+            risu.runtime.configure_logging()
+            assert risu.runtime.log.level == logging.DEBUG
+        finally:
+            monkeypatch.delenv("RISU_LOG_LEVEL", raising=False)
+            risu.runtime.configure_logging()
+            assert risu.runtime.log.level == logging.INFO
