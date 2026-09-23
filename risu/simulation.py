@@ -223,7 +223,8 @@ def _collect_run_points(W, n_links: int, max_frames: int) -> _RunPoints:
             run_code = state_map.index("run") if state_map else 2
             # run 状態かつ有効リンク上の点（entry index）
             idx = np.flatnonzero((state == run_code) & (link >= 0) & (link < n_links))
-            tk = np.rint(np.asarray(flat["log_t"], dtype=np.float64)[idx] * 10.0).astype(np.int64)
+            log_t_all = np.asarray(flat["log_t"], dtype=np.float64)   # 1 回だけ変換して使い回す
+            tk = np.rint(log_t_all[idx] * 10.0).astype(np.int64)
             kept, fidx = select_frames(tk, max_frames)
             if kept.size and fidx.size and (fidx < 0).any():
                 m = fidx >= 0
@@ -231,14 +232,17 @@ def _collect_run_points(W, n_links: int, max_frames: int) -> _RunPoints:
             # entry index → 車両 index（offsets[v] <= e < offsets[v+1]）．
             # W.VEHICLES の登録順 == C++ vehicle index 順（_register_new_cpp_vehicles）．
             vid = np.searchsorted(offsets, idx, side="right") - 1
-            # 車両ごとの実流入時刻: 最初の run 状態のログ時刻（間引き・リンク範囲に依らない）
-            log_t_all = np.asarray(flat["log_t"], dtype=np.float64)
+            # 車両ごとの実流入時刻: 最初の run 状態のログ時刻（間引き・リンク範囲に依らない）．
+            # ログは車両ごとに連続（offsets）なので，車両 v の最初の run は run_all の中で
+            # offsets[v] 以上の最初の位置．searchsorted 1 回で全車両分が求まる（np.unique の
+            # ソートは 250 万点で 0.1 秒以上かかっていた）．
             run_all = np.flatnonzero(state == run_code)
             entry_t = np.full(n_veh, np.nan)
             if run_all.size:
-                vid_run = np.searchsorted(offsets, run_all, side="right") - 1
-                uniq, first = np.unique(vid_run, return_index=True)  # 車両ごとの最初の run
-                entry_t[uniq] = log_t_all[run_all[first]]
+                pos = np.searchsorted(run_all, offsets[:-1], side="left")
+                ok = pos < run_all.size
+                ok[ok] &= run_all[pos[ok]] < offsets[1:][ok]      # その車両の範囲内に run がある
+                entry_t[ok] = log_t_all[run_all[pos[ok]]]
             RUNTIME_STATUS["fast_path_error"] = None
             return _RunPoints(
                 kept, fidx,
