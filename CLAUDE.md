@@ -81,7 +81,7 @@ risu-local/
 │   └── e2e/              ← headless Chromium のスモークテスト（playwright が無ければ skip）
 ├── pyproject.toml        ← ruff / pytest 設定 + パッケージメタデータ
 ├── requirements.txt      ← 範囲指定（上限付き）
-├── requirements.lock.txt ← 検証済みの正確なバージョン（再現用）
+├── requirements.lock.txt ← 検証済みの完全な pip freeze．CI の push/PR はこれに固定，週次は最新で走る
 └── .env                  ← LLM_BACKEND / ANTHROPIC_API_KEY（.env.example をコピー）
 ```
 
@@ -354,7 +354,8 @@ MCP（`_mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
 | **フレームの精度・形式を変える** | サーバーの `_encode_frames_v3` とフロントの `isV3` を**同時に**（§3.5）．v2 読み込み経路は残す |
 | **圧縮方式を変える** | `_negotiate_encoding` と `_enc_cache` のキー．非圧縮応答に `Vary` を付けない（§5） |
 | **SYSTEM_PROMPT を変える** | system に動的な文字列を入れない（§3.4）．トークン量は `[RISU usage]` で確認 |
-| **依存を追加する** | `requirements.txt`（上限付き）+ `requirements.lock.txt` + `pyproject.toml`．ライセンスは THIRD_PARTY_LICENSES.md に追記．CI の `licenses` ジョブが GPL 系を弾く |
+| **依存を追加する** | `requirements.txt`（上限付き）+ `pyproject.toml`．`requirements.lock.txt` は clean な venv の `pip freeze` で作り直す（手順はファイル冒頭）．ライセンスは THIRD_PARTY_LICENSES.md に追記．CI の `licenses` ジョブが GPL 系を弾く |
+| **CI が依存の更新で落ちた** | 週次 / 手動実行は最新版で走る（`LOCK_ARGS=--upgrade`）．push/PR は lock 固定なので，落ちたら「依存が動いた」と分かる．直したら lock を作り直す |
 | **`uxsim_bridge.py` を触る** | FastAPI / pydantic / anthropic を import しないこと（§3.1） |
 | **シナリオ全体のパラメータを足す** | `SimulationInput` / `SCENARIO_DEFAULTS` / `build_world` / `set_params` / GUI `et-run` / `EMIT_TEMPLATE` の 6 箇所（§3.1） |
 | **台数を扱う集計を足す** | `vehicle_counts` を使うか `deltan` を掛ける（§3.3）．フレームの点数はプラトン数 |

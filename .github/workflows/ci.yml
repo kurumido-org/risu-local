@@ -15,6 +15,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # push / pull_request は requirements.lock.txt に固定して走る（再現性）．
+  # 週次の schedule と手動実行は制約なしで最新版を入れ，新しい uxsim / starlette で壊れないかを見る．
+  # 2 段構えにすると「自分の変更で壊れた」と「依存が動いて壊れた」を切り分けられる．
+  LOCK_ARGS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--upgrade' || '-c requirements.lock.txt' }}
+
 jobs:
   lint:
     name: lint (ruff)
@@ -51,8 +57,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - name: install
-        run: pip install -r requirements-dev.txt
+      - name: install (${{ env.LOCK_ARGS }})
+        run: pip install ${{ env.LOCK_ARGS }} -r requirements-dev.txt
       - name: pytest
         run: pytest -ra -q
 
@@ -81,7 +87,7 @@ jobs:
           cache: pip
       - name: install
         run: |
-          pip install -r requirements-dev.txt playwright
+          pip install ${{ env.LOCK_ARGS }} -r requirements-dev.txt playwright
           python -m playwright install --with-deps chromium
       - name: pytest tests/e2e
         run: pytest tests/e2e -ra -q
@@ -97,7 +103,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -r requirements.txt pip-licenses
+      - run: pip install ${{ env.LOCK_ARGS }} -r requirements.txt pip-licenses
       - name: GPL / LGPL / AGPL が増えていないか
         # PyQt5 / PyQt5-Qt5 は uxsim が必須依存として宣言しているもの．
         # RISU は import しない（tests の TestLicenseHygiene が検証）し再配布もしないため，
@@ -124,7 +130,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: install uxsim only
-        run: pip install "uxsim>=1.11.0,<2"
+        run: pip install ${{ env.LOCK_ARGS }} "uxsim>=1.11.0,<2"
       - name: シナリオを実行
         run: |
           cat > /tmp/scenario.json <<'JSON'
