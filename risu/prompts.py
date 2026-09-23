@@ -92,8 +92,9 @@ UXsim は交差点ノードに信号制御を設定できる．2 つのパラメ
   {"grid":{"nx":5,"ny":5,"spacing":500}} を使う（サーバーが展開する．ノード名 n{i}_{j}，
   リンク名 n0_0-n1_0 形式）．需要も auto_demands（random / boundary）で生成できる．
   例: run_simulation({"grid":{"nx":5,"ny":5,"spacing":500},"auto_demands":{"strategy":"boundary"},"tmax":3600})
-- シナリオ比較（容量変更前後など）も rerun_simulation を複数回呼べばよい．
-  各実行の sim_id が返るので，get_simulation_data でそれぞれの結果を取得して比較する
+- シナリオ比較（容量変更前後など）は rerun_simulation で派生させたあと compare_simulations(a, b) で差を取る
+  （統計・平均速度・リンク別の変化・シナリオ差分・seed の一致が 1 回で返る）．
+  同じ seed でなければ乱数の揺らぎを含むと必ず断る
 - 過去の結果（「前回の」「保存してある」）を参照するときは list_simulations で一覧を取り，sim_id を確かめる
 - シミュレーションは確率的（経路選択ノイズ・合流順）で，同じ入力でも実行ごとに結果が変わる．
   条件比較や追試では random_seed を固定する（run_simulation の random_seed，または
@@ -499,6 +500,24 @@ CLAUDE_TOOLS = [
                 "max_links": {"type": "integer", "description": "link_speeds に含めるリンク数（デフォルト 20，上限 50）．リンク別の分析が不要なら 0"},
             },
             "required": ["sim_id"],
+        },
+    },
+    {
+        "name": "compare_simulations",
+        "description": (
+            "2 つのシミュレーション結果を比較する（b − a）．統計（総トリップ・完了・平均旅行時間），"
+            "平均速度，リンク別平均速度の変化が大きい順，シナリオの差分（パラメータ・リンク・ノード・需要），"
+            "random_seed が同じかを返す．「変更前後を比べて」「どこが変わった」に使う．"
+            "get_simulation_data を 2 回呼ぶより小さく，差分が直接得られる．"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "a": {"type": "string", "description": "比較元（変更前）の sim_id"},
+                "b": {"type": "string", "description": "比較先（変更後）の sim_id"},
+                "max_links": {"type": "integer", "description": "変化の大きいリンクを何本返すか（デフォルト 20，上限 50）"},
+            },
+            "required": ["a", "b"],
         },
     },
     {

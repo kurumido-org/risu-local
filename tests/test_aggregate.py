@@ -176,3 +176,53 @@ class TestSimulationDataAggregation:
             assert d["network_vehicle_count"][0] == len(f0["ids"]) * 5 * 2
         finally:
             results_store.pop("test_aggregation_old", None)
+
+
+class TestCompareSimulations:
+    """compare_simulations: 変更前後の差を 1 回で返す．seed が違えば揺らぎを含むと断る．"""
+
+    @pytest.fixture(scope="class")
+    def pair(self):
+        from risu.scenario_ops import apply_modifications
+        from risu.simulation import run_uxsim
+        base = BOTTLENECK_SCENARIO.model_dump()
+        base["random_seed"] = 11
+        mod, _ = apply_modifications(base, [
+            {"action": "update_links", "names": ["r2"], "set": {"free_flow_speed": 5}},
+            {"action": "add_demand", "demand": {"orig": "A", "dest": "C", "t_start": 0, "t_end": 100, "flow": 0.1}},
+        ])
+        results_store["cmp_a"] = run_uxsim(SimulationInput(**base))
+        results_store["cmp_b"] = run_uxsim(SimulationInput(**mod))
+        yield ("cmp_a", "cmp_b")
+        results_store.pop("cmp_a", None)
+        results_store.pop("cmp_b", None)
+
+    def test_compare_reports_stats_links_and_scenario_diff(self, pair):
+        from risu.aggregate import compare_simulations
+        a, b = pair
+        c = compare_simulations(a, b, max_links=5)
+        assert c["a"] == a and c["b"] == b
+        assert set(c["stats"]) == {"total_trips", "completed_trips", "average_travel_time_s"}
+        assert c["stats"]["total_trips"]["diff"] == 10          # 需要 0.1 台/s × 100 s
+        assert c["network_avg_speed"]["diff"] is not None and c["network_avg_speed"]["b"] < c["network_avg_speed"]["a"]
+        top = c["link_speed_changes"][0]
+        assert top["link"] == "r2" and top["diff"] < 0
+        assert len(c["link_speed_changes"]) <= 5
+        sd = c["scenario_diff"]
+        assert sd["links"]["changed"] == [{"name": "r2", "changes": {"free_flow_speed": [10.0, 5]}}]
+        assert sd["demands"]["n_added"] == 1 and sd["demands"]["n_removed"] == 0
+        assert sd["params"] == {}
+        assert c["same_random_seed"] is True and "条件変更" in c["note"]
+        assert len(json.dumps(c, ensure_ascii=False)) < 20_000
+
+    def test_compare_flags_seed_mismatch_and_missing(self, pair):
+        from risu.aggregate import compare_simulations
+        a, b = pair
+        results_store[b]["_scenario"]["random_seed"] = 12
+        try:
+            c = compare_simulations(a, b)
+            assert c["same_random_seed"] is False and "揺らぎ" in c["note"]
+            assert c["scenario_diff"]["params"] == {"random_seed": [11, 12]}
+        finally:
+            results_store[b]["_scenario"]["random_seed"] = 11
+        assert compare_simulations(a, "nope") is None

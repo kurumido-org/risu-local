@@ -9,7 +9,7 @@ import uuid
 
 from fastapi import HTTPException
 
-from .aggregate import get_simulation_data
+from .aggregate import compare_simulations, get_simulation_data
 from .importers import run_osm_import
 from .results import list_results, results_store, store_sim
 from .runtime import executor, log
@@ -393,6 +393,15 @@ async def dispatch_tool_blocks(tool_blocks, state: ToolTurnState, *, follow_up: 
             except Exception as e:
                 log.exception("unexpected error")
                 results.append(_tool_result(tb.id, f"OSMインポートエラー: {e!s}", True))
+
+        elif name == "compare_simulations":
+            yield ("progress", "2 つの結果を比較中...")
+            cmp = compare_simulations(str(args.get("a", "")), str(args.get("b", "")),
+                                      max_links=args.get("max_links", 20))
+            if cmp:
+                results.append(_tool_result(tb.id, json.dumps(cmp, ensure_ascii=False)))
+            else:
+                results.append(_tool_result(tb.id, "比較対象の sim_id が見つかりません．list_simulations で確認してください．", True))
 
         elif name == "list_simulations":
             rows = list_results(min(int(args.get("limit") or 20), 100))

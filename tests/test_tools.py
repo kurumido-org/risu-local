@@ -279,6 +279,9 @@ class TestMcpParity:
                 assert d2["sim_id"] != sid
                 assert risu.results.results_store[d2["sim_id"]]["_scenario"]["random_seed"] == 2
 
+                r = await risu.mcp_server.mcp_call_tool("compare_simulations", {"a": sid, "b": d2["sim_id"]})
+                cmp = json.loads(r)
+                assert cmp["scenario_diff"]["params"] == {"random_seed": [1, 2]} and cmp["same_random_seed"] is False
                 r = await risu.mcp_server.mcp_call_tool("list_simulations", {"limit": 5})
                 assert any(row["sim_id"] == sid for row in json.loads(r))
                 r = await risu.mcp_server.mcp_call_tool("get_result", {"simulation_id": sid})

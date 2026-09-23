@@ -7,6 +7,7 @@ from .results import results_store
 
 # モジュール外から使う名前（他モジュール・server.py・scripts・tests）．これ以外は内部実装．
 __all__ = [
+    "compare_simulations",
     "get_simulation_data",
 ]
 
@@ -178,3 +179,92 @@ def get_simulation_data(sim_id: str, points: int = 30, max_links: int = 20) -> d
             f"network_vehicle_count はその影響を受けない．"
         )
     return data
+
+
+def _link_mean_speeds(raw: dict) -> dict[str, float]:
+    out = {}
+    for f in (raw.get("geojson") or {}).get("features", []):
+        tl = f["properties"].get("timeline") or []
+        if tl:
+            out[f["properties"]["name"]] = sum(e["speed"] for e in tl) / len(tl)
+    return out
+
+
+def _scenario_items_diff(a: list[dict] | None, b: list[dict] | None, limit: int = 20) -> dict:
+    da = {x.get("name"): x for x in a or []}
+    db = {x.get("name"): x for x in b or []}
+    added = sorted(set(db) - set(da))
+    removed = sorted(set(da) - set(db))
+    changed = []
+    for n in sorted(set(da) & set(db)):
+        if da[n] != db[n]:
+            keys = sorted(k for k in set(da[n]) | set(db[n]) if da[n].get(k) != db[n].get(k))
+            changed.append({"name": n, "changes": {k: [da[n].get(k), db[n].get(k)] for k in keys}})
+    return {"n_added": len(added), "n_removed": len(removed), "n_changed": len(changed),
+            "added": added[:limit], "removed": removed[:limit], "changed": changed[:limit]}
+
+
+def compare_simulations(a_id: str, b_id: str, max_links: int = 20) -> dict | None:
+    """2 つの結果の差を LLM 向けにまとめる（b − a）．
+
+    - stats（total / completed / average_travel_time_s）と平均速度（走行中全車両の台数重み平均，全フレーム平均）
+    - リンク別平均速度の変化（|diff| の大きい順に max_links 本）
+    - シナリオの差分（全体パラメータ，リンク / ノードの追加・削除・変更，需要の増減）
+    - random_seed が同じか．違う / 未指定なら乱数の揺らぎを含む旨の note
+    数 KB に収める（§3.3）．
+    """
+    if a_id not in results_store or b_id not in results_store:
+        return None
+    A, B = results_store[a_id], results_store[b_id]
+    max_links = max(0, min(int(max_links if max_links is not None else 20), 50))
+
+    def stat(r, k):
+        return (r.get("stats") or {}).get(k)
+
+    stats = {}
+    for k in ("total_trips", "completed_trips", "average_travel_time_s"):
+        va, vb = stat(A, k), stat(B, k)
+        num = isinstance(va, (int, float)) and isinstance(vb, (int, float))
+        stats[k] = {"a": va, "b": vb, "diff": round(vb - va, 1) if num else None}
+
+    def mean_speed(r):
+        v = [x for x in (r.get("frame_avg_speed") or []) if x is not None]
+        return round(sum(v) / len(v), 2) if v else None
+
+    sa_, sb_ = mean_speed(A), mean_speed(B)
+    speed = {"a": sa_, "b": sb_, "diff": round(sb_ - sa_, 2) if None not in (sa_, sb_) else None}
+
+    la, lb = _link_mean_speeds(A), _link_mean_speeds(B)
+    diffs = sorted(((n, la[n], lb[n]) for n in la if n in lb), key=lambda x: -abs(x[2] - x[1]))
+    link_changes = [{"link": n, "a": round(x, 1), "b": round(y, 1), "diff": round(y - x, 1)}
+                    for n, x, y in diffs[:max_links]]
+
+    sa, sb = A.get("_scenario") or {}, B.get("_scenario") or {}
+    params = {k: [sa.get(k), sb.get(k)] for k in ("tmax", "deltan", "reaction_time", "random_seed")
+              if sa.get(k) != sb.get(k)}
+
+    def dkey(d):
+        return (d.get("orig"), d.get("dest"), d.get("t_start"), d.get("t_end"), d.get("flow"))
+    dema = {dkey(d) for d in sa.get("demands") or []}
+    demb = {dkey(d) for d in sb.get("demands") or []}
+    same_seed = sa.get("random_seed") is not None and sa.get("random_seed") == sb.get("random_seed")
+    note = ("random_seed が同じなので，差は条件変更によるもの．" if same_seed else
+            "random_seed が異なる / 未指定なので，差には乱数（経路選択・合流順）の揺らぎが含まれる．"
+            "条件の効果と断定しないこと（同じ seed で再実行して比べる）．")
+    note += "diff は b − a．平均速度は走行中全車両の台数重み平均を全フレームで平均した値（m/s）．"
+    return {
+        "a": a_id, "b": b_id,
+        "stats": stats,
+        "network_avg_speed": speed,
+        "link_speed_changes": link_changes,
+        "total_links_compared": len(diffs),
+        "scenario_diff": {
+            "params": params,
+            "links": _scenario_items_diff(sa.get("links"), sb.get("links")),
+            "nodes": _scenario_items_diff(sa.get("nodes"), sb.get("nodes")),
+            "demands": {"n_added": len(demb - dema), "n_removed": len(dema - demb),
+                        "total_flow": [round(sum(d[4] or 0 for d in dema), 3), round(sum(d[4] or 0 for d in demb), 3)]},
+        },
+        "same_random_seed": same_seed,
+        "note": note,
+    }

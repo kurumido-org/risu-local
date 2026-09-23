@@ -765,6 +765,7 @@ claude mcp add --transport sse risu http://localhost:8001/mcp
 | `get_simulation_data` | チャート用の集計データ（時系列・リンク別速度・速度分布） |
 | `import_osm_network` | OpenStreetMap から道路網を取り込んで実行 |
 | `list_simulations` | 結果の一覧（sim_id・作成日時・出所・統計） |
+| `compare_simulations` | 2 つの結果の差分（統計・平均速度・リンク別の変化・シナリオ差分・seed の一致） |
 | `get_result` | 統計 3 値だけを `simulation_id` で取得（互換用） |
 
 結果はブラウザ側にも反映されるので，MCP で実行して UI で眺める，という使い方もできます．
