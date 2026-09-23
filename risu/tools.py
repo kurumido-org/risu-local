@@ -13,7 +13,7 @@ from .aggregate import get_simulation_data
 from .importers import run_osm_import
 from .results import results_store, store_sim
 from .runtime import executor, log
-from .scenario_ops import apply_modifications, expand_run_simulation_args, generate_osm_demands
+from .scenario_ops import apply_modifications, expand_run_simulation_args, generate_osm_demands, osm_demand_summary
 from .schema import ChatInput, SimulationInput
 from .simulation import apply_link_geometries, run_uxsim_async, validate_scenario_size
 
@@ -248,11 +248,15 @@ def conversation_context_block(body: ChatInput) -> str:
     _sizes = (f"{len(_sc.get('nodes') or [])} ノード / {len(_sc.get('links') or [])} リンク / "
               f"{len(_sc.get('demands') or [])} 需要, tmax={_sc.get('tmax', '?')}s")
     _more = f"（他 {len(link_names) - 20} 本）" if len(link_names) > 20 else ""
+    # 需要の出所（OSM 取込の自動生成など）．仮定の需要を実測と取り違えて説明しないための情報
+    _src = (results_store[sim_id].get("_meta") or {}).get("source") or {}
+    _demand = _src.get("demand") if isinstance(_src.get("demand"), dict) else None
+    _demand_line = f"\n需要の出所: {_demand['note']}" if _demand and _demand.get("note") else ""
     return f"""
 
 【現在のコンテキスト】
 この会話のシミュレーションID: {sim_id}
-ネットワーク規模: {_sizes}
+ネットワーク規模: {_sizes}{_demand_line}
 リンク名の例: {', '.join(link_names[:20])}{_more}
 この結果への修正・再実行・比較は rerun_simulation(base_sim_id="{sim_id}") を使うこと．
 これ以外の依頼（新しいネットワークの設計）は run_simulation でゼロから作ること．"""
@@ -355,6 +359,9 @@ async def dispatch_tool_blocks(tool_blocks, state: ToolTurnState, *, follow_up: 
                     scenario["demands"] = generate_osm_demands(
                         scenario["nodes"], scenario["links"], osm_tmax
                     )
+                    demand_info = osm_demand_summary(scenario["demands"], osm_tmax)
+                else:
+                    demand_info = {"method": "provided", "note": "取込データに含まれていた需要をそのまま使用"}
 
                 if not follow_up:
                     yield ("progress", "Step 2/3: UXsim でシミュレーション実行中...")
@@ -367,6 +374,7 @@ async def dispatch_tool_blocks(tool_blocks, state: ToolTurnState, *, follow_up: 
                     "llm_backend": "claude",
                     "place": place,
                     "distance_m": dist,
+                    "demand": demand_info,     # 需要の出所（仮定）．画面の前提表示と LLM のコンテキストに使う
                     "llm_user_message": last_user_message_text(state.body),
                 }
                 if follow_up:
@@ -380,6 +388,7 @@ async def dispatch_tool_blocks(tool_blocks, state: ToolTurnState, *, follow_up: 
                     "summary": summary,
                     "node_count": len(scenario["nodes"]),
                     "link_count": len(scenario["links"]),
+                    "demand_assumption": demand_info["note"],
                 }, ensure_ascii=False)))
             except Exception as e:
                 log.exception("unexpected error")

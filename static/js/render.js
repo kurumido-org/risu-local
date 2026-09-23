@@ -67,7 +67,8 @@ async function loadResult(simId) {
       const parts = [`deltan ${sc.deltan ?? '?'}`,
                      `反応時間 ${sc.reaction_time ?? '既定 1.0'} s`,
                      `seed ${sc.random_seed ?? 'なし（実行ごとに変動）'}`];
-      if (src.type === 'osm') parts.push('需要: OSM 取込時の自動生成（周縁ノード間の仮定値）');
+      if (src.demand && src.demand.note) parts.push('需要: ' + src.demand.note);
+      else if (src.type === 'osm') parts.push('需要: OSM 取込時の自動生成（周縁ノード間の仮定値）');
       else if (src.type) parts.push(`出所: ${src.type}`);
       const el = document.getElementById('scn-params-label');
       if (el) { el.textContent = parts.slice(0, 3).join(' · '); el.title = parts.join('\n'); }

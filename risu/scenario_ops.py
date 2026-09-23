@@ -13,6 +13,7 @@ __all__ = [
     "apply_modifications",
     "expand_run_simulation_args",
     "generate_osm_demands",
+    "osm_demand_summary",
 ]
 
 # ──────────────────────────────────────────────
@@ -344,6 +345,33 @@ def expand_run_simulation_args(fn_args: dict) -> tuple[dict, dict]:
         raise ValueError("demands を指定するか auto_demands で自動生成してください")
     args["nodes"], args["links"], args["demands"] = nodes, links, demands
     return args, info
+
+
+def osm_demand_summary(demands: list[dict], tmax: int) -> dict:
+    """generate_osm_demands が置いた需要の「仮定」を人が読める形にまとめる．
+
+    結果の出所（source.demand），LLM への tool_result（demand_assumption），毎ターンの
+    コンテキスト（需要の出所）に同じ文言を載せ，自動生成の需要を実測と取り違えないようにする．
+    """
+    if not demands:
+        return {"method": "none", "note": "需要なし"}
+    nodes = sorted({d["orig"] for d in demands} | {d["dest"] for d in demands})
+    flows = sorted({float(d["flow"]) for d in demands})
+    t_end = max(float(d["t_end"]) for d in demands)
+    total = sum(float(d["flow"]) for d in demands)
+    note = (f"OSM 取込時の自動生成（仮定値）: 周縁とみなした {len(nodes)} ノードの全ペア {len(demands)} 組に，"
+            f"各 {flows[0]:g}〜{flows[-1]:g} 台/秒を 0〜{t_end:.0f} 秒で与えた（合計 {total:.2f} 台/秒）．"
+            f"実測の交通量ではないので，現地の朝ピーク等の再現精度は保証されない．")
+    return {
+        "method": "osm_boundary_pairs",
+        "boundary_nodes": nodes[:12],
+        "pairs": len(demands),
+        "flow_per_pair": [flows[0], flows[-1]],
+        "t_start": 0,
+        "t_end": t_end,
+        "total_flow": round(total, 3),
+        "note": note,
+    }
 
 
 def generate_osm_demands(nodes: list[dict], links: list[dict], tmax: int = 3600) -> list[dict]:

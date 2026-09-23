@@ -201,3 +201,19 @@ class TestScenarioModifications:
         assert sc["random_seed"] == 7 and sc["reaction_time"] == 1.5
         si = SimulationInput(**sc)
         assert si.random_seed == 7
+
+
+class TestOsmDemandSummary:
+    """OSM 取込の自動需要は「仮定」なので，その内容を出所として残す．"""
+
+    def test_summary_describes_generated_demands(self):
+        from risu.scenario_ops import generate_osm_demands, osm_demand_summary
+        nodes = [{"name": f"n{i}", "x": 1000 * (i % 3), "y": 1000 * (i // 3)} for i in range(9)]
+        links = [{"name": f"l{i}", "start": f"n{i}", "end": f"n{i+1}", "length": 1000} for i in range(8)]
+        demands = generate_osm_demands(nodes, links, 3600)
+        s = osm_demand_summary(demands, 3600)
+        assert s["method"] == "osm_boundary_pairs"
+        assert s["pairs"] == len(demands)
+        assert s["t_end"] == 1800
+        assert "自動生成" in s["note"] and "実測" in s["note"]
+        assert osm_demand_summary([], 3600)["method"] == "none"

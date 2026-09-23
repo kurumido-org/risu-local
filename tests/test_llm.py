@@ -60,6 +60,16 @@ class TestConversationContext:
         from risu.tools import conversation_context_block
         assert conversation_context_block(self._body("gone123")) == ""
 
+    def test_demand_provenance_is_injected(self, stored_sim):
+        """OSM 取込の自動需要は仮定値．その旨を毎ターンのコンテキストに入れる．"""
+        from risu.tools import conversation_context_block
+        results_store[stored_sim]["_meta"] = {"source": {"type": "osm", "demand": {
+            "method": "osm_boundary_pairs", "note": "OSM 取込時の自動生成（仮定値）: 8 ノード 56 組"}}}
+        block = conversation_context_block(self._body(stored_sim))
+        assert "需要の出所: OSM 取込時の自動生成（仮定値）" in block
+        results_store[stored_sim].pop("_meta", None)
+        assert "需要の出所" not in conversation_context_block(self._body(stored_sim))
+
     def test_conversation_sim_id_helper(self, stored_sim):
         from risu.tools import conversation_sim_id
         assert conversation_sim_id(self._body(stored_sim)) == stored_sim

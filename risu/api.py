@@ -32,7 +32,7 @@ from .results import (
     store_sim,
 )
 from .runtime import RUNTIME_STATUS, executor, log
-from .scenario_ops import generate_osm_demands
+from .scenario_ops import generate_osm_demands, osm_demand_summary
 from .schema import ChatInput, ChatMessage, SimulationInput, scenario_to_input
 from .simulation import MAX_TMAX, apply_link_geometries, run_uxsim_async, startup_selfcheck, validate_scenario_size
 
@@ -481,6 +481,9 @@ async def import_osm(place: str = Form(...), tmax: int = Form(3600),
         scenario["demands"] = generate_osm_demands(
             scenario["nodes"], scenario["links"], tmax
         )
+        demand_info = osm_demand_summary(scenario["demands"], tmax)
+    else:
+        demand_info = {"method": "provided", "note": "取込データに含まれていた需要をそのまま使用"}
 
     sim_input = scenario_to_input(scenario)
     sim_result = await run_uxsim_async(sim_input)
@@ -491,6 +494,7 @@ async def import_osm(place: str = Form(...), tmax: int = Form(3600),
         "place": place,
         "road_types": road_types,
         "distance_m": distance_m,
+        "demand": demand_info,
     })
 
     return {
