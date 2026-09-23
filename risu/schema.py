@@ -6,6 +6,14 @@ from __future__ import annotations
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, model_validator
 
+# モジュール外から使う名前（他モジュール・server.py・scripts・tests）．これ以外は内部実装．
+__all__ = [
+    "ChatInput",
+    "ChatMessage",
+    "SimulationInput",
+    "scenario_to_input",
+]
+
 
 # ──────────────────────────────────────────────
 # Pydantic スキーマ
@@ -52,7 +60,7 @@ class SimulationInput(BaseModel):
     tmax: int = Field(default=3600, gt=0)
     # 車両集計単位（プラトンサイズ）．UXsim 内部の「1 車両」が deltan 台を表す．
     # フレームの ids の個数はプラトン数なので，台数として扱う箇所では deltan を掛けること
-    # （_run_uxsim の vehicle_counts / _trip_stats / フロントの ACTIVE VEHICLES）．
+    # （run_uxsim の vehicle_counts / trip_stats / フロントの ACTIVE VEHICLES）．
     deltan: int = Field(default=5, ge=1)
     # 車頭時間（反応時間）秒．UXsim 既定 1.0 → 1 車線容量 ≈ 2,770 台/時（ffs 60km/h, kjam 0.2）．
     # 高速道路の実勢（1,800〜2,000 台/時/車線）に合わせるなら 1.5〜1.7．None なら UXsim 既定．
@@ -124,7 +132,7 @@ class SimulationInput(BaseModel):
                 f"需要が存在しないノードを参照しています: {missing_d[:10]}．")
         return self
 
-def _scenario_to_input(scenario: dict) -> SimulationInput:
+def scenario_to_input(scenario: dict) -> SimulationInput:
     """dict → SimulationInput．Pydantic 検証エラーを 422 の平易なメッセージに変換する．
 
     （変換しないと global handler が 500「予期しないエラー」にしてしまい，

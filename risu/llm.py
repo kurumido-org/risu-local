@@ -11,19 +11,34 @@ import httpx
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
-from .aggregate import _get_simulation_data
-from .prompts import CLAUDE_TOOLS, MOCK_SCENARIOS, SYSTEM_PROMPT, _mock_llm_response
-from .results import _store_sim
+from .aggregate import get_simulation_data
+from .prompts import CLAUDE_TOOLS, MOCK_SCENARIOS, SYSTEM_PROMPT, mock_llm_response
+from .results import store_sim
 from .schema import ChatInput, SimulationInput
-from .simulation import _run_uxsim_async
+from .simulation import run_uxsim_async
 from .tools import (
-    _collect_tool_results,
-    _conversation_context_block,
-    _conversation_sim_id,
-    _dispatch_tool_blocks,
-    _last_user_message_text,
-    _ToolTurnState,
+    ToolTurnState,
+    collect_tool_results,
+    conversation_context_block,
+    conversation_sim_id,
+    dispatch_tool_blocks,
+    last_user_message_text,
 )
+
+# モジュール外から使う名前（他モジュール・server.py・scripts・tests）．これ以外は内部実装．
+__all__ = [
+    "LLM_BACKEND",
+    "UsageTally",
+    "api_messages",
+    "build_llm_messages",
+    "chat_claude_stream",
+    "chat_mock",
+    "chat_ollama",
+    "extract_charts",
+    "log_usage",
+    "mark_cache_tail",
+    "trim_history",
+]
 
 # LLM バックエンド: "mock" / "claude" / "ollama"
 LLM_BACKEND = os.environ.get("LLM_BACKEND", "claude")
@@ -37,9 +52,9 @@ CLAUDE_MODEL = "claude-sonnet-5"  # 高精度・ツール呼び出し安定（cl
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 
-async def _chat_mock(user_text: str):
+async def chat_mock(user_text: str):
     """モック LLM: キーワードマッチでシナリオを選択し，実際の UXsim を実行"""
-    mock = _mock_llm_response(user_text)
+    mock = mock_llm_response(user_text)
 
     # テキスト応答のみ（シミュレーション不要）
     if mock["scenario_key"] is None:
@@ -48,9 +63,9 @@ async def _chat_mock(user_text: str):
     # シミュレーション実行
     scenario_data = MOCK_SCENARIOS[mock["scenario_key"]]
     sim_input = SimulationInput(**scenario_data["scenario"])
-    result = await _run_uxsim_async(sim_input)
+    result = await run_uxsim_async(sim_input)
     sim_id = str(uuid.uuid4())[:8]
-    _store_sim(sim_id, result, {
+    store_sim(sim_id, result, {
         "type": "llm",
         "llm_backend": "mock",
         "scenario_key": mock["scenario_key"],
@@ -128,7 +143,7 @@ def _msg_text(content) -> str:
     return str(content or "")
 
 
-def _trim_history(msgs: list[dict]) -> list[dict]:
+def trim_history(msgs: list[dict]) -> list[dict]:
     """文字数予算を超えた履歴を古いターンから落とす．
 
     予算超過時は予算の半分まで落とす（ヒステリシス）．毎ターン 1 件ずつ落とすと
@@ -161,9 +176,9 @@ def _trim_history(msgs: list[dict]) -> list[dict]:
     return kept
 
 
-def _build_llm_messages(body: ChatInput) -> list[dict]:
+def build_llm_messages(body: ChatInput) -> list[dict]:
     """ChatInput → Claude API messages（履歴トリミング + キャッシュ境界 + 動的コンテキスト）"""
-    msgs = _trim_history([{"role": m.role, "content": m.content} for m in body.messages])
+    msgs = trim_history([{"role": m.role, "content": m.content} for m in body.messages])
     # ターン跨ぎのキャッシュ境界: 履歴の最後の assistant メッセージ
     last_asst = None
     for i, m in enumerate(msgs):
@@ -177,14 +192,14 @@ def _build_llm_messages(body: ChatInput) -> list[dict]:
     # 動的コンテキストは最後の user メッセージの追加ブロック（system を不変に保つ）
     if msgs and msgs[-1]["role"] == "user":
         blocks = [{"type": "text", "text": _msg_text(msgs[-1]["content"])}]
-        ctx = _conversation_context_block(body).strip()
+        ctx = conversation_context_block(body).strip()
         if ctx:
             blocks.append({"type": "text", "text": ctx})
         msgs[-1] = {"role": "user", "content": blocks}
-    return _mark_cache_tail(msgs)
+    return mark_cache_tail(msgs)
 
 
-def _mark_cache_tail(msgs: list[dict]) -> list[dict]:
+def mark_cache_tail(msgs: list[dict]) -> list[dict]:
     """リクエスト末尾メッセージの最後のブロックに cache_control を付ける（同一ターン内の
     tool ラウンドで prefix がヒットする）．前のリクエストで付けた末尾の印は外す
     （履歴 assistant の印は _tail_marked を持たないので残る）．breakpoint は API 上限 4 つ:
@@ -207,7 +222,7 @@ def _mark_cache_tail(msgs: list[dict]) -> list[dict]:
     return msgs
 
 
-def _api_messages(msgs: list[dict]) -> list[dict]:
+def api_messages(msgs: list[dict]) -> list[dict]:
     """内部フラグ（_tail_marked）を除いた API 送信用メッセージ"""
     out = []
     for m in msgs:
@@ -219,7 +234,7 @@ def _api_messages(msgs: list[dict]) -> list[dict]:
     return out
 
 
-class _UsageTally:
+class UsageTally:
     """1 ターン（1 回の /chat）で使ったトークンの集計．done イベントでフロントに返す"""
 
     def __init__(self):
@@ -231,7 +246,7 @@ class _UsageTally:
         self.cost_jpy = 0.0
 
     def add(self, context: str, response) -> None:
-        u = _log_usage(context, response)
+        u = log_usage(context, response)
         if not u:
             return
         self.calls += 1
@@ -268,7 +283,7 @@ def _resolve_chart_refs(obj, data_cache: dict, default_sim_id: str | None):
             sim_id = str(obj.get("sim_id") or default_sim_id or "")
             data = data_cache.get(sim_id)
             if data is None and sim_id:
-                data = _get_simulation_data(sim_id)
+                data = get_simulation_data(sim_id)
                 if data is not None:
                     data_cache[sim_id] = data
             cur = data
@@ -287,7 +302,7 @@ def _resolve_chart_refs(obj, data_cache: dict, default_sim_id: str | None):
 
 _CHART_PATTERN = None
 
-def _extract_charts(text: str, data_cache: dict, default_sim_id: str | None) -> tuple[list, str]:
+def extract_charts(text: str, data_cache: dict, default_sim_id: str | None) -> tuple[list, str]:
     """```chart ... ``` ブロックを抽出して $data を解決し，(charts, 本文) を返す"""
     global _CHART_PATTERN
     if _CHART_PATTERN is None:
@@ -308,7 +323,7 @@ def _extract_charts(text: str, data_cache: dict, default_sim_id: str | None) -> 
 # ──────────────────────────────────────────────
 # トークン使用量ロガー
 # ──────────────────────────────────────────────
-def _log_usage(context: str, response) -> dict:
+def log_usage(context: str, response) -> dict:
     """Claude レスポンスから usage を抽出してログ出力．将来 DB 保存フックに繋げられる"""
     usage = getattr(response, "usage", None)
     if usage is None:
@@ -362,7 +377,7 @@ MAX_TOOL_ROUNDS = int(os.getenv("RISU_MAX_TOOL_ROUNDS", "3"))
 # トークン節約の設定
 # ──────────────────────────────────────────────
 # LLM に送る会話履歴の文字数予算．超過したら古いターンから落とす（ヒステリシス付き，
-# _trim_history 参照）．0 で無制限．
+# trim_history 参照）．0 で無制限．
 MAX_HISTORY_CHARS = int(os.getenv("RISU_MAX_HISTORY_CHARS", "24000"))
 # Prompt Caching の TTL: "5m"（既定）または "1h"．考えながら操作して 5 分以上空くことが
 # 多いなら "1h" の方が安い（書き込み単価は 2 倍だが，再作成が要らない）．
@@ -374,18 +389,18 @@ def _sse_event(data: dict) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-async def _chat_claude_stream(body: ChatInput):
+async def chat_claude_stream(body: ChatInput):
     """Claude API チャット — SSE ストリーミングで進捗を返す"""
 
     import anthropic
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     # 履歴トリミング + キャッシュ境界 + 動的コンテキスト（system は不変に保つ）
-    messages = _build_llm_messages(body)
+    messages = build_llm_messages(body)
     system = SYSTEM_PROMPT
-    usage = _UsageTally()
-    # ツール実行の状態（sim_id / 集計キャッシュ）は _dispatch_tool_blocks と共有する
-    state = _ToolTurnState(body)
+    usage = UsageTally()
+    # ツール実行の状態（sim_id / 集計キャッシュ）は dispatch_tool_blocks と共有する
+    state = ToolTurnState(body)
 
     async def event_generator():
         try:
@@ -398,7 +413,7 @@ async def _chat_claude_stream(body: ChatInput):
                 model=CLAUDE_MODEL,
                 max_tokens=64000,
                 system=_cached_system(system),
-                messages=_api_messages(messages),
+                messages=api_messages(messages),
                 tools=_cached_tools(),
             ) as first_stream:
                 for event in first_stream:
@@ -417,7 +432,7 @@ async def _chat_claude_stream(body: ChatInput):
                 text = "".join(b.text for b in response.content if b.type == "text")
 
                 # シミュレーション意図がありそうならリトライ（tool_choice で強制）
-                last_user_msg = _last_user_message_text(body) or ""
+                last_user_msg = last_user_message_text(body) or ""
                 sim_keywords = ["シミュレーション", "シミュレート", "実行", "グリッド", "ネットワーク", "渋滞", "ボトルネック", "道路", "交通"]
                 if any(k in last_user_msg for k in sim_keywords):
                     if first_streamed_text:
@@ -429,7 +444,7 @@ async def _chat_claude_stream(body: ChatInput):
                         model=CLAUDE_MODEL,
                         max_tokens=32000,
                         system=_cached_system(system),
-                        messages=_api_messages(_mark_cache_tail(messages)),
+                        messages=api_messages(mark_cache_tail(messages)),
                         tools=_cached_tools(),
                         tool_choice={"type": "tool", "name": "run_simulation"},
                     )
@@ -444,10 +459,10 @@ async def _chat_claude_stream(body: ChatInput):
                                       "sim_id": None, "usage": usage.as_dict()})
                     return
 
-            # ── ツール実行（同期経路と同じ _dispatch_tool_blocks を通す）──
+            # ── ツール実行（同期経路と同じ dispatch_tool_blocks を通す）──
             tool_blocks = [b for b in response.content if b.type == "tool_use"]
             tool_results = []
-            async for _kind, _payload in _dispatch_tool_blocks(tool_blocks, state):
+            async for _kind, _payload in dispatch_tool_blocks(tool_blocks, state):
                 if _kind == "progress":
                     yield _sse_event({"type": "progress", "message": _payload})
                 else:
@@ -458,7 +473,7 @@ async def _chat_claude_stream(body: ChatInput):
 
             messages.append({"role": "assistant", "content": response.content})
             messages.append({"role": "user", "content": tool_results})
-            _mark_cache_tail(messages)
+            mark_cache_tail(messages)
 
             # ストリーミングで最終回答を生成するヘルパー
             async def _stream_final_response(msgs):
@@ -471,7 +486,7 @@ async def _chat_claude_stream(body: ChatInput):
                     model=CLAUDE_MODEL,
                     max_tokens=16000,
                     system=_cached_system(system),
-                    messages=_api_messages(msgs),
+                    messages=api_messages(msgs),
                     tools=_cached_tools(),
                 ) as stream:
                     for event in stream:
@@ -518,7 +533,7 @@ async def _chat_claude_stream(body: ChatInput):
                     break
                 yield _sse_event({"type": "stream_end_partial"})
                 next_tool_results = []
-                async for _kind, _payload in _dispatch_tool_blocks(
+                async for _kind, _payload in dispatch_tool_blocks(
                         next_tool_blocks, state, follow_up=True):
                     if _kind == "progress":
                         yield _sse_event({"type": "progress", "message": _payload})
@@ -527,7 +542,7 @@ async def _chat_claude_stream(body: ChatInput):
 
                 messages.append({"role": "assistant", "content": stream_result["response"].content})
                 messages.append({"role": "user", "content": next_tool_results})
-                _mark_cache_tail(messages)
+                mark_cache_tail(messages)
 
                 # 次ラウンドもストリーミング
                 yield _sse_event({"type": "stream_start"})
@@ -541,9 +556,9 @@ async def _chat_claude_stream(body: ChatInput):
                         stream_result = item
 
             # チャート抽出（$data 参照はこのターンで取得した集計データで解決）
-            charts, clean_text = _extract_charts(
+            charts, clean_text = extract_charts(
                 final_text, state.sim_data_cache,
-                state.last_data_sim_id or state.sim_id or _conversation_sim_id(body))
+                state.last_data_sim_id or state.sim_id or conversation_sim_id(body))
             if "```chart" in clean_text.lower() or "```\nchart" in clean_text.lower():
                 # 抽出漏れの兆候．ログに残してデバッグ可能に
                 idx = clean_text.lower().find("```")
@@ -591,11 +606,11 @@ async def _chat_claude(body: ChatInput):
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     # 履歴トリミング + キャッシュ境界 + 動的コンテキスト（system は不変に保つ）
-    messages = _build_llm_messages(body)
+    messages = build_llm_messages(body)
     system = SYSTEM_PROMPT
-    usage = _UsageTally()
-    # ツール実行の状態はストリーミング経路と共通（_dispatch_tool_blocks）
-    state = _ToolTurnState(body)
+    usage = UsageTally()
+    # ツール実行の状態はストリーミング経路と共通（dispatch_tool_blocks）
+    state = ToolTurnState(body)
 
     try:
         # 1回目：ツール付きリクエスト
@@ -603,7 +618,7 @@ async def _chat_claude(body: ChatInput):
             model=CLAUDE_MODEL,
             max_tokens=8192,
             system=_cached_system(system),
-            messages=_api_messages(messages),
+            messages=api_messages(messages),
             tools=_cached_tools(),
         )
         usage.add("sync first-round", response)
@@ -621,7 +636,7 @@ async def _chat_claude(body: ChatInput):
                     model=CLAUDE_MODEL,
                     max_tokens=8192,
                     system=_cached_system(system),
-                    messages=_api_messages(_mark_cache_tail(messages)),
+                    messages=api_messages(mark_cache_tail(messages)),
                     tools=_cached_tools(),
                 )
                 usage.add("sync retry", retry)
@@ -636,19 +651,19 @@ async def _chat_claude(body: ChatInput):
         # ツール呼び出しがある場合（複数ツール呼び出しにも対応）
         # dispatch はストリーミング経路と共通．進捗イベントはここでは捨てる．
         tool_blocks = [b for b in response.content if b.type == "tool_use"]
-        tool_results = await _collect_tool_results(tool_blocks, state)
+        tool_results = await collect_tool_results(tool_blocks, state)
 
         # ツール結果を渡して次の回答を生成（最大3ラウンド）
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
-        _mark_cache_tail(messages)
+        mark_cache_tail(messages)
 
         for _round in range(MAX_TOOL_ROUNDS):
             resp_next = client.messages.create(
                 model=CLAUDE_MODEL,
                 max_tokens=16000,
                 system=_cached_system(system),
-                messages=_api_messages(messages),
+                messages=api_messages(messages),
                 tools=_cached_tools(),
             )
             usage.add(f"sync round {_round + 1}", resp_next)
@@ -661,17 +676,17 @@ async def _chat_claude(body: ChatInput):
             if not next_tool_blocks:
                 break
 
-            next_tool_results = await _collect_tool_results(
+            next_tool_results = await collect_tool_results(
                 next_tool_blocks, state, follow_up=True)
 
             messages.append({"role": "assistant", "content": resp_next.content})
             messages.append({"role": "user", "content": next_tool_results})
-            _mark_cache_tail(messages)
+            mark_cache_tail(messages)
 
         # ```chart ... ``` ブロックからChart.js設定を抽出（$data 参照を解決）
-        charts, clean_text = _extract_charts(
+        charts, clean_text = extract_charts(
             final_text, state.sim_data_cache,
-            state.last_data_sim_id or state.sim_id or _conversation_sim_id(body))
+            state.last_data_sim_id or state.sim_id or conversation_sim_id(body))
 
         resp = {"role": "assistant", "content": clean_text, "sim_id": state.sim_id,
                 "usage": usage.as_dict()}
@@ -691,7 +706,7 @@ async def _chat_claude(body: ChatInput):
         raise HTTPException(500, detail=f"Claude エラー: {str(e)}")
 
 
-async def _chat_ollama(body: ChatInput):
+async def chat_ollama(body: ChatInput):
     """本番用: Ollama LLM と対話"""
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages += [{"role": m.role, "content": m.content} for m in body.messages]
@@ -739,13 +754,13 @@ async def _chat_ollama(body: ChatInput):
                 fn_args = json.loads(fn_args)
 
             sim_input = SimulationInput(**fn_args)
-            result = await _run_uxsim_async(sim_input)
+            result = await run_uxsim_async(sim_input)
             sim_id = str(uuid.uuid4())[:8]
-            _store_sim(sim_id, result, {
+            store_sim(sim_id, result, {
                 "type": "llm",
                 "llm_backend": "ollama",
                 "tool": "run_simulation",
-                "llm_user_message": _last_user_message_text(body),
+                "llm_user_message": last_user_message_text(body),
             })
 
             messages.append({"role": "assistant", "content": "", "tool_calls": assistant_msg["tool_calls"]})

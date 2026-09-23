@@ -9,6 +9,14 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+# モジュール外から使う名前（他モジュール・server.py・scripts・tests）．これ以外は内部実装．
+__all__ = [
+    "RISU_SCHEMA_VERSION",
+    "RISU_VERSION",
+    "RUNTIME_STATUS",
+    "executor",
+]
+
 # ──────────────────────────────────────────────
 # 設定
 # ──────────────────────────────────────────────

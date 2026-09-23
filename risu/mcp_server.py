@@ -15,14 +15,21 @@ from starlette.requests import Request
 
 from .prompts import CLAUDE_TOOLS
 from .results import results_store
-from .tools import _collect_tool_results, _ToolTurnState
+from .tools import ToolTurnState, collect_tool_results
+
+# モジュール外から使う名前（他モジュール・server.py・scripts・tests）．これ以外は内部実装．
+__all__ = [
+    "mcp_call_tool",
+    "mcp_tools",
+    "router",
+]
 
 # ──────────────────────────────────────────────
 # MCP サーバー定義
 # ──────────────────────────────────────────────
 mcp_server = Server("uxsim-mcp")
 
-def _mcp_tools() -> list[Tool]:
+def mcp_tools() -> list[Tool]:
     """MCP に公開するツール．チャット（CLAUDE_TOOLS）と同じ定義を変換して返す．
 
     以前は MCP 専用に run_simulation / get_result の 2 つだけを別定義していたため，
@@ -46,10 +53,10 @@ def _mcp_tools() -> list[Tool]:
     return tools
 
 
-async def _mcp_call_tool(name: str, arguments: dict | None) -> str:
-    """MCP のツール呼び出し本体．チャットと同じ _dispatch_tool_blocks を通す（§3.2）．
+async def mcp_call_tool(name: str, arguments: dict | None) -> str:
+    """MCP のツール呼び出し本体．チャットと同じ dispatch_tool_blocks を通す（§3.2）．
 
-    進捗イベントは MCP に流す先が無いので捨てる（_collect_tool_results）．
+    進捗イベントは MCP に流す先が無いので捨てる（collect_tool_results）．
     会話コンテキスト（body）は無いので None．保存メタの via は "mcp"．
     """
     arguments = arguments or {}
@@ -60,19 +67,19 @@ async def _mcp_call_tool(name: str, arguments: dict | None) -> str:
         return json.dumps(results_store[sim_id]["stats"], ensure_ascii=False)
 
     block = SimpleNamespace(id=f"mcp-{uuid.uuid4().hex[:8]}", name=name, input=arguments)
-    state = _ToolTurnState(body=None, via="mcp")
-    results = await _collect_tool_results([block], state)
+    state = ToolTurnState(body=None, via="mcp")
+    results = await collect_tool_results([block], state)
     return results[0]["content"]   # 未知のツール名でも dispatcher が結果を返す
 
 
 @mcp_server.list_tools()
 async def list_tools() -> list[Tool]:
-    return _mcp_tools()
+    return mcp_tools()
 
 
 @mcp_server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    return [TextContent(type="text", text=await _mcp_call_tool(name, arguments))]
+    return [TextContent(type="text", text=await mcp_call_tool(name, arguments))]
 
 
 # ---- MCP SSE エンドポイント ----

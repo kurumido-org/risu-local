@@ -12,6 +12,21 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+# モジュール外から使う名前（他モジュール・server.py・scripts・tests）．これ以外は内部実装．
+__all__ = [
+    "RESULTS_DIR",
+    "build_envelope",
+    "encode_frames_v3",
+    "envelope_compressed_bytes",
+    "envelope_gzip_bytes",
+    "envelope_json_bytes",
+    "negotiate_encoding",
+    "persisted_ids",
+    "persisted_path",
+    "results_store",
+    "store_sim",
+]
+
 try:
     import orjson
 except ImportError:  # orjson 未インストール時は標準 JSON にフォールバック
@@ -29,12 +44,12 @@ _SAFE_SIM_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")   # ファイル名に使う
 
 
 class _ResultsStore(dict):
-    """シミュレーション結果のメモリストア（sim_id → _run_uxsim の戻り値）．
+    """シミュレーション結果のメモリストア（sim_id → run_uxsim の戻り値）．
 
     RISU_RESULTS_DIR が設定されているときは，メモリに無い sim_id をディスクから
     遅延ロードする．呼び出し側は普通の dict として扱えばよい（`in` / `[]` / `.get`）．
     メモリ側は MAX_RESULTS 件のキャッシュで，追い出された結果もディスクから戻る．
-    keys() / len() はメモリにあるものだけを数える（ディスクの一覧は _persisted_ids）．
+    keys() / len() はメモリにあるものだけを数える（ディスクの一覧は persisted_ids）．
 
     スレッド: イベントループ・executor（シミュレーション後の保存，永続化，圧縮）が
     同時に触るので，複数手順になる操作（追加＋追い出し，遅延ロード，圧縮キャッシュの
@@ -46,13 +61,13 @@ class _ResultsStore(dict):
         self.lock = threading.RLock()
 
     def __contains__(self, key):
-        return dict.__contains__(self, key) or _persisted_path(key) is not None
+        return dict.__contains__(self, key) or persisted_path(key) is not None
 
     def __missing__(self, key):
         with self.lock:
             if dict.__contains__(self, key):      # 他スレッドが先にロードした
                 return dict.__getitem__(self, key)
-            path = _persisted_path(key)
+            path = persisted_path(key)
             if path is None:
                 raise KeyError(key)
             result = _load_persisted(path)
@@ -96,10 +111,10 @@ except ImportError:
     _zstd = None
 
 
-def _store_sim(sim_id: str, result: dict, source: dict | None = None) -> None:
+def store_sim(sim_id: str, result: dict, source: dict | None = None) -> None:
     """シミュレーション結果を results_store に保存し，再現性メタを付与する．
 
-    result は _run_uxsim の戻り値（"_scenario" を含む）．
+    result は run_uxsim の戻り値（"_scenario" を含む）．
     source は呼び出し経路の由来を表す任意の辞書（省略時は manual）．
     """
     src = source or {"type": "manual"}
@@ -119,12 +134,12 @@ def _store_sim(sim_id: str, result: dict, source: dict | None = None) -> None:
 
 # ──────────────────────────────────────────────
 # 結果の永続化（RISU_RESULTS_DIR）
-#   ファイル形式はダウンロードの .json+result（_build_envelope）と同じ．
+#   ファイル形式はダウンロードの .json+result（build_envelope）と同じ．
 #   圧縮は zstd（zstandard が無ければ gzip）．ダウンロードした JSON をそのまま置いても読める．
 #   frames はエンベロープと同じく v3（量子化）で保存されるので，読み戻した結果の位置・速度は
 #   v3 の分解能（1 m / 0.1 m/s / 0.001）になる．統計・台数・累積系列は無損失．
 # ──────────────────────────────────────────────
-def _persisted_path(sim_id: str) -> str | None:
+def persisted_path(sim_id: str) -> str | None:
     """RESULTS_DIR に sim_id の保存ファイルがあればそのパス．"""
     if not RESULTS_DIR or not isinstance(sim_id, str) or not _SAFE_SIM_ID.match(sim_id):
         return None
@@ -135,7 +150,7 @@ def _persisted_path(sim_id: str) -> str | None:
     return None
 
 
-def _persisted_ids() -> list[str]:
+def persisted_ids() -> list[str]:
     """RESULTS_DIR にある sim_id の一覧（新しい順）．"""
     if not RESULTS_DIR or not os.path.isdir(RESULTS_DIR):
         return []
@@ -153,7 +168,7 @@ def _persisted_ids() -> list[str]:
 def _persist_sim(sim_id: str) -> str | None:
     """results_store[sim_id] を RESULTS_DIR に書く．戻り値は書いたパス．
 
-    _envelope_compressed_bytes を使うので，あとで /results が同じ方式を要求したときは
+    envelope_compressed_bytes を使うので，あとで /results が同じ方式を要求したときは
     キャッシュがそのまま使われる．一時ファイルに書いてから rename する（途中で落ちても壊れない）．
     """
     if not RESULTS_DIR or sim_id not in results_store:
@@ -161,7 +176,7 @@ def _persist_sim(sim_id: str) -> str | None:
     try:
         os.makedirs(RESULTS_DIR, exist_ok=True)
         encoding = "zstd" if _zstd is not None else "gzip"
-        blob = _envelope_compressed_bytes(sim_id, encoding)
+        blob = envelope_compressed_bytes(sim_id, encoding)
         path = os.path.join(RESULTS_DIR, f"{sim_id}.json.{'zst' if encoding == 'zstd' else 'gz'}")
         tmp = path + ".tmp"
         with open(tmp, "wb") as f:
@@ -177,7 +192,7 @@ def _persist_sim(sim_id: str) -> str | None:
 def _decode_frames_v3(frames: dict) -> dict:
     """columnar_v3（送出/保存形式）を results_store 内部の columnar_v2 に戻す．
 
-    _encode_frames_v3 の逆変換．static/js/risu-core.js の decodeFrame と同じ規則
+    encode_frames_v3 の逆変換．static/js/risu-core.js の decodeFrame と同じ規則
     （ids 累積和 / xs,ys 整数 m / vs ×0.1 / alphas ×0.001）．
     """
     import numpy as np
@@ -251,7 +266,7 @@ def _load_persisted(path: str) -> dict:
     return result
 
 
-def _build_envelope(sim_id: str, *, include_result: bool = True) -> dict:
+def build_envelope(sim_id: str, *, include_result: bool = True) -> dict:
     """results_store の内部表現を DL/取得用の正規エンベロープに変換する．
 
     include_result=False の場合は再現に必要な scenario と meta のみを返す
@@ -293,15 +308,15 @@ def _build_envelope(sim_id: str, *, include_result: bool = True) -> dict:
         }
     return envelope
 
-def _envelope_json_bytes(sim_id: str) -> bytes:
+def envelope_json_bytes(sim_id: str) -> bytes:
     """完全エンベロープを JSON バイト列に直列化する（frames の numpy 列も直接）．"""
-    env = _build_envelope(sim_id, include_result=True)
+    env = build_envelope(sim_id, include_result=True)
     _res = env.get("result")
     if _res is not None and _res.get("frame_format") == "columnar_v2" and _res.get("frames"):
         # 送出時だけ columnar_v3（量子化＋差分符号化）に変換する．
-        # results_store 側の配列は触らない（_get_simulation_data など
+        # results_store 側の配列は触らない（get_simulation_data など
         # サーバー内の消費側は素の値を前提にしているため）．
-        _res["frames"] = _encode_frames_v3(_res["frames"])
+        _res["frames"] = encode_frames_v3(_res["frames"])
         _res["frame_format"] = "columnar_v3"
     if orjson is not None:
         return orjson.dumps(env, option=orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_NON_STR_KEYS)
@@ -315,7 +330,7 @@ def _envelope_json_bytes(sim_id: str) -> bytes:
     return json.dumps(env, ensure_ascii=False, default=_default).encode("utf-8")
 
 
-def _encode_frames_v3(frames: dict) -> dict:
+def encode_frames_v3(frames: dict) -> dict:
     """columnar_v2 の frames を送出用の columnar_v3 に変換する（新しい dict を返す）．
 
     JSON はテキストなので，`4500.0` のような冗長な表現がそのままバイト数になる．
@@ -359,7 +374,7 @@ def _encode_frames_v3(frames: dict) -> dict:
     return out
 
 
-def _negotiate_encoding(accept_encoding: str) -> str:
+def negotiate_encoding(accept_encoding: str) -> str:
     """Accept-Encoding から使う圧縮方式を選ぶ．返り値は "zstd" / "gzip" / "identity"．
 
     zstd は gzip より小さく・速いので優先する（grid20 相当で 16.1MB/0.47s → 5.4MB/0.07s）．
@@ -374,7 +389,7 @@ def _negotiate_encoding(accept_encoding: str) -> str:
     return "identity"
 
 
-def _envelope_compressed_bytes(sim_id: str, encoding: str) -> bytes:
+def envelope_compressed_bytes(sim_id: str, encoding: str) -> bytes:
     """圧縮済みエンベロープ．結果は不変なので sim × 方式ごとに 1 回だけ作ってキャッシュする．
 
     キャッシュは `_enc_cache` に方式名をキーにして持つ．実際に要求された方式しか
@@ -392,7 +407,7 @@ def _envelope_compressed_bytes(sim_id: str, encoding: str) -> bytes:
 
     # 圧縮はロックの外で（数百 ms かかる．同時要求が重なっても同じ内容を作るだけ）
     t0 = time.perf_counter()
-    data = _envelope_json_bytes(sim_id)
+    data = envelope_json_bytes(sim_id)
     t1 = time.perf_counter()
     if encoding == "zstd":
         blob = _zstd.ZstdCompressor(level=RESULTS_ZSTD_LEVEL).compress(data)
@@ -405,6 +420,6 @@ def _envelope_compressed_bytes(sim_id: str, encoding: str) -> bytes:
     return blob
 
 
-def _envelope_gzip_bytes(sim_id: str) -> bytes:
+def envelope_gzip_bytes(sim_id: str) -> bytes:
     """gzip 済みエンベロープ（後方互換のための薄いラッパー）．"""
-    return _envelope_compressed_bytes(sim_id, "gzip")
+    return envelope_compressed_bytes(sim_id, "gzip")

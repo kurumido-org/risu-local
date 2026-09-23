@@ -18,6 +18,19 @@ from uxsim_bridge import build_world
 from .runtime import RUNTIME_STATUS, UXSIM_VERSION, executor
 from .schema import SimulationInput
 
+# モジュール外から使う名前（他モジュール・server.py・scripts・tests）．これ以外は内部実装．
+__all__ = [
+    "MAX_NODES",
+    "MAX_TMAX",
+    "apply_link_geometries",
+    "run_uxsim",
+    "run_uxsim_async",
+    "select_frames",
+    "startup_selfcheck",
+    "trip_stats",
+    "validate_scenario_size",
+]
+
 # UXsim 実行タイムアウト（秒）．環境変数で上書き可能．
 UXSIM_TIMEOUT_SEC = int(os.getenv("RISU_UXSIM_TIMEOUT", "120"))
 
@@ -30,7 +43,7 @@ MAX_FRAMES = int(os.getenv("RISU_MAX_FRAMES", "200"))
 MAX_FRAME_POINTS = int(os.getenv("RISU_MAX_FRAME_POINTS", "3000000"))
 
 
-async def _run_uxsim_async(scenario) -> dict:
+async def run_uxsim_async(scenario) -> dict:
     """
     UXsim をタイムアウト付きで非同期実行するラッパー．
     エラーを HTTPException に分類してユーザー向けメッセージを返す．
@@ -38,7 +51,7 @@ async def _run_uxsim_async(scenario) -> dict:
     loop = asyncio.get_event_loop()
     try:
         return await asyncio.wait_for(
-            loop.run_in_executor(executor, _run_uxsim, scenario),
+            loop.run_in_executor(executor, run_uxsim, scenario),
             timeout=UXSIM_TIMEOUT_SEC,
         )
     except asyncio.TimeoutError:
@@ -65,7 +78,7 @@ async def _run_uxsim_async(scenario) -> dict:
             detail=f"シナリオ定義エラー: 参照先「{e.args[0] if e.args else '?'}」が見つかりません．",
         )
     except ValueError as e:
-        # UXsim の不正入力 or _validate_scenario_size
+        # UXsim の不正入力 or validate_scenario_size
         raise HTTPException(400, detail=f"シナリオが不正です: {e}")
     except Exception as e:
         # その他の UXsim 内部エラー
@@ -79,7 +92,7 @@ async def _run_uxsim_async(scenario) -> dict:
 # ──────────────────────────────────────────────
 # UXsim 実行（同期 → Executor で非同期化）
 # ──────────────────────────────────────────────
-def _trip_stats(W) -> tuple[int, int, float | None, list[float]]:
+def trip_stats(W) -> tuple[int, int, float | None, list[float]]:
     """basic_analysis / od_analysis と同じ数え方でトリップ統計を計算する．
 
     dest を持つ車両 × DELTAN がトリップ数，travel_time != -1 が完了，
@@ -122,7 +135,7 @@ def _trip_stats(W) -> tuple[int, int, float | None, list[float]]:
 def _speed_histogram(v) -> dict:
     """速度分布（全フレーム・全車両の観測点）．labels は "lo-hi" m/s，counts は観測点数．
 
-    描画用の間引き前の全点から作る（_run_uxsim）．_get_simulation_data はこれをそのまま返す．
+    描画用の間引き前の全点から作る（run_uxsim）．get_simulation_data はこれをそのまま返す．
     """
     import numpy as np
     v = np.asarray(v, dtype=np.float64)
@@ -137,7 +150,7 @@ def _speed_histogram(v) -> dict:
     return {"labels": [f"{bins[i]}-{bins[i+1]}" for i in range(n_bins)], "counts": counts}
 
 
-def _select_frames(tk, max_frames: int):
+def select_frames(tk, max_frames: int):
     """時刻キー配列から可視化フレームを選ぶ．
 
     戻り値: (kept, fidx) — kept は昇順のフレーム時刻キー，fidx は各点のフレーム index
@@ -213,7 +226,7 @@ def _collect_run_points(W, n_links: int, max_frames: int) -> _RunPoints:
             # run 状態かつ有効リンク上の点（entry index）
             idx = np.flatnonzero((state == run_code) & (link >= 0) & (link < n_links))
             tk = np.rint(np.asarray(flat["log_t"], dtype=np.float64)[idx] * 10.0).astype(np.int64)
-            kept, fidx = _select_frames(tk, max_frames)
+            kept, fidx = select_frames(tk, max_frames)
             if kept.size and fidx.size and (fidx < 0).any():
                 m = fidx >= 0
                 idx, fidx = idx[m], fidx[m]
@@ -285,17 +298,17 @@ def _collect_run_points(W, n_links: int, max_frames: int) -> _RunPoints:
     tk = np.concatenate(tk_parts)
     li, vid = np.concatenate(li_parts), np.concatenate(vid_parts)
     x, v = np.concatenate(x_parts), np.concatenate(v_parts)
-    kept, fidx = _select_frames(tk, max_frames)
+    kept, fidx = select_frames(tk, max_frames)
     m = fidx >= 0
     return _RunPoints(kept, fidx[m], li[m], vid[m], x[m], v[m], entry_t, False)
 
 
-def _run_uxsim(scenario: SimulationInput) -> dict:
+def run_uxsim(scenario: SimulationInput) -> dict:
     # リソース保護: ユーザー入力 / LLM 経由のいずれでも上限を適用
     try:
-        _validate_scenario_size(scenario)
+        validate_scenario_size(scenario)
     except NameError:
-        # _validate_scenario_size 定義前に呼ばれた場合（起動順序保険）は素通し
+        # validate_scenario_size 定義前に呼ばれた場合（起動順序保険）は素通し
         pass
     # 信号メタデータをシナリオから抽出（結果の signals メタデータ用）
     _orig_signal_nodes = [
@@ -323,7 +336,7 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
     # ---- 基本統計（basic_analysis 相当を直接計算） ----
     # od_analysis と同じ数え方: dest を持つ車両 × DELTAN がトリップ数，
     # travel_time != -1 が完了，平均旅行時間は完了車両の travel_time の平均．
-    _trip_all, _trip_completed, _avg_tt, _arrivals = _trip_stats(W)
+    _trip_all, _trip_completed, _avg_tt, _arrivals = trip_stats(W)
 
     # ---- リンク情報（GeoJSON） ----
     # 同一座標ペアのリンクを検出し，重複分にオフセットを付与して視覚的に区別
@@ -582,7 +595,7 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
     }
 
 
-def _startup_selfcheck() -> None:
+def startup_selfcheck() -> None:
     """起動時に最小シナリオを 1 回流し，uxsim のバックエンドと高速経路の可否をログに出す．
 
     uxsim を更新して内部 API（§3.6）が変わっても例外にはならず，車両別ログの
@@ -596,7 +609,7 @@ def _startup_selfcheck() -> None:
             links=[{"name": "ab", "start": "a", "end": "b", "length": 500}],
             demands=[{"orig": "a", "dest": "b", "t_start": 0, "t_end": 30, "flow": 0.5}],
         )
-        rt = _run_uxsim(tiny)["_runtime"]
+        rt = run_uxsim(tiny)["_runtime"]
     except Exception as e:  # 起動は止めない
         print(f"[RISU] startup self-check failed: {e.__class__.__name__}: {e}")
         return
@@ -609,7 +622,7 @@ def _startup_selfcheck() -> None:
               + (f" ({RUNTIME_STATUS['fast_path_error']})" if RUNTIME_STATUS.get("fast_path_error") else ""))
 
 
-def _apply_link_geometries(result: dict, link_geometries: dict):
+def apply_link_geometries(result: dict, link_geometries: dict):
     """GeoJSON features のリンク座標を OSMnx の道路形状（多点 LineString）で置き換える．"""
     if not link_geometries:
         return
@@ -629,7 +642,7 @@ MAX_LINKS   = int(os.getenv("RISU_MAX_LINKS",   "100000"))
 MAX_DEMANDS = int(os.getenv("RISU_MAX_DEMANDS", "10000"))
 MAX_TMAX    = int(os.getenv("RISU_MAX_TMAX",    "86400"))  # 24 時間
 
-def _validate_scenario_size(scenario: SimulationInput) -> None:
+def validate_scenario_size(scenario: SimulationInput) -> None:
     """シナリオのサイズ上限チェック．超過時は 413 を返す．"""
     n_nodes   = len(scenario.nodes)
     n_links   = len(scenario.links)

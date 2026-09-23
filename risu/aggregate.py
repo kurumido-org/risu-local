@@ -1,13 +1,18 @@
-"""LLM に渡す集計データ（_get_simulation_data）．数 KB に収める（CLAUDE.md §3.3）．
+"""LLM に渡す集計データ（get_simulation_data）．数 KB に収める（CLAUDE.md §3.3）．
 """
 
 from __future__ import annotations
 
 from .results import results_store
 
+# モジュール外から使う名前（他モジュール・server.py・scripts・tests）．これ以外は内部実装．
+__all__ = [
+    "get_simulation_data",
+]
+
 
 # ── シミュレーションデータ集計（LLM に渡す） ──
-def _get_simulation_data(sim_id: str, points: int = 30, max_links: int = 20) -> dict | None:
+def get_simulation_data(sim_id: str, points: int = 30, max_links: int = 20) -> dict | None:
     """シミュレーション結果から集計データを返す（LLMがチャート生成に使用）．
 
     LLM のコンテキストに入るので小さく保つ: 時系列は最大 points 点，リンク別速度は

@@ -1,4 +1,4 @@
-"""LLM ツールの実行（_dispatch_tool_blocks）と各ツールのハンドラ．チャット・MCP の全経路で共通（CLAUDE.md §3.2）．
+"""LLM ツールの実行（dispatch_tool_blocks）と各ツールのハンドラ．チャット・MCP の全経路で共通（CLAUDE.md §3.2）．
 """
 
 from __future__ import annotations
@@ -9,16 +9,28 @@ import uuid
 
 from fastapi import HTTPException
 
-from .aggregate import _get_simulation_data
-from .importers import _run_osm_import
-from .results import _store_sim, results_store
+from .aggregate import get_simulation_data
+from .importers import run_osm_import
+from .results import results_store, store_sim
 from .runtime import executor
-from .scenario_ops import _apply_modifications, _expand_run_simulation_args, _generate_osm_demands
+from .scenario_ops import apply_modifications, expand_run_simulation_args, generate_osm_demands
 from .schema import ChatInput, SimulationInput
-from .simulation import _apply_link_geometries, _run_uxsim_async, _validate_scenario_size
+from .simulation import apply_link_geometries, run_uxsim_async, validate_scenario_size
+
+# モジュール外から使う名前（他モジュール・server.py・scripts・tests）．これ以外は内部実装．
+__all__ = [
+    "ToolTurnState",
+    "collect_tool_results",
+    "conversation_context_block",
+    "conversation_sim_id",
+    "dispatch_tool_blocks",
+    "handle_get_network_info",
+    "handle_rerun_simulation",
+    "last_user_message_text",
+]
 
 
-def _last_user_message_text(body) -> str | None:
+def last_user_message_text(body) -> str | None:
     """ChatRequest body から最後のユーザーメッセージを抽出（source 記録用）．"""
     try:
         for m in reversed(body.messages):
@@ -32,7 +44,7 @@ def _last_user_message_text(body) -> str | None:
     return None
 
 
-def _handle_get_network_info(fn_args: dict) -> tuple[str, bool]:
+def handle_get_network_info(fn_args: dict) -> tuple[str, bool]:
     """get_network_info ツールの共通ハンドラ．(content, is_error) を返す．
 
     LLM がネットワークの中身（ノード名・リンク名・構造）を必要な分だけ
@@ -119,7 +131,7 @@ def _handle_get_network_info(fn_args: dict) -> tuple[str, bool]:
     return (json.dumps(out, ensure_ascii=False), False)
 
 
-async def _handle_rerun_simulation(fn_args: dict, body, *, via: str = "chat"
+async def handle_rerun_simulation(fn_args: dict, body, *, via: str = "chat"
                                    ) -> tuple[str, str | None, bool]:
     """rerun_simulation ツールの共通ハンドラ（stream / sync 両系統から使用）．
 
@@ -136,15 +148,15 @@ async def _handle_rerun_simulation(fn_args: dict, body, *, via: str = "chat"
 
     try:
         mods = fn_args.get("modifications") or []
-        scenario, applied = _apply_modifications(base_scenario, mods)
+        scenario, applied = apply_modifications(base_scenario, mods)
         if fn_args.get("tmax"):
             scenario["tmax"] = int(fn_args["tmax"])
             applied.append(f"tmax={scenario['tmax']}s")
         if fn_args.get("name"):
             scenario["name"] = str(fn_args["name"])
         si = SimulationInput(**scenario)
-        _validate_scenario_size(si)
-        result = await _run_uxsim_async(si)
+        validate_scenario_size(si)
+        result = await run_uxsim_async(si)
 
         # OSM 由来の道路形状（曲線座標）を名前一致で引き継ぐ
         base_geom = {}
@@ -153,16 +165,16 @@ async def _handle_rerun_simulation(fn_args: dict, body, *, via: str = "chat"
             if coords and len(coords) > 2:
                 base_geom[f["properties"]["name"]] = coords
         if base_geom:
-            _apply_link_geometries(result, base_geom)
+            apply_link_geometries(result, base_geom)
 
         new_id = str(uuid.uuid4())[:8]
-        _store_sim(new_id, result, {
+        store_sim(new_id, result, {
             "type": "llm",
             "via": via,
             "llm_backend": "claude",
             "tool": "rerun_simulation",
             "base_sim_id": base_id,
-            "llm_user_message": _last_user_message_text(body),
+            "llm_user_message": last_user_message_text(body),
         })
         content = json.dumps({
             **result["stats"],
@@ -188,20 +200,20 @@ async def _handle_run_simulation(fn_args: dict, body, *, source_round: str | Non
     戻り値: (tool_result content, 新 sim_id または None, is_error)
     """
     try:
-        scenario, info = _expand_run_simulation_args(fn_args)
+        scenario, info = expand_run_simulation_args(fn_args)
         sim_input = SimulationInput(**scenario)
-        result = await _run_uxsim_async(sim_input)
+        result = await run_uxsim_async(sim_input)
         sim_id = str(uuid.uuid4())[:8]
         src = {
             "type": "llm",
             "via": via,
             "llm_backend": "claude",
             "tool": "run_simulation",
-            "llm_user_message": _last_user_message_text(body),
+            "llm_user_message": last_user_message_text(body),
         }
         if source_round:
             src["round"] = source_round
-        _store_sim(sim_id, result, src)
+        store_sim(sim_id, result, src)
         payload = {**result["stats"], "sim_id": sim_id,
                    "network": {"nodes": len(scenario["nodes"]), "links": len(scenario["links"]),
                                "demands": len(scenario["demands"])}}
@@ -215,20 +227,20 @@ async def _handle_run_simulation(fn_args: dict, body, *, source_round: str | Non
                 None, True)
 
 
-def _conversation_sim_id(body: ChatInput) -> str | None:
+def conversation_sim_id(body: ChatInput) -> str | None:
     """会話に紐づく有効なシミュレーションIDを返す（なければ None）"""
     sim_id = (getattr(body, "last_sim_id", None) or "").strip()
     return sim_id if sim_id and sim_id in results_store else None
 
 
-def _conversation_context_block(body: ChatInput) -> str:
+def conversation_context_block(body: ChatInput) -> str:
     """システムプロンプト末尾に付けるコンテキスト注入文字列を生成．
 
     会話に紐づく sim（フロントが /chat で送る last_sim_id）だけを対象にする．
     results_store のグローバル最新を使うと，別会話や CSV アップロードで作られた
     無関係なシナリオを LLM が rerun_simulation で流用してしまうため．
     """
-    sim_id = _conversation_sim_id(body)
+    sim_id = conversation_sim_id(body)
     if not sim_id:
         return ""
     link_names = [f["properties"]["name"] for f in results_store[sim_id].get("geojson", {}).get("features", [])]
@@ -249,7 +261,7 @@ def _conversation_context_block(body: ChatInput) -> str:
 # ──────────────────────────────────────────────
 # ツール実行の共通ディスパッチ
 # ──────────────────────────────────────────────
-class _ToolTurnState:
+class ToolTurnState:
     """1 ターン分のツール実行で持ち回る状態．
 
     sim_id            このターンで最後に作られたシミュレーション ID
@@ -274,10 +286,10 @@ def _tool_result(tool_use_id: str, content: str, is_err: bool = False) -> dict:
     return tr
 
 
-async def _dispatch_tool_blocks(tool_blocks, state: _ToolTurnState, *, follow_up: bool = False):
+async def dispatch_tool_blocks(tool_blocks, state: ToolTurnState, *, follow_up: bool = False):
     """tool_use ブロック群を実行する非同期ジェネレータ．
 
-    ストリーミング経路（_chat_claude_stream）と同期経路（_chat_claude）で
+    ストリーミング経路（chat_claude_stream）と同期経路（_chat_claude）で
     **同じコードを通す**ためにここへ集約している．以前は初回ラウンドと追加ラウンド ×
     2 経路の計 4 箇所に同じ dispatch があり，片方だけ直すと挙動がずれる状態だった．
 
@@ -308,7 +320,7 @@ async def _dispatch_tool_blocks(tool_blocks, state: _ToolTurnState, *, follow_up
         elif name == "rerun_simulation":
             yield ("progress", "修正を適用して再実行中..." if follow_up
                    else "Step 2/3: 修正を適用して再実行中...")
-            content, new_sim_id, is_err = await _handle_rerun_simulation(args, state.body, via=state.via)
+            content, new_sim_id, is_err = await handle_rerun_simulation(args, state.body, via=state.via)
             if new_sim_id:
                 state.sim_id = new_sim_id
             results.append(_tool_result(tb.id, content, is_err))
@@ -316,7 +328,7 @@ async def _dispatch_tool_blocks(tool_blocks, state: _ToolTurnState, *, follow_up
         elif name == "get_network_info":
             if not follow_up:
                 yield ("progress", "ネットワーク情報を照会中...")
-            content, is_err = _handle_get_network_info(args)
+            content, is_err = handle_get_network_info(args)
             results.append(_tool_result(tb.id, content, is_err))
 
         elif name == "import_osm_network":
@@ -330,7 +342,7 @@ async def _dispatch_tool_blocks(tool_blocks, state: _ToolTurnState, *, follow_up
             try:
                 loop = asyncio.get_event_loop()
                 osm_result = await loop.run_in_executor(
-                    executor, _run_osm_import, place, dist, road_types
+                    executor, run_osm_import, place, dist, road_types
                 )
                 scenario = dict(osm_result)
                 link_geometries = scenario.pop("link_geometries", {})
@@ -340,14 +352,14 @@ async def _dispatch_tool_blocks(tool_blocks, state: _ToolTurnState, *, follow_up
                 scenario["tmax"] = osm_tmax
 
                 if not scenario["demands"] and len(scenario["nodes"]) >= 2:
-                    scenario["demands"] = _generate_osm_demands(
+                    scenario["demands"] = generate_osm_demands(
                         scenario["nodes"], scenario["links"], osm_tmax
                     )
 
                 if not follow_up:
                     yield ("progress", "Step 2/3: UXsim でシミュレーション実行中...")
-                result = await _run_uxsim_async(SimulationInput(**scenario))
-                _apply_link_geometries(result, link_geometries)
+                result = await run_uxsim_async(SimulationInput(**scenario))
+                apply_link_geometries(result, link_geometries)
                 new_id = str(uuid.uuid4())[:8]
                 meta = {
                     "type": "osm",
@@ -355,11 +367,11 @@ async def _dispatch_tool_blocks(tool_blocks, state: _ToolTurnState, *, follow_up
                     "llm_backend": "claude",
                     "place": place,
                     "distance_m": dist,
-                    "llm_user_message": _last_user_message_text(state.body),
+                    "llm_user_message": last_user_message_text(state.body),
                 }
                 if follow_up:
                     meta["round"] = "follow_up"
-                _store_sim(new_id, result, meta)
+                store_sim(new_id, result, meta)
                 state.sim_id = new_id
 
                 results.append(_tool_result(tb.id, json.dumps({
@@ -380,8 +392,8 @@ async def _dispatch_tool_blocks(tool_blocks, state: _ToolTurnState, *, follow_up
             # 会話に紐づく sim の順でフォールバック（グローバル最新は使わない）
             req_sim_id = args.get("sim_id", "")
             if not req_sim_id or req_sim_id not in results_store:
-                req_sim_id = state.sim_id or _conversation_sim_id(state.body) or ""
-            sd = _get_simulation_data(req_sim_id,
+                req_sim_id = state.sim_id or conversation_sim_id(state.body) or ""
+            sd = get_simulation_data(req_sim_id,
                                       points=args.get("points") or 30,
                                       max_links=args.get("max_links", 20))
             if sd:
@@ -399,10 +411,10 @@ async def _dispatch_tool_blocks(tool_blocks, state: _ToolTurnState, *, follow_up
     yield ("results", results)
 
 
-async def _collect_tool_results(tool_blocks, state: _ToolTurnState, *, follow_up: bool = False):
-    """_dispatch_tool_blocks の進捗を捨てて tool_result だけ取る（同期経路用）．"""
+async def collect_tool_results(tool_blocks, state: ToolTurnState, *, follow_up: bool = False):
+    """dispatch_tool_blocks の進捗を捨てて tool_result だけ取る（同期経路用）．"""
     results = []
-    async for kind, payload in _dispatch_tool_blocks(tool_blocks, state, follow_up=follow_up):
+    async for kind, payload in dispatch_tool_blocks(tool_blocks, state, follow_up=follow_up):
         if kind == "results":
             results = payload
     return results

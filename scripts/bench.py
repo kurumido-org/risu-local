@@ -10,10 +10,10 @@ CLAUDE.md の「パフォーマンス上の前提」を壊していないか確�
 
 出力の読み方:
     exec      UXsim 本体の計算時間（RISU の管轄外）
-    post      _run_uxsim の後処理（フレーム収集・GeoJSON 生成）
+    post      run_uxsim の後処理（フレーム収集・GeoJSON 生成）
     json      /results のエンベロープ直列化（orjson，columnar_v3 への量子化を含む）
     gz        gzip 圧縮（RESULTS_GZIP_LEVEL）
-    simdata   _get_simulation_data（LLM へ渡す集計）
+    simdata   get_simulation_data（LLM へ渡す集計）
 
 json / gz のサイズはブラウザが受け取る量そのもの．ここが増えると
 JSON.parse とメモリが効いてくるので，大きく変わったら原因を確認すること．
@@ -78,27 +78,27 @@ def grid_scenario(n: int, tmax: int = 3600, demands: int = 200, seed: int = 0) -
 
 
 def run_one(label: str, scenario: dict, *, profile: bool = False) -> None:
-    sim_input = risu.schema._scenario_to_input(scenario)
+    sim_input = risu.schema.scenario_to_input(scenario)
 
     t0 = time.perf_counter()
     if profile:
         import cProfile
         pr = cProfile.Profile()
         pr.enable()
-    result = risu.simulation._run_uxsim(sim_input)
+    result = risu.simulation.run_uxsim(sim_input)
     if profile:
         pr.disable()
     t1 = time.perf_counter()
 
     sim_id = f"bench_{label}"
-    risu.results._store_sim(sim_id, result)
+    risu.results.store_sim(sim_id, result)
     try:
         t2 = time.perf_counter()
-        payload = risu.results._envelope_json_bytes(sim_id)
+        payload = risu.results.envelope_json_bytes(sim_id)
         t3 = time.perf_counter()
-        gz = risu.results._envelope_gzip_bytes(sim_id)
+        gz = risu.results.envelope_gzip_bytes(sim_id)
         t4 = time.perf_counter()
-        risu.aggregate._get_simulation_data(sim_id)
+        risu.aggregate.get_simulation_data(sim_id)
         t5 = time.perf_counter()
 
         frames = result["frames"]

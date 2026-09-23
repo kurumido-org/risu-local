@@ -8,6 +8,13 @@ import math
 
 from .simulation import MAX_NODES
 
+# モジュール外から使う名前（他モジュール・server.py・scripts・tests）．これ以外は内部実装．
+__all__ = [
+    "apply_modifications",
+    "expand_run_simulation_args",
+    "generate_osm_demands",
+]
+
 # ──────────────────────────────────────────────
 # シナリオパッチエンジン（rerun_simulation 用）
 # 大規模ネットワークを LLM に往復させず，保存済みシナリオへの
@@ -44,7 +51,7 @@ _SCENARIO_PARAM_FIELDS = {"tmax", "deltan", "reaction_time", "random_seed"}
 _DEMAND_SET_FIELDS = {"flow", "t_start", "t_end"}
 
 
-def _apply_modifications(scenario: dict, mods: list[dict]) -> tuple[dict, list[str]]:
+def apply_modifications(scenario: dict, mods: list[dict]) -> tuple[dict, list[str]]:
     """保存済みシナリオ dict に modification 命令列を適用する．
 
     戻り値: (新しいシナリオ dict, 適用ログ)．不正な命令は ValueError．
@@ -282,7 +289,7 @@ def _generate_demands_spec(nodes: list[dict], links: list[dict], spec: dict, tma
     t_end = float(spec.get("t_end", tmax * 0.5))
     if strategy == "boundary":
         # ネットワーク周縁ノード全ペア（OSM インポートと同じロジック）
-        new_demands = _generate_osm_demands(nodes, links, tmax)
+        new_demands = generate_osm_demands(nodes, links, tmax)
         if spec.get("flow_per_pair") is not None:
             for d in new_demands:
                 d["flow"] = float(spec["flow_per_pair"])
@@ -309,7 +316,7 @@ def _generate_demands_spec(nodes: list[dict], links: list[dict], spec: dict, tma
     return new_demands
 
 
-def _expand_run_simulation_args(fn_args: dict) -> tuple[dict, dict]:
+def expand_run_simulation_args(fn_args: dict) -> tuple[dict, dict]:
     """run_simulation の tool 入力を SimulationInput 用 dict に展開する．
 
     戻り値: (scenario dict, 展開情報 dict — tool_result に含めて LLM に命名規則を伝える)
@@ -339,7 +346,7 @@ def _expand_run_simulation_args(fn_args: dict) -> tuple[dict, dict]:
     return args, info
 
 
-def _generate_osm_demands(nodes: list[dict], links: list[dict], tmax: int = 3600) -> list[dict]:
+def generate_osm_demands(nodes: list[dict], links: list[dict], tmax: int = 3600) -> list[dict]:
     """OSM ネットワークの境界ノードから多方向の需要を生成し，全道路を利用させる．
 
     ネットワーク周縁（境界）のノードを特定し，それら全ペア間に需要を設定する．

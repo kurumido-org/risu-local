@@ -8,9 +8,9 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from risu.aggregate import _get_simulation_data  # noqa: E402
+from risu.aggregate import get_simulation_data  # noqa: E402
 from risu.results import results_store  # noqa: E402
-from risu.simulation import _run_uxsim  # noqa: E402
+from risu.simulation import run_uxsim  # noqa: E402
 
 from helpers import (  # noqa: E402
     BOTTLENECK_SCENARIO,
@@ -29,11 +29,11 @@ class TestStoreLimitAndUsageCost:
         import risu.schema
         import risu.simulation
         monkeypatch.setattr(risu.results, "MAX_RESULTS", 2)
-        base = _run_uxsim(BOTTLENECK_SCENARIO)
+        base = run_uxsim(BOTTLENECK_SCENARIO)
         ids = ["evict_a", "evict_b", "evict_c"]
         try:
             for sid in ids:
-                risu.results._store_sim(sid, dict(base), {"type": "manual"})
+                risu.results.store_sim(sid, dict(base), {"type": "manual"})
             assert "evict_a" not in results_store
             assert "evict_b" in results_store and "evict_c" in results_store
         finally:
@@ -53,11 +53,11 @@ class TestStoreLimitAndUsageCost:
         import risu.scenario_ops
         import risu.schema
         import risu.simulation
-        u = risu.llm._log_usage("test", NS(usage=NS(input_tokens=2, output_tokens=190,
+        u = risu.llm.log_usage("test", NS(usage=NS(input_tokens=2, output_tokens=190,
                                                   cache_read_input_tokens=8234,
                                                   cache_creation_input_tokens=1359)))
         assert u["cost_jpy"] > 0
-        tally = risu.llm._UsageTally()
+        tally = risu.llm.UsageTally()
         tally.add("t", NS(usage=NS(input_tokens=2, output_tokens=10, cache_read_input_tokens=10000,
                                    cache_creation_input_tokens=0)))
         d = tally.as_dict()
@@ -72,15 +72,15 @@ class TestFrameWireEncodingV3:
     """/results が返す columnar_v3 のエンコード/デコード整合性．
 
     v3 は「送出時だけ」の表現で，results_store 側は v2（素の値）のまま．
-    サーバー内の消費側（_get_simulation_data 等）が壊れないことも確認する．
+    サーバー内の消費側（get_simulation_data 等）が壊れないことも確認する．
     """
 
     @classmethod
     def setup_class(cls):
-        from risu.results import _store_sim
-        cls.res = _run_uxsim(BOTTLENECK_SCENARIO)
+        from risu.results import store_sim
+        cls.res = run_uxsim(BOTTLENECK_SCENARIO)
         cls.sim_id = "wire_v3_test"
-        _store_sim(cls.sim_id, cls.res)
+        store_sim(cls.sim_id, cls.res)
 
     @classmethod
     def teardown_class(cls):
@@ -103,10 +103,10 @@ class TestFrameWireEncodingV3:
     def test_roundtrip_matches_within_tolerance(self):
         """量子化 → 復元で，描画に影響しない誤差に収まること．"""
         import numpy as np
-        from risu.results import _encode_frames_v3
+        from risu.results import encode_frames_v3
 
         src = self.res["frames"]
-        enc = _encode_frames_v3(src)
+        enc = encode_frames_v3(src)
         assert set(enc.keys()) == set(src.keys())
 
         for k in src:
@@ -131,14 +131,14 @@ class TestFrameWireEncodingV3:
     def test_envelope_marks_v3_and_shrinks(self):
         """エンベロープの frame_format が v3 になり，バイト数が v2 より小さいこと．"""
         import orjson
-        from risu.results import _build_envelope, _envelope_json_bytes
+        from risu.results import build_envelope, envelope_json_bytes
 
-        v2_env = _build_envelope(self.sim_id, include_result=True)
+        v2_env = build_envelope(self.sim_id, include_result=True)
         assert v2_env["result"]["frame_format"] == "columnar_v2"
         v2_bytes = orjson.dumps(
             v2_env, option=orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_NON_STR_KEYS)
 
-        v3_bytes = _envelope_json_bytes(self.sim_id)
+        v3_bytes = envelope_json_bytes(self.sim_id)
         assert b'"columnar_v3"' in v3_bytes
         assert len(v3_bytes) < len(v2_bytes), (
             f"v3 が v2 より大きい: {len(v3_bytes)} >= {len(v2_bytes)}")
@@ -150,17 +150,17 @@ class TestFrameWireEncodingV3:
         （_enc_cache は一度作ると使い回されるため，壊すと以後ずっと壊れる）．
         """
         import numpy as np
-        from risu.results import _envelope_json_bytes
+        from risu.results import envelope_json_bytes
 
         before = {k: np.asarray(v["xs"]).copy() for k, v in self.res["frames"].items()}
-        _envelope_json_bytes(self.sim_id)
+        envelope_json_bytes(self.sim_id)
         for k, arr in before.items():
             np.testing.assert_array_equal(np.asarray(self.res["frames"][k]["xs"]), arr)
         assert results_store[self.sim_id]["frame_format"] == "columnar_v2"
 
     def test_simulation_data_still_works(self):
         """サーバー内の集計（LLM に渡すデータ）が素の値を読めていること．"""
-        data = _get_simulation_data(self.sim_id)
+        data = get_simulation_data(self.sim_id)
         assert data is not None
         assert data.get("network_avg_speed")
         # 速度が 0.1 m/s 単位の「整数」になっていない（=量子化が漏れていない）
@@ -193,7 +193,7 @@ class TestResultsEncodingNegotiation:
         import risu.schema
         import risu.simulation
         cls.sid = "test_enc_negotiation"
-        risu.results._store_sim(cls.sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        risu.results.store_sim(cls.sid, run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
 
     @classmethod
     def teardown_class(cls):
@@ -229,8 +229,8 @@ class TestResultsEncodingNegotiation:
         import risu.simulation
         if risu.results._zstd is None:
             pytest.skip("zstandard 未インストール")
-        assert risu.results._negotiate_encoding("gzip, deflate, br, zstd") == "zstd"
-        assert risu.results._negotiate_encoding("ZSTD") == "zstd", "大文字small文字を無視すべき"
+        assert risu.results.negotiate_encoding("gzip, deflate, br, zstd") == "zstd"
+        assert risu.results.negotiate_encoding("ZSTD") == "zstd", "大文字small文字を無視すべき"
 
     def test_negotiate_falls_back_to_gzip(self):
         import risu.aggregate
@@ -243,8 +243,8 @@ class TestResultsEncodingNegotiation:
         import risu.scenario_ops
         import risu.schema
         import risu.simulation
-        assert risu.results._negotiate_encoding("gzip, deflate, br") == "gzip"
-        assert risu.results._negotiate_encoding("gzip") == "gzip"
+        assert risu.results.negotiate_encoding("gzip, deflate, br") == "gzip"
+        assert risu.results.negotiate_encoding("gzip") == "gzip"
 
     def test_negotiate_identity_when_nothing_supported(self):
         import risu.aggregate
@@ -257,9 +257,9 @@ class TestResultsEncodingNegotiation:
         import risu.scenario_ops
         import risu.schema
         import risu.simulation
-        assert risu.results._negotiate_encoding("") == "identity"
-        assert risu.results._negotiate_encoding("identity") == "identity"
-        assert risu.results._negotiate_encoding(None) == "identity"
+        assert risu.results.negotiate_encoding("") == "identity"
+        assert risu.results.negotiate_encoding("identity") == "identity"
+        assert risu.results.negotiate_encoding(None) == "identity"
 
     def test_negotiate_uses_gzip_if_zstandard_missing(self, monkeypatch):
         """zstandard が入っていない環境では zstd を要求されても gzip になる．"""
@@ -274,7 +274,7 @@ class TestResultsEncodingNegotiation:
         import risu.schema
         import risu.simulation
         monkeypatch.setattr(risu.results, "_zstd", None)
-        assert risu.results._negotiate_encoding("gzip, deflate, br, zstd") == "gzip"
+        assert risu.results.negotiate_encoding("gzip, deflate, br, zstd") == "gzip"
 
     # ── エンドポイントの実挙動 ────────────────────
 
@@ -339,7 +339,7 @@ class TestResultsEncodingNegotiation:
         import risu.schema
         import risu.simulation
         sid = "test_enc_cache"
-        risu.results._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        risu.results.store_sim(sid, run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
         try:
             c = self._client()
             r1 = c.get(f"/results/{sid}", headers={"Accept-Encoding": "gzip"})
@@ -370,12 +370,12 @@ class TestResultsEncodingNegotiation:
         import risu.simulation
         if risu.results._zstd is None:
             pytest.skip("zstandard 未インストール")
-        gz = risu.results._envelope_compressed_bytes(self.sid, "gzip")
-        zs = risu.results._envelope_compressed_bytes(self.sid, "zstd")
+        gz = risu.results.envelope_compressed_bytes(self.sid, "gzip")
+        zs = risu.results.envelope_compressed_bytes(self.sid, "zstd")
         assert len(zs) < len(gz), f"zstd={len(zs)} >= gzip={len(gz)}"
 
     def test_gzip_wrapper_still_works(self):
-        """既存の _envelope_gzip_bytes（後方互換ラッパー）が生きていること．"""
+        """既存の envelope_gzip_bytes（後方互換ラッパー）が生きていること．"""
         import risu.aggregate
         import risu.api
         import risu.llm
@@ -386,8 +386,8 @@ class TestResultsEncodingNegotiation:
         import risu.scenario_ops
         import risu.schema
         import risu.simulation
-        assert risu.results._envelope_gzip_bytes(self.sid) == \
-            risu.results._envelope_compressed_bytes(self.sid, "gzip")
+        assert risu.results.envelope_gzip_bytes(self.sid) == \
+            risu.results.envelope_compressed_bytes(self.sid, "gzip")
 
 
 # ============================================================
@@ -424,7 +424,7 @@ class TestResultsPersistence:
         import risu.scenario_ops
         import risu.schema
         import risu.simulation
-        fut = risu.results._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        fut = risu.results.store_sim(sid, run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
         assert fut is not None
         assert fut.result(timeout=60) is not None
         return risu.results.results_store[sid]
@@ -441,7 +441,7 @@ class TestResultsPersistence:
         import risu.schema
         import risu.simulation
         monkeypatch.setattr(risu.results, "RESULTS_DIR", "")
-        assert risu.results._store_sim("p_off", _run_uxsim(BOTTLENECK_SCENARIO)) is None
+        assert risu.results.store_sim("p_off", run_uxsim(BOTTLENECK_SCENARIO)) is None
         assert list(tmp_path.iterdir()) == []
         risu.results.results_store.pop("p_off", None)
 
@@ -461,7 +461,7 @@ class TestResultsPersistence:
         original = self._store(sid)
         files = list(store_dir.iterdir())
         assert len(files) == 1 and files[0].name.startswith(sid + ".json.")
-        orig_data = _get_simulation_data(sid)
+        orig_data = get_simulation_data(sid)
 
         # メモリから消しても（再起動・MAX_RESULTS の追い出し相当）透過的に戻る
         dict.pop(risu.results.results_store, sid)
@@ -484,7 +484,7 @@ class TestResultsPersistence:
             assert np.abs(a["vs"] - b["vs"]).max() <= 0.051
             assert np.abs(a["alphas"] - b["alphas"]).max() <= 0.00051
         # LLM 向け集計は同じ（台数・累積は無損失，速度は保存済みの系列）
-        re_data = _get_simulation_data(sid)
+        re_data = get_simulation_data(sid)
         assert re_data["network_vehicle_count"] == orig_data["network_vehicle_count"]
         assert re_data["network_avg_speed"] == orig_data["network_avg_speed"]
         assert re_data["network_completed_count"] == orig_data["network_completed_count"]
@@ -526,7 +526,7 @@ class TestResultsPersistence:
         import risu.simulation
         for bad in ("../x", "a/b", "", "x" * 65, "..\\x"):
             assert bad not in risu.results.results_store
-            assert risu.results._persisted_path(bad) is None
+            assert risu.results.persisted_path(bad) is None
 
     def test_downloaded_json_can_be_dropped_in(self, store_dir):
         """ダウンロードした .json+result（素の JSON）をディレクトリに置くだけで読める．"""
@@ -542,12 +542,12 @@ class TestResultsPersistence:
         import risu.simulation
         sid = "p_src"
         self._store(sid)
-        env_bytes = risu.results._envelope_json_bytes(sid)
+        env_bytes = risu.results.envelope_json_bytes(sid)
         (store_dir / "dropped.json").write_bytes(env_bytes)
         risu.results.results_store.pop(sid, None)
-        assert "dropped" in risu.results._persisted_ids()
+        assert "dropped" in risu.results.persisted_ids()
         assert "dropped" in risu.results.results_store
-        d = _get_simulation_data("dropped")
+        d = get_simulation_data("dropped")
         assert d and d["stats"]["total_trips"] > 0
         risu.results.results_store.pop("dropped", None)
 
@@ -564,13 +564,13 @@ class TestResultsStoreConcurrency:
 
         import risu.results
         monkeypatch.setattr(risu.results, "MAX_RESULTS", 5)
-        base = _run_uxsim(BOTTLENECK_SCENARIO)
+        base = run_uxsim(BOTTLENECK_SCENARIO)
         errors = []
         ids = [f"conc_{i}" for i in range(40)]
 
         def writer(i):
             try:
-                risu.results._store_sim(ids[i], dict(base), {"type": "manual"})
+                risu.results.store_sim(ids[i], dict(base), {"type": "manual"})
             except Exception as e:  # noqa: BLE001
                 errors.append(e)
 
@@ -578,7 +578,7 @@ class TestResultsStoreConcurrency:
             try:
                 for sid in ids:
                     if sid in risu.results.results_store:
-                        _get_simulation_data(sid)
+                        get_simulation_data(sid)
             except Exception as e:  # noqa: BLE001
                 errors.append(e)
 
@@ -601,10 +601,10 @@ class TestResultsStoreConcurrency:
 
         import risu.results
         sid = "conc_zip"
-        risu.results._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        risu.results.store_sim(sid, run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
         blobs = []
         def work():
-            blobs.append(risu.results._envelope_compressed_bytes(sid, "gzip"))
+            blobs.append(risu.results.envelope_compressed_bytes(sid, "gzip"))
         threads = [threading.Thread(target=work) for _ in range(6)]
         for th in threads:
             th.start()

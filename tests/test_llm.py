@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from risu.results import results_store  # noqa: E402
 from risu.schema import SimulationInput  # noqa: E402
-from risu.simulation import _run_uxsim  # noqa: E402
+from risu.simulation import run_uxsim  # noqa: E402
 
 from helpers import (  # noqa: E402
     BOTTLENECK_SCENARIO, GRID_BIDIRECTIONAL_SCENARIO,
@@ -45,26 +45,26 @@ class TestConversationContext:
 
     def test_no_last_sim_id_injects_nothing(self, stored_sim):
         # results_store に sim があっても，会話が指定しなければ注入しない
-        from risu.tools import _conversation_context_block
-        assert _conversation_context_block(self._body(None)) == ""
+        from risu.tools import conversation_context_block
+        assert conversation_context_block(self._body(None)) == ""
 
     def test_valid_last_sim_id_injects_that_sim(self, stored_sim):
-        from risu.tools import _conversation_context_block
-        block = _conversation_context_block(self._body(stored_sim))
+        from risu.tools import conversation_context_block
+        block = conversation_context_block(self._body(stored_sim))
         assert stored_sim in block
         assert f'rerun_simulation(base_sim_id="{stored_sim}")' in block
         assert "2 ノード / 2 リンク" in block
 
     def test_unknown_last_sim_id_injects_nothing(self, stored_sim):
         # サーバー再起動などで sim が消えた場合は注入しない
-        from risu.tools import _conversation_context_block
-        assert _conversation_context_block(self._body("gone123")) == ""
+        from risu.tools import conversation_context_block
+        assert conversation_context_block(self._body("gone123")) == ""
 
     def test_conversation_sim_id_helper(self, stored_sim):
-        from risu.tools import _conversation_sim_id
-        assert _conversation_sim_id(self._body(stored_sim)) == stored_sim
-        assert _conversation_sim_id(self._body(None)) is None
-        assert _conversation_sim_id(self._body("  ")) is None
+        from risu.tools import conversation_sim_id
+        assert conversation_sim_id(self._body(stored_sim)) == stored_sim
+        assert conversation_sim_id(self._body(None)) is None
+        assert conversation_sim_id(self._body("  ")) is None
 
 
 # ============================================================
@@ -201,7 +201,7 @@ class TestLLMTokenSaving:
                 {"role": "assistant", "content": "a1"},
                 {"role": "user", "content": "u2"},
             ], last_sim_id=sid)
-            msgs = risu.llm._build_llm_messages(body)
+            msgs = risu.llm.build_llm_messages(body)
             assert [m["role"] for m in msgs] == ["user", "assistant", "user"]
             # 履歴の最後の assistant にキャッシュ境界
             a1 = msgs[1]["content"]
@@ -211,10 +211,10 @@ class TestLLMTokenSaving:
             assert u2[0]["text"] == "u2" and "cache_control" not in u2[0]
             assert sid in u2[1]["text"] and "cache_control" in u2[1]
             # 送信用には内部フラグが残らない
-            api = risu.llm._api_messages(msgs)
+            api = risu.llm.api_messages(msgs)
             assert all("_tail_marked" not in b for m in api for b in m["content"])
             # コンテキストが無い場合は本文ブロックだけ（末尾にキャッシュ境界）
-            msgs2 = risu.llm._build_llm_messages(self._body([{"role": "user", "content": "hi"}]))
+            msgs2 = risu.llm.build_llm_messages(self._body([{"role": "user", "content": "hi"}]))
             assert len(msgs2[0]["content"]) == 1 and "cache_control" in msgs2[0]["content"][0]
         finally:
             results_store.pop(sid, None)
@@ -230,11 +230,11 @@ class TestLLMTokenSaving:
         import risu.scenario_ops
         import risu.schema
         import risu.simulation
-        msgs = risu.llm._build_llm_messages(self._body([{"role": "user", "content": "hi"}]))
+        msgs = risu.llm.build_llm_messages(self._body([{"role": "user", "content": "hi"}]))
         msgs.append({"role": "assistant", "content": [{"type": "text", "text": "calling"}]})
         msgs.append({"role": "user", "content": [
             {"type": "tool_result", "tool_use_id": "t1", "content": "{}"}]})
-        risu.llm._mark_cache_tail(msgs)
+        risu.llm.mark_cache_tail(msgs)
         # 末尾の印は tool_result に移り，以前の末尾（user "hi"）からは外れる
         assert "cache_control" in msgs[-1]["content"][-1]
         assert "cache_control" not in msgs[0]["content"][0]
@@ -256,7 +256,7 @@ class TestLLMTokenSaving:
             msgs.append({"role": "user", "content": f"u{i} " + "x" * 100})
             msgs.append({"role": "assistant", "content": f"a{i} " + "y" * 100})
         msgs.append({"role": "user", "content": "last"})
-        kept = risu.llm._trim_history(msgs)
+        kept = risu.llm.trim_history(msgs)
         assert kept[0]["role"] == "user"
         assert kept[-1]["content"] == "last"
         assert "省略" in kept[0]["content"]
@@ -264,7 +264,7 @@ class TestLLMTokenSaving:
         assert total <= 1000 // 2 + 200  # 予算の半分まで落とす（先頭の注記分は許容）
         # 予算内なら手を付けない
         small = msgs[-3:]
-        assert risu.llm._trim_history(small) is small
+        assert risu.llm.trim_history(small) is small
 
     def test_grid_template_and_auto_demands(self):
         import risu.aggregate
@@ -280,7 +280,7 @@ class TestLLMTokenSaving:
         args = {"grid": {"nx": 4, "ny": 3, "spacing": 250, "free_flow_speed": 15},
                 "auto_demands": {"strategy": "random", "n_pairs": 5, "flow_per_pair": 0.1, "seed": 1},
                 "tmax": 1200}
-        scenario, info = risu.scenario_ops._expand_run_simulation_args(args)
+        scenario, info = risu.scenario_ops.expand_run_simulation_args(args)
         assert len(scenario["nodes"]) == 12
         # 双方向: 横 (3×3) + 縦 (4×2) = 17 本 × 2
         assert len(scenario["links"]) == 34
@@ -289,29 +289,29 @@ class TestLLMTokenSaving:
         assert info["grid"]["nx"] == 4 and "n{i}_{j}" in info["grid"]["node_naming"]
         assert info["auto_demands"]["generated"] == 5
         # SimulationInput として妥当で，実行できる
-        r = _run_uxsim(SimulationInput(**scenario))
+        r = run_uxsim(SimulationInput(**scenario))
         assert r["stats"]["total_trips"] > 0
         # 片方向グリッド
-        one, _ = risu.scenario_ops._expand_run_simulation_args(
+        one, _ = risu.scenario_ops.expand_run_simulation_args(
             {"grid": {"nx": 3, "bidirectional": False}, "demands": [
                 {"orig": "n0_0", "dest": "n2_2", "t_start": 0, "t_end": 100, "flow": 0.2}]})
         assert len(one["links"]) == 12
         # nodes/links も demands も無ければエラー
         with pytest.raises(ValueError):
-            risu.scenario_ops._expand_run_simulation_args({"nodes": [], "links": [], "demands": []})
+            risu.scenario_ops.expand_run_simulation_args({"nodes": [], "links": [], "demands": []})
         with pytest.raises(ValueError):
-            risu.scenario_ops._expand_run_simulation_args({"grid": {"nx": 3}})
+            risu.scenario_ops.expand_run_simulation_args({"grid": {"nx": 3}})
 
     def test_generate_demands_shared_with_rerun(self):
-        from risu.scenario_ops import _apply_modifications
+        from risu.scenario_ops import apply_modifications
         sc = {"nodes": [{"name": f"n{i}", "x": i * 100, "y": 0} for i in range(6)],
               "links": [{"name": f"l{i}", "start": f"n{i}", "end": f"n{i+1}", "length": 100} for i in range(5)],
               "demands": [], "tmax": 600}
-        out, applied = _apply_modifications(sc, [
+        out, applied = apply_modifications(sc, [
             {"action": "generate_demands", "strategy": "random", "n_pairs": 4, "seed": 7, "flow_total": 0.8}])
         assert len(out["demands"]) == 4 and all(d["flow"] == 0.2 for d in out["demands"])
         with pytest.raises(ValueError):
-            _apply_modifications(sc, [{"action": "generate_demands", "strategy": "nope"}])
+            apply_modifications(sc, [{"action": "generate_demands", "strategy": "nope"}])
 
     def test_chart_data_refs_resolved(self):
         import risu.aggregate
@@ -325,23 +325,23 @@ class TestLLMTokenSaving:
         import risu.schema
         import risu.simulation
         sid = "tok_chart"
-        risu.results._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        risu.results.store_sim(sid, run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
         try:
             cache = {}
             text = ('結果です．\n```chart\n{"type":"line","data":{"labels":{"$data":"time_labels"},'
                     '"datasets":[{"label":"v","data":{"$data":"network_avg_speed"}},'
                     '{"label":"r1","data":{"$data":"link_speeds.r1","sim_id":"%s"}},'
                     '{"label":"missing","data":{"$data":"nope.x"}}]}}\n```\n以上．' % sid)
-            charts, clean = risu.llm._extract_charts(text, cache, sid)
+            charts, clean = risu.llm.extract_charts(text, cache, sid)
             assert clean == "結果です．\n\n以上．".replace("\n\n", "\n\n") or "chart" not in clean
             assert len(charts) == 1
             d = charts[0]["data"]
-            sd = risu.aggregate._get_simulation_data(sid)
+            sd = risu.aggregate.get_simulation_data(sid)
             assert d["labels"] == sd["time_labels"]
             assert d["datasets"][0]["data"] == sd["network_avg_speed"]
             assert d["datasets"][1]["data"] == sd["link_speeds"]["r1"]
             assert d["datasets"][2]["data"] == []  # 未解決は空配列
-            assert sid in cache  # 未取得なら _get_simulation_data で補う
+            assert sid in cache  # 未取得なら get_simulation_data で補う
         finally:
             results_store.pop(sid, None)
 
@@ -357,12 +357,12 @@ class TestLLMTokenSaving:
         import risu.schema
         import risu.simulation
         sid = "tok_compact"
-        risu.results._store_sim(sid, _run_uxsim(GRID_BIDIRECTIONAL_SCENARIO), {"type": "manual"})
+        risu.results.store_sim(sid, run_uxsim(GRID_BIDIRECTIONAL_SCENARIO), {"type": "manual"})
         try:
-            sd = risu.aggregate._get_simulation_data(sid)
+            sd = risu.aggregate.get_simulation_data(sid)
             assert len(sd["time_labels"]) <= 30
             assert len(sd["link_speeds"]) <= 20
-            sd2 = risu.aggregate._get_simulation_data(sid, points=10, max_links=0)
+            sd2 = risu.aggregate.get_simulation_data(sid, points=10, max_links=0)
             assert len(sd2["time_labels"]) <= 10 and sd2["link_speeds"] == {}
             assert len(json.dumps(sd)) < 8000
         finally:
@@ -442,7 +442,7 @@ class TestLLMTokenSaving:
 
         import asyncio as _aio
         async def run():
-            resp = await risu.llm._chat_claude_stream(body)
+            resp = await risu.llm.chat_claude_stream(body)
             events = []
             async for chunk in resp.body_iterator:
                 for line in chunk.split("\n\n"):
@@ -456,7 +456,7 @@ class TestLLMTokenSaving:
             assert done["usage"]["calls"] == 3 and done["usage"]["output_tokens"] == 60
             assert done["usage"]["cache_read_tokens"] == 150
             assert len(done["charts"]) == 1
-            sd = risu.aggregate._get_simulation_data(done["sim_id"])
+            sd = risu.aggregate.get_simulation_data(done["sim_id"])
             assert done["charts"][0]["data"]["labels"] == sd["time_labels"]
             assert "```" not in done["content"]
             # ─ リクエスト構造 ─
@@ -484,9 +484,9 @@ class TestLLMTokenSaving:
 
 
 class TestChatStreamingPath:
-    """_chat_claude_stream を SSE ごと通して検証する．
+    """chat_claude_stream を SSE ごと通して検証する．
 
-    共通化した _dispatch_tool_blocks をストリーミング経路が正しく配線できているか
+    共通化した dispatch_tool_blocks をストリーミング経路が正しく配線できているか
     （state 経由の sim_id 引き回し，進捗イベントの転送，done イベントの中身）を見る．
     実 API は呼ばない．
     """
@@ -516,7 +516,7 @@ class TestChatStreamingPath:
         anthropic_mod.Anthropic = lambda **kw: _FakeAnthropic(script)
         try:
             async def go():
-                resp = await risu.llm._chat_claude_stream(body)
+                resp = await risu.llm.chat_claude_stream(body)
                 chunks = []
                 async for c in resp.body_iterator:
                     chunks.append(c if isinstance(c, str) else c.decode("utf-8"))

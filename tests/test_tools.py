@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from risu.results import results_store  # noqa: E402
 from risu.schema import SimulationInput  # noqa: E402
-from risu.simulation import _run_uxsim  # noqa: E402
+from risu.simulation import run_uxsim  # noqa: E402
 
 from helpers import (  # noqa: E402
     BOTTLENECK_SCENARIO,
@@ -28,13 +28,13 @@ class TestNetworkInfo:
                    for i in range(79)],
             demands=[{"orig": "n0", "dest": "n79", "t_start": 0, "t_end": 300, "flow": 0.3}],
         )
-        result = _run_uxsim(scenario)
+        result = run_uxsim(scenario)
         results_store["info_test"] = result
         return "info_test"
 
     def test_summary(self, sim_id):
-        from risu.tools import _handle_get_network_info
-        content, is_err = _handle_get_network_info({"sim_id": sim_id})
+        from risu.tools import handle_get_network_info
+        content, is_err = handle_get_network_info({"sim_id": sim_id})
         assert not is_err
         d = json.loads(content)
         assert d["total"] == {"nodes": 80, "links": 79, "demands": 1}
@@ -42,34 +42,34 @@ class TestNetworkInfo:
         assert len(d["sample_node_names"]) == 20
 
     def test_nodes_paging_and_filter(self, sim_id):
-        from risu.tools import _handle_get_network_info
-        content, _ = _handle_get_network_info(
+        from risu.tools import handle_get_network_info
+        content, _ = handle_get_network_info(
             {"sim_id": sim_id, "include": "nodes", "limit": 10, "offset": 5})
         d = json.loads(content)
         assert len(d["nodes"]) == 10
         assert d["nodes"][0]["name"] == "n5"
         assert "note" in d  # 途中までの表示であることが明示される
-        content, _ = _handle_get_network_info(
+        content, _ = handle_get_network_info(
             {"sim_id": sim_id, "include": "nodes", "name_contains": "n7"})
         d = json.loads(content)
         # n7, n70..n79 の 11 件
         assert d["matched"] == 11
 
     def test_limit_cap(self, sim_id):
-        from risu.tools import _handle_get_network_info
-        content, _ = _handle_get_network_info(
+        from risu.tools import handle_get_network_info
+        content, _ = handle_get_network_info(
             {"sim_id": sim_id, "include": "nodes", "limit": 9999})
         d = json.loads(content)
         assert len(d["nodes"]) <= 200
 
     def test_bad_sim_id(self):
-        from risu.tools import _handle_get_network_info
-        content, is_err = _handle_get_network_info({"sim_id": "nope"})
+        from risu.tools import handle_get_network_info
+        content, is_err = handle_get_network_info({"sim_id": "nope"})
         assert is_err
 
 
 # ============================================================
-# ツール実行の共通ディスパッチ（_dispatch_tool_blocks）
+# ツール実行の共通ディスパッチ（dispatch_tool_blocks）
 # ============================================================
 
 class TestToolDispatch:
@@ -97,13 +97,13 @@ class TestToolDispatch:
     def _run(self, blocks, *, follow_up=False, body=None):
         """dispatch を回して (progress メッセージ列, tool_results, state) を返す．"""
         import asyncio
-        from risu.tools import _ToolTurnState, _dispatch_tool_blocks
+        from risu.tools import ToolTurnState, dispatch_tool_blocks
 
-        state = _ToolTurnState(body or self._body())
+        state = ToolTurnState(body or self._body())
         progress, results = [], []
 
         async def go():
-            async for kind, payload in _dispatch_tool_blocks(blocks, state, follow_up=follow_up):
+            async for kind, payload in dispatch_tool_blocks(blocks, state, follow_up=follow_up):
                 if kind == "progress":
                     progress.append(payload)
                 else:
@@ -157,9 +157,9 @@ class TestToolDispatch:
 
     def test_get_simulation_data_fills_cache_for_chart_refs(self):
         """get_simulation_data の結果が $data 解決用キャッシュに入ること．"""
-        from risu.results import _store_sim
+        from risu.results import store_sim
         sid = "dispatch_data_test"
-        _store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        store_sim(sid, run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
         try:
             _, results, state = self._run(
                 [self._tb("get_simulation_data", {"sim_id": sid}, "d1")])
@@ -187,13 +187,13 @@ class TestToolDispatch:
         assert later == ["チャートデータを取得中..."]
 
     def test_sync_path_helper_drops_progress(self):
-        """_collect_tool_results は進捗を捨てて results だけ返す．"""
+        """collect_tool_results は進捗を捨てて results だけ返す．"""
         import asyncio
-        from risu.tools import _ToolTurnState, _collect_tool_results
+        from risu.tools import ToolTurnState, collect_tool_results
 
-        state = _ToolTurnState(self._body())
+        state = ToolTurnState(self._body())
         blocks = [self._tb("get_simulation_data", {"sim_id": "x"}, "s1")]
-        results = asyncio.run(_collect_tool_results(blocks, state))
+        results = asyncio.run(collect_tool_results(blocks, state))
         assert isinstance(results, list) and len(results) == 1
         assert results[0]["tool_use_id"] == "s1"
 
@@ -201,7 +201,7 @@ class TestToolDispatch:
         """同じ入力なら，進捗を拾う経路（SSE）と捨てる経路（同期）で
         tool_result が完全に一致すること．共通化の目的そのもの．"""
         import asyncio
-        from risu.tools import _ToolTurnState, _collect_tool_results
+        from risu.tools import ToolTurnState, collect_tool_results
 
         blocks = [
             self._tb("get_network_info", {"sim_id": "nope"}, "a"),
@@ -209,7 +209,7 @@ class TestToolDispatch:
             self._tb("unknown", {}, "c"),
         ]
         _, streamed, _ = self._run(blocks)
-        sync = asyncio.run(_collect_tool_results(blocks, _ToolTurnState(self._body())))
+        sync = asyncio.run(collect_tool_results(blocks, ToolTurnState(self._body())))
         assert streamed == sync
 
 
@@ -220,7 +220,7 @@ class TestToolDispatch:
 class TestMcpParity:
     """[修正履歴] MCP は run_simulation / get_result の 2 つだけを別定義していて，
     差分再実行・ネットワーク照会・集計データ・OSM 取込が MCP から使えなかった．
-    いまは CLAUDE_TOOLS をそのまま公開し，_dispatch_tool_blocks を共有する（§3.2）．
+    いまは CLAUDE_TOOLS をそのまま公開し，dispatch_tool_blocks を共有する（§3.2）．
     """
 
     def test_mcp_exposes_every_chat_tool_with_same_schema(self):
@@ -234,7 +234,7 @@ class TestMcpParity:
         import risu.scenario_ops
         import risu.schema
         import risu.simulation
-        tools = {t.name: t for t in risu.mcp_server._mcp_tools()}
+        tools = {t.name: t for t in risu.mcp_server.mcp_tools()}
         for t in risu.prompts.CLAUDE_TOOLS:
             assert t["name"] in tools, f"MCP に {t['name']} が無い"
             assert tools[t["name"]].inputSchema == t["input_schema"]
@@ -257,7 +257,7 @@ class TestMcpParity:
         async def go():
             created = []
             try:
-                r = await risu.mcp_server._mcp_call_tool("run_simulation", {
+                r = await risu.mcp_server.mcp_call_tool("run_simulation", {
                     "grid": {"nx": 3, "spacing": 500},
                     "auto_demands": {"strategy": "boundary", "flow_per_pair": 0.1},
                     "tmax": 600, "random_seed": 1,
@@ -265,13 +265,13 @@ class TestMcpParity:
                 d = json.loads(r); sid = d["sim_id"]; created.append(sid)
                 assert risu.results.results_store[sid]["_meta"]["source"]["via"] == "mcp"
 
-                r = await risu.mcp_server._mcp_call_tool("get_simulation_data", {"sim_id": sid, "points": 10})
+                r = await risu.mcp_server.mcp_call_tool("get_simulation_data", {"sim_id": sid, "points": 10})
                 assert "network_avg_speed" in json.loads(r)
 
-                r = await risu.mcp_server._mcp_call_tool("get_network_info", {"sim_id": sid, "include": "summary"})
+                r = await risu.mcp_server.mcp_call_tool("get_network_info", {"sim_id": sid, "include": "summary"})
                 assert "error" not in r.lower()[:40]
 
-                r = await risu.mcp_server._mcp_call_tool("rerun_simulation", {
+                r = await risu.mcp_server.mcp_call_tool("rerun_simulation", {
                     "base_sim_id": sid,
                     "modifications": [{"action": "set_params", "random_seed": 2}],
                 })
@@ -279,11 +279,11 @@ class TestMcpParity:
                 assert d2["sim_id"] != sid
                 assert risu.results.results_store[d2["sim_id"]]["_scenario"]["random_seed"] == 2
 
-                r = await risu.mcp_server._mcp_call_tool("get_result", {"simulation_id": sid})
+                r = await risu.mcp_server.mcp_call_tool("get_result", {"simulation_id": sid})
                 assert "total_trips" in r
-                r = await risu.mcp_server._mcp_call_tool("no_such_tool", {})
+                r = await risu.mcp_server.mcp_call_tool("no_such_tool", {})
                 assert "未知のツール" in r
-                r = await risu.mcp_server._mcp_call_tool("get_result", {"simulation_id": "missing"})
+                r = await risu.mcp_server.mcp_call_tool("get_result", {"simulation_id": "missing"})
                 assert "見つかりません" in r
             finally:
                 for s in created:

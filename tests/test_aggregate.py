@@ -8,10 +8,10 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from risu.aggregate import _get_simulation_data  # noqa: E402
+from risu.aggregate import get_simulation_data  # noqa: E402
 from risu.results import results_store  # noqa: E402
 from risu.schema import SimulationInput  # noqa: E402
-from risu.simulation import _run_uxsim  # noqa: E402
+from risu.simulation import run_uxsim  # noqa: E402
 
 from helpers import (  # noqa: E402
     BOTTLENECK_SCENARIO,
@@ -23,16 +23,16 @@ from helpers import (  # noqa: E402
 
 class TestSimulationDataAggregation:
     """
-    _get_simulation_data() がグラフ生成に十分なデータを返すことを検証．
+    get_simulation_data() がグラフ生成に十分なデータを返すことを検証．
     [修正履歴] LLM がチャート生成するにはデータが必要．
     """
 
     @pytest.fixture(scope="class")
     def sim_data(self):
-        result = _run_uxsim(BOTTLENECK_SCENARIO)
+        result = run_uxsim(BOTTLENECK_SCENARIO)
         sid = "test_aggregation"
         results_store[sid] = result
-        return _get_simulation_data(sid)
+        return get_simulation_data(sid)
 
     def test_not_none(self, sim_data):
         assert sim_data is not None
@@ -73,7 +73,7 @@ class TestSimulationDataAggregation:
 
     def test_nonexistent_sim_returns_none(self):
         """存在しない sim_id は None を返す"""
-        assert _get_simulation_data("nonexistent_id_12345") is None
+        assert get_simulation_data("nonexistent_id_12345") is None
 
     def test_data_not_too_large(self, sim_data):
         """
@@ -130,7 +130,7 @@ class TestSimulationDataAggregation:
             links=[{"name": "AB", "start": "A", "end": "B", "length": 2000}],
             demands=[{"orig": "A", "dest": "B", "t_start": 0, "t_end": 200, "flow": 0.25}],
         )
-        res = _run_uxsim(sc)
+        res = run_uxsim(sc)
         assert res["stats"]["total_trips"] == 50 and res["stats"]["completed_trips"] == 50
         ts = res["trip_series"]
         assert ts["t"][-1] == 1000.0
@@ -170,7 +170,7 @@ class TestSimulationDataAggregation:
         old["vehicle_sample_step"] = 2
         results_store["test_aggregation_old"] = old
         try:
-            d = _get_simulation_data("test_aggregation_old")
+            d = get_simulation_data("test_aggregation_old")
             t0 = d["time_labels"][0]
             f0 = old["frames"][str(float(t0))]
             assert d["network_vehicle_count"][0] == len(f0["ids"]) * 5 * 2

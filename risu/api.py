@@ -19,23 +19,32 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.requests import Request
 
-from .importers import _OSM_ROAD_PRESETS, GMNS_API, GMNS_RAW, _gmns_to_scenario, _parse_csv_scenario, _run_osm_import
-from .llm import LLM_BACKEND, _chat_claude_stream, _chat_mock, _chat_ollama
+from .importers import GMNS_API, GMNS_RAW, OSM_ROAD_PRESETS, gmns_to_scenario, parse_csv_scenario, run_osm_import
+from .llm import LLM_BACKEND, chat_claude_stream, chat_mock, chat_ollama
 from .mcp_server import router as mcp_router
 from .results import (
     RESULTS_DIR,
-    _build_envelope,
-    _envelope_compressed_bytes,
-    _envelope_json_bytes,
-    _negotiate_encoding,
-    _persisted_ids,
-    _store_sim,
+    build_envelope,
+    envelope_compressed_bytes,
+    envelope_json_bytes,
+    negotiate_encoding,
+    persisted_ids,
     results_store,
+    store_sim,
 )
 from .runtime import RUNTIME_STATUS, executor
-from .scenario_ops import _generate_osm_demands
-from .schema import ChatInput, ChatMessage, SimulationInput, _scenario_to_input
-from .simulation import MAX_TMAX, _apply_link_geometries, _run_uxsim_async, _startup_selfcheck, _validate_scenario_size
+from .scenario_ops import generate_osm_demands
+from .schema import ChatInput, ChatMessage, SimulationInput, scenario_to_input
+from .simulation import MAX_TMAX, apply_link_geometries, run_uxsim_async, startup_selfcheck, validate_scenario_size
+
+# モジュール外から使う名前（他モジュール・server.py・scripts・tests）．これ以外は内部実装．
+__all__ = [
+    "ALLOWED_ORIGINS",
+    "RISU_HOST",
+    "RISU_PORT",
+    "RISU_RELOAD",
+    "app",
+]
 
 # 待ち受けアドレス．**既定は 127.0.0.1（このマシンからのみ接続可）**．
 # RISU は認証を持たないので，0.0.0.0 で待ち受けると同一 LAN の誰でも
@@ -57,9 +66,9 @@ RISU_RELOAD = os.getenv("RISU_RELOAD", "").lower() in ("1", "true", "yes")
 async def lifespan(app: FastAPI):
     if RESULTS_DIR:
         print(f"[RISU] results dir: {os.path.abspath(RESULTS_DIR)} "
-              f"({len(_persisted_ids())} persisted results, loaded on demand)")
+              f"({len(persisted_ids())} persisted results, loaded on demand)")
     if os.getenv("RISU_STARTUP_SELFCHECK", "1").lower() not in ("0", "false", "no"):
-        await asyncio.get_event_loop().run_in_executor(executor, _startup_selfcheck)
+        await asyncio.get_event_loop().run_in_executor(executor, startup_selfcheck)
     yield
     # executor はプロセス共有（runtime）なのでここでは閉じない．アプリの起動/停止が
     # 複数回起きる場面（テストの e2e サーバー，reload）で，停止後に別の app や
@@ -155,10 +164,10 @@ async def limit_upload_mw(request, call_next):
 @app.post("/simulate")
 async def simulate(scenario: SimulationInput):
     """シミュレーションを実行して結果IDを返す"""
-    _validate_scenario_size(scenario)
-    result = await _run_uxsim_async(scenario)
+    validate_scenario_size(scenario)
+    result = await run_uxsim_async(scenario)
     sim_id = str(uuid.uuid4())[:8]
-    _store_sim(sim_id, result, {"type": "manual"})
+    store_sim(sim_id, result, {"type": "manual"})
     return {"id": sim_id, "stats": result["stats"]}
 
 
@@ -178,14 +187,14 @@ async def get_results(sim_id: str, request: Request):
     if sim_id not in results_store:
         raise HTTPException(404, detail="Result not found")
     loop = asyncio.get_event_loop()
-    encoding = _negotiate_encoding(request.headers.get("accept-encoding", ""))
+    encoding = negotiate_encoding(request.headers.get("accept-encoding", ""))
     if encoding == "identity":
-        body = await loop.run_in_executor(executor, _envelope_json_bytes, sim_id)
+        body = await loop.run_in_executor(executor, envelope_json_bytes, sim_id)
         # ここでは Vary を付けない．Content-Encoding が無い応答には GZipMiddleware が
         # 素通し時に Vary: Accept-Encoding を足すので，自前で付けると重複する．
         # （圧縮済みの応答は middleware が触らないので，そちらは自前で付ける）
         return Response(body, media_type="application/json")
-    body = await loop.run_in_executor(executor, _envelope_compressed_bytes, sim_id, encoding)
+    body = await loop.run_in_executor(executor, envelope_compressed_bytes, sim_id, encoding)
     return Response(body, media_type="application/json",
                     headers={"Content-Encoding": encoding, "Vary": "Accept-Encoding"})
 
@@ -195,7 +204,7 @@ async def get_results_scenario(sim_id: str):
     """再現用の軽量エンベロープ（scenario + meta のみ，result なし）を返す．"""
     if sim_id not in results_store:
         raise HTTPException(404, detail="Result not found")
-    return _build_envelope(sim_id, include_result=False)
+    return build_envelope(sim_id, include_result=False)
 
 
 @app.post("/chat")
@@ -213,11 +222,11 @@ async def chat(body: ChatInput):
     last_msg = body.messages[-1].content if body.messages else ""
 
     if LLM_BACKEND == "mock":
-        return await _chat_mock(last_msg)
+        return await chat_mock(last_msg)
     elif LLM_BACKEND == "claude":
-        return await _chat_claude_stream(body)
+        return await chat_claude_stream(body)
     else:
-        return await _chat_ollama(body)
+        return await chat_ollama(body)
 
 
 @app.get("/gmns/datasets")
@@ -265,7 +274,7 @@ async def import_gmns(dataset: str = Form(...), tmax: int = Form(3600)):
         raise HTTPException(400, detail=f"データセット '{dataset}' に node.csv / link.csv がありません")
 
     try:
-        scenario = _gmns_to_scenario(nodes_csv, links_csv, demand_csv, config_csv, tmax)
+        scenario = gmns_to_scenario(nodes_csv, links_csv, demand_csv, config_csv, tmax)
     except Exception as e:
         raise HTTPException(422, detail=f"GMNS パースエラー: {str(e)}")
 
@@ -284,10 +293,10 @@ async def import_gmns(dataset: str = Form(...), tmax: int = Form(3600)):
 
     scenario["name"] = dataset
 
-    sim_input = _scenario_to_input(scenario)
-    result = await _run_uxsim_async(sim_input)
+    sim_input = scenario_to_input(scenario)
+    result = await run_uxsim_async(sim_input)
     sim_id = str(uuid.uuid4())[:8]
-    _store_sim(sim_id, result, {"type": "gmns", "dataset_id": dataset})
+    store_sim(sim_id, result, {"type": "gmns", "dataset_id": dataset})
 
     return {
         "id": sim_id,
@@ -329,15 +338,15 @@ async def upload_files(
             scenario_dict = payload
         # 道路形状（多点 LineString）が同梱されていれば描画に使う（OSM 取込と同じ仕組み）
         link_geometries = scenario_dict.pop("link_geometries", None) if isinstance(scenario_dict, dict) else None
-        sim_input = _scenario_to_input(scenario_dict)
-        result = await _run_uxsim_async(sim_input)
+        sim_input = scenario_to_input(scenario_dict)
+        result = await run_uxsim_async(sim_input)
         if link_geometries:
-            _apply_link_geometries(result, link_geometries)
+            apply_link_geometries(result, link_geometries)
         sim_id = str(uuid.uuid4())[:8]
         source = {"type": "json", "filename": json_files[0]}
         if imported_from:
             source["imported_from_sim_id"] = imported_from
-        _store_sim(sim_id, result, source)
+        store_sim(sim_id, result, source)
         return {
             "id": sim_id,
             "stats": result["stats"],
@@ -354,7 +363,7 @@ async def upload_files(
     # 単一 CSV の場合（RISU 独自形式を試行）
     if len(csv_files) == 1:
         name, content = next(iter(csv_files.items()))
-        parsed = _parse_csv_scenario(content)
+        parsed = parse_csv_scenario(content)
 
         if parsed["format"] == "risu_csv":
             scenario = {
@@ -365,10 +374,10 @@ async def upload_files(
                 "links": parsed["links"],
                 "demands": parsed["demands"],
             }
-            sim_input = _scenario_to_input(scenario)
-            result = await _run_uxsim_async(sim_input)
+            sim_input = scenario_to_input(scenario)
+            result = await run_uxsim_async(sim_input)
             sim_id = str(uuid.uuid4())[:8]
-            _store_sim(sim_id, result, {
+            store_sim(sim_id, result, {
                 "type": "csv",
                 "format": "risu_csv",
                 "filename": name,
@@ -404,7 +413,7 @@ async def upload_files(
     if not nodes_csv and not links_csv:
         raise HTTPException(400, detail="node.csv または link.csv が見つかりません")
 
-    scenario = _gmns_to_scenario(nodes_csv, links_csv, demand_csv, config_csv, tmax)
+    scenario = gmns_to_scenario(nodes_csv, links_csv, demand_csv, config_csv, tmax)
 
     if not scenario["links"]:
         raise HTTPException(400, detail="link.csv が見つからないかリンクが0件です")
@@ -419,10 +428,10 @@ async def upload_files(
             "flow": 0.3,
         }]
 
-    sim_input = _scenario_to_input(scenario)
-    result = await _run_uxsim_async(sim_input)
+    sim_input = scenario_to_input(scenario)
+    result = await run_uxsim_async(sim_input)
     sim_id = str(uuid.uuid4())[:8]
-    _store_sim(sim_id, result, {
+    store_sim(sim_id, result, {
         "type": "gmns",
         "format": "files",
         "filenames": list(csv_files.keys()),
@@ -454,12 +463,12 @@ async def import_osm(place: str = Form(...), tmax: int = Form(3600),
     if tmax < 60 or tmax > MAX_TMAX:
         raise HTTPException(400, detail=f"tmax は 60〜{MAX_TMAX} 秒の範囲で指定してください")
     road_types = road_types.strip().lower()
-    if road_types not in _OSM_ROAD_PRESETS:
-        raise HTTPException(400, detail=f"road_types は {', '.join(_OSM_ROAD_PRESETS)} のいずれかを指定してください")
+    if road_types not in OSM_ROAD_PRESETS:
+        raise HTTPException(400, detail=f"road_types は {', '.join(OSM_ROAD_PRESETS)} のいずれかを指定してください")
 
     loop = asyncio.get_event_loop()
     try:
-        result = await loop.run_in_executor(executor, _run_osm_import, place, distance_m, road_types)
+        result = await loop.run_in_executor(executor, run_osm_import, place, distance_m, road_types)
     except Exception as e:
         raise HTTPException(500, detail=f"OSM インポートエラー: {str(e)}")
 
@@ -472,15 +481,15 @@ async def import_osm(place: str = Form(...), tmax: int = Form(3600),
     scenario["tmax"] = tmax
 
     if not scenario["demands"] and len(scenario["nodes"]) >= 2:
-        scenario["demands"] = _generate_osm_demands(
+        scenario["demands"] = generate_osm_demands(
             scenario["nodes"], scenario["links"], tmax
         )
 
-    sim_input = _scenario_to_input(scenario)
-    sim_result = await _run_uxsim_async(sim_input)
-    _apply_link_geometries(sim_result, link_geometries)
+    sim_input = scenario_to_input(scenario)
+    sim_result = await run_uxsim_async(sim_input)
+    apply_link_geometries(sim_result, link_geometries)
     sim_id = str(uuid.uuid4())[:8]
-    _store_sim(sim_id, sim_result, {
+    store_sim(sim_id, sim_result, {
         "type": "osm",
         "place": place,
         "road_types": road_types,

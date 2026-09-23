@@ -8,6 +8,16 @@ import io
 import math
 import os
 
+# モジュール外から使う名前（他モジュール・server.py・scripts・tests）．これ以外は内部実装．
+__all__ = [
+    "GMNS_API",
+    "GMNS_RAW",
+    "OSM_ROAD_PRESETS",
+    "gmns_to_scenario",
+    "parse_csv_scenario",
+    "run_osm_import",
+]
+
 # ──────────────────────────────────────────────
 # CSV / GMNS / OSM インポート
 # ──────────────────────────────────────────────
@@ -51,7 +61,7 @@ def _get_int(row: dict, col: str | None, default: int = 1) -> int:
         return default
 
 
-def _parse_csv_scenario(content: str) -> dict:
+def parse_csv_scenario(content: str) -> dict:
     """
     単一 CSV からシナリオを推定する．
     カラム名を柔軟にマッチング．対応フォーマット:
@@ -213,7 +223,7 @@ def _parse_csv_scenario(content: str) -> dict:
     raise ValueError("CSV 形式を認識できません．ノード（name,x,y），リンク（start,end,length），または RISU CSV 形式を使用してください．")
 
 
-def _gmns_to_scenario(
+def gmns_to_scenario(
     nodes_csv: str | None,
     links_csv: str | None,
     demand_csv: str | None,
@@ -251,7 +261,7 @@ def _gmns_to_scenario(
     nodes = []
     node_zone_map = {}  # node_id → zone_id
     if nodes_csv:
-        parsed = _parse_csv_scenario(nodes_csv)
+        parsed = parse_csv_scenario(nodes_csv)
         coord_is_latlon = False
         # 座標が緯度経度か判定（-180~180 範囲なら）
         for n in parsed["nodes"]:
@@ -279,7 +289,7 @@ def _gmns_to_scenario(
     # リンク
     links = []
     if links_csv:
-        parsed = _parse_csv_scenario(links_csv)
+        parsed = parse_csv_scenario(links_csv)
         for lk in parsed["links"]:
             lk["length"] = lk["length"] * length_to_m
             raw_speed = lk["free_flow_speed"]
@@ -293,7 +303,7 @@ def _gmns_to_scenario(
     # 需要
     demands = []
     if demand_csv:
-        parsed = _parse_csv_scenario(demand_csv)
+        parsed = parse_csv_scenario(demand_csv)
         if parsed["format"] in ("gmns_demand", "demand_csv"):
             for d in parsed["demands"]:
                 orig_zone = str(d["orig"])
@@ -327,7 +337,7 @@ def _gmns_to_scenario(
 # OSM 道路種別プリセット
 # custom_filter は Overpass QL の highway タグフィルタ．
 # None のプリセットは network_type で取得する．
-_OSM_ROAD_PRESETS = {
+OSM_ROAD_PRESETS = {
     # 高速道路・国道級のみ（広域・大半径向け．ノード数が大幅に減り高速）
     "major": '["highway"~"motorway|trunk|primary|motorway_link|trunk_link|primary_link"]',
     # 幹線道路まで（major + 2次・3次幹線．都市スケールの標準）
@@ -341,11 +351,11 @@ _OSM_ROAD_PRESETS = {
 _OSM_NETWORK_TYPE = {"drive": "drive", "all": "drive_service"}
 
 
-def _run_osm_import(place: str, distance_m: int = 1000, road_types: str = "drive") -> dict:
+def run_osm_import(place: str, distance_m: int = 1000, road_types: str = "drive") -> dict:
     """OSM から道路ネットワークを取得して UXsim シナリオに変換．
     OSMnx のグラフを直接活用し，道路形状・速度推定・車線数を取得する．
 
-    road_types: "major" | "arterial" | "drive" | "all"（_OSM_ROAD_PRESETS 参照）
+    road_types: "major" | "arterial" | "drive" | "all"（OSM_ROAD_PRESETS 参照）
     """
     import osmnx as ox
 
@@ -355,9 +365,9 @@ def _run_osm_import(place: str, distance_m: int = 1000, road_types: str = "drive
         ox.settings.cache_folder = _cache_dir
 
     road_types = (road_types or "drive").strip().lower()
-    if road_types not in _OSM_ROAD_PRESETS:
+    if road_types not in OSM_ROAD_PRESETS:
         raise ValueError(
-            f"road_types は {', '.join(_OSM_ROAD_PRESETS)} のいずれかを指定してください: {road_types}"
+            f"road_types は {', '.join(OSM_ROAD_PRESETS)} のいずれかを指定してください: {road_types}"
         )
 
     # ── ジオコーディング: 自然言語 → (lat, lon) ──
@@ -365,7 +375,7 @@ def _run_osm_import(place: str, distance_m: int = 1000, road_types: str = "drive
     center_lat, center_lon = center
 
     # ── 道路ネットワーク取得 ──
-    custom_filter = _OSM_ROAD_PRESETS[road_types]
+    custom_filter = OSM_ROAD_PRESETS[road_types]
     try:
         if custom_filter is not None:
             G = ox.graph_from_point(center, dist=distance_m, custom_filter=custom_filter)

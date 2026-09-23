@@ -4,6 +4,14 @@ system に動的な文字列を足さないこと（CLAUDE.md §3.4）．
 
 from __future__ import annotations
 
+# モジュール外から使う名前（他モジュール・server.py・scripts・tests）．これ以外は内部実装．
+__all__ = [
+    "CLAUDE_TOOLS",
+    "MOCK_SCENARIOS",
+    "SYSTEM_PROMPT",
+    "mock_llm_response",
+]
+
 # ---- Chat エンドポイント ----
 # LLM_BACKEND 環境変数で切り替え: "mock" / "claude" / "ollama"
 
@@ -273,7 +281,7 @@ MOCK_SCENARIOS = {
     },
 }
 
-def _mock_llm_response(user_text: str) -> dict:
+def mock_llm_response(user_text: str) -> dict:
     """キーワードマッチでシナリオ選択 or テキスト応答を返す"""
     text = user_text.lower()
 

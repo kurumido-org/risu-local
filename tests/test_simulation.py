@@ -8,10 +8,10 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from risu.aggregate import _get_simulation_data  # noqa: E402
+from risu.aggregate import get_simulation_data  # noqa: E402
 from risu.results import results_store  # noqa: E402
 from risu.schema import SimulationInput  # noqa: E402
-from risu.simulation import _run_uxsim  # noqa: E402
+from risu.simulation import run_uxsim  # noqa: E402
 
 from helpers import (  # noqa: E402
     BOTTLENECK_SCENARIO, GRID_BIDIRECTIONAL_SCENARIO,
@@ -22,11 +22,11 @@ from helpers import (  # noqa: E402
 # ============================================================
 
 class TestUXsimOutput:
-    """_run_uxsim() の出力データ構造が正しいことを検証"""
+    """run_uxsim() の出力データ構造が正しいことを検証"""
 
     @pytest.fixture(scope="class")
     def result(self):
-        return _run_uxsim(BOTTLENECK_SCENARIO)
+        return run_uxsim(BOTTLENECK_SCENARIO)
 
     def test_top_level_keys(self, result):
         """必須キーが全て存在する"""
@@ -154,7 +154,7 @@ class TestBidirectionalLinks:
 
     @pytest.fixture(scope="class")
     def result(self):
-        return _run_uxsim(GRID_BIDIRECTIONAL_SCENARIO)
+        return run_uxsim(GRID_BIDIRECTIONAL_SCENARIO)
 
     def test_bidirectional_pairs_exist(self, result):
         """A→B があれば B→A も存在する（双方向リンクの場合）"""
@@ -209,7 +209,7 @@ class TestLinkCapacity:
             links=[link, {"name": "r2", "start": "B", "end": "C", "length": 1000}],
             demands=[{"orig": "A", "dest": "C", "t_start": 0, "t_end": 600, "flow": 0.5}],
         )
-        return _run_uxsim(scenario)
+        return run_uxsim(scenario)
 
     def test_capacity_caps_throughput(self):
         """容量指定で旅行時間が明確に悪化する（ボトルネック形成）"""
@@ -261,7 +261,7 @@ class TestSignalMetadata:
             ],
             demands=[{"orig": "W", "dest": "E", "t_start": 0, "t_end": 300, "flow": 0.4}],
         )
-        return _run_uxsim(scenario)
+        return run_uxsim(scenario)
 
     def test_signals_present(self, result):
         """信号ノードごとに 1 エントリ"""
@@ -295,7 +295,7 @@ class TestSignalMetadata:
         assert list(W._risu_link_map["W_I"].signal_group) == [0]
         assert list(W._risu_link_map["I_E"].signal_group) == [0]  # 信号なしノードへは既定のまま
 
-        res = _run_uxsim(SimulationInput(**sc))
+        res = run_uxsim(SimulationInput(**sc))
         sig = {s["node"]: s for s in res["signals"]}["I"]
         assert sig["groups"] == {"W_I": [0], "S_I": [0, 1]}
         assert sig["deltat"] == 8.5   # 5 × 1.7．tmax/len(phase_log) = 600/70 = 8.571 ではない
@@ -344,7 +344,7 @@ class TestFrameKeyCompatibility:
 
     @pytest.fixture(scope="class")
     def result(self):
-        return _run_uxsim(BOTTLENECK_SCENARIO)
+        return run_uxsim(BOTTLENECK_SCENARIO)
 
     def test_frame_keys_are_strings(self, result):
         """フレームキーが文字列"""
@@ -387,7 +387,7 @@ class TestEdgeCases:
             links=[{"name": "r", "start": "A", "end": "B", "length": 1000}],
             demands=[{"orig": "A", "dest": "B", "t_start": 0, "t_end": 10, "flow": 0.0}],
         )
-        result = _run_uxsim(scenario)
+        result = run_uxsim(scenario)
         assert result["stats"]["total_trips"] == 0
 
     def test_single_link(self):
@@ -400,15 +400,15 @@ class TestEdgeCases:
             links=[{"name": "r", "start": "A", "end": "B", "length": 500}],
             demands=[{"orig": "A", "dest": "B", "t_start": 0, "t_end": 50, "flow": 0.3}],
         )
-        result = _run_uxsim(scenario)
+        result = run_uxsim(scenario)
         assert "geojson" in result
         assert "frames" in result
 
     def test_frame_count_reasonable(self):
         """
         フレーム数がtmaxに対して妥当な範囲にある．
-        _run_uxsim はフレームを間引きしない（全ステップを返す）．
-        間引きは _get_simulation_data で行われる（最大40点サンプリング）．
+        run_uxsim はフレームを間引きしない（全ステップを返す）．
+        間引きは get_simulation_data で行われる（最大40点サンプリング）．
         """
         scenario = SimulationInput(
             name="long_sim",
@@ -418,7 +418,7 @@ class TestEdgeCases:
             links=[{"name": "r", "start": "A", "end": "B", "length": 5000}],
             demands=[{"orig": "A", "dest": "B", "t_start": 0, "t_end": 2000, "flow": 0.5}],
         )
-        result = _run_uxsim(scenario)
+        result = run_uxsim(scenario)
         n_frames = len(result["frame_times"])
         # フレーム数はtmax / recording_interval 程度（100〜500の範囲）
         assert 50 <= n_frames <= 600, f"Unexpected frame count: {n_frames}"
@@ -438,18 +438,18 @@ class TestPostProcessingPipeline:
 
     def test_select_frames_no_thinning_when_small(self):
         import numpy as np
-        from risu.simulation import _select_frames
+        from risu.simulation import select_frames
         tk = np.array([0, 50, 50, 100, 150, 150, 150], dtype=np.int64)
-        kept, fidx = _select_frames(tk, max_frames=200)
+        kept, fidx = select_frames(tk, max_frames=200)
         assert kept.tolist() == [0, 50, 100, 150]
         assert fidx.tolist() == [0, 1, 1, 2, 3, 3, 3]
 
     def test_select_frames_thins_to_max(self):
         import numpy as np
-        from risu.simulation import _select_frames
+        from risu.simulation import select_frames
         # 0.1 秒精度キーで 1000 ユニーク時刻 → max 200 なら 5 個おき
         tk = np.repeat(np.arange(1000, dtype=np.int64) * 50, 3)
-        kept, fidx = _select_frames(tk, max_frames=200)
+        kept, fidx = select_frames(tk, max_frames=200)
         assert kept.size == 200
         assert kept.tolist() == (np.arange(0, 1000, 5) * 50).tolist()
         # 落ちた点は -1，残った点は kept への index
@@ -471,16 +471,16 @@ class TestPostProcessingPipeline:
         import risu.simulation
         rng = np.random.default_rng(0)
         tk = rng.integers(0, 3000, size=5000, dtype=np.int64) * 10
-        kept_a, fidx_a = risu.simulation._select_frames(tk, 100)
+        kept_a, fidx_a = risu.simulation.select_frames(tk, 100)
         # 巨大な値を足して汎用経路を強制し，同じオフセットを引いて比較
         off = 60_000_000
-        kept_b, fidx_b = risu.simulation._select_frames(tk + off, 100)
+        kept_b, fidx_b = risu.simulation.select_frames(tk + off, 100)
         assert (kept_b - off).tolist() == kept_a.tolist()
         assert fidx_b.tolist() == fidx_a.tolist()
 
     @pytest.fixture(scope="class")
     def result(self):
-        return _run_uxsim(GRID_BIDIRECTIONAL_SCENARIO)
+        return run_uxsim(GRID_BIDIRECTIONAL_SCENARIO)
 
     def test_fast_path_is_active_for_installed_uxsim(self):
         """uxsim の内部 API（CLAUDE.md §3.6）が使えなくなると，動作は止まらず車両別ログの
@@ -496,7 +496,7 @@ class TestPostProcessingPipeline:
         import risu.scenario_ops
         import risu.schema
         import risu.simulation
-        rt = _run_uxsim(BOTTLENECK_SCENARIO)["_runtime"]
+        rt = run_uxsim(BOTTLENECK_SCENARIO)["_runtime"]
         assert rt["uxsim_version"] == risu.runtime.UXSIM_VERSION
         if rt["backend"] != "cpp":
             pytest.skip("uxsim cpp backend が無い環境（高速経路は cpp 前提）")
@@ -518,7 +518,7 @@ class TestPostProcessingPipeline:
         import risu.scenario_ops
         import risu.schema
         import risu.simulation
-        _run_uxsim(BOTTLENECK_SCENARIO)
+        run_uxsim(BOTTLENECK_SCENARIO)
         body = TestClient(risu.api.app).get("/healthz").json()
         assert body["status"] == "ok"
         assert body["uxsim"]["uxsim_version"] == risu.runtime.UXSIM_VERSION
@@ -554,10 +554,10 @@ class TestPostProcessingPipeline:
         import risu.scenario_ops
         import risu.schema
         import risu.simulation
-        base = _run_uxsim(GRID_BIDIRECTIONAL_SCENARIO)
+        base = run_uxsim(GRID_BIDIRECTIONAL_SCENARIO)
         total = sum(int(len(c["ids"])) for c in base["frames"].values())
         monkeypatch.setattr(risu.simulation, "MAX_FRAME_POINTS", max(1, total // 3))
-        sampled = _run_uxsim(GRID_BIDIRECTIONAL_SCENARIO)
+        sampled = run_uxsim(GRID_BIDIRECTIONAL_SCENARIO)
         step = sampled["vehicle_sample_step"]
         assert step >= 2
         sampled_total = sum(int(len(c["ids"])) for c in sampled["frames"].values())
@@ -575,11 +575,11 @@ class TestPostProcessingPipeline:
         sid = "test_sampling"
         results_store[sid] = sampled
         try:
-            sd = _get_simulation_data(sid)
+            sd = get_simulation_data(sid)
             assert "vehicle_sample_note" in sd
             json.dumps(sd)  # 標準 json で直列化できる（numpy 型が漏れていない）
             results_store["test_sampling_base"] = base
-            sd_base = _get_simulation_data("test_sampling_base")
+            sd_base = get_simulation_data("test_sampling_base")
             # 台数は描画用の間引き前に数えるので，間引きの有無で系列が一致する
             # （旧実装は「サンプル数 × step」の近似で，時刻ごとに誤差が出ていた）
             assert sampled["vehicle_counts"] == base["vehicle_counts"]
@@ -610,7 +610,7 @@ class TestPostProcessingPipeline:
         import risu.schema
         import risu.simulation
         sid = "test_results_gz"
-        risu.results._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        risu.results.store_sim(sid, run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
         try:
             c = TestClient(risu.api.app)
             r = c.get(f"/results/{sid}", headers={"Accept-Encoding": "gzip"})
@@ -649,9 +649,9 @@ class TestPostProcessingPipeline:
         import risu.schema
         import risu.simulation
         sid = "test_env_json"
-        risu.results._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        risu.results.store_sim(sid, run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
         try:
-            d = json.loads(risu.results._envelope_json_bytes(sid))
+            d = json.loads(risu.results.envelope_json_bytes(sid))
             assert d["result"]["link_names"] == results_store[sid]["link_names"]
             assert d["result"]["frame_times"] == results_store[sid]["frame_times"]
         finally:
@@ -665,7 +665,7 @@ class TestPostProcessingPipeline:
 class TestStandalonePipeline:
     """RISU サーバーを介さずシナリオを UXsim で実行する経路のテスト．
 
-    server.py の _run_uxsim と scripts/run_scenario.py は同じ uxsim_bridge.build_world
+    server.py の run_uxsim と scripts/run_scenario.py は同じ uxsim_bridge.build_world
     を通る．ここが割れるとサーバーとオフライン実行で結果が変わるので，
     構築結果の同一性と，生成スクリプトが実際に import できることを確認する．
     """
@@ -734,19 +734,19 @@ class TestStandalonePipeline:
             scenario_from_dict({"nodes": [], "demands": []})
 
     def test_bridge_matches_server_run(self):
-        """build_world 経由の素の実行と _run_uxsim の統計が一致する．"""
+        """build_world 経由の素の実行と run_uxsim の統計が一致する．"""
         from uxsim_bridge import build_world, scenario_from_dict
 
         # サーバー経路
-        server_res = _run_uxsim(SimulationInput(**self.SCENARIO_DICT))
+        server_res = run_uxsim(SimulationInput(**self.SCENARIO_DICT))
         s = server_res["stats"]
 
         # 素の UXsim 経路
         W = build_world(scenario_from_dict(self.SCENARIO_DICT),
                         disable_basic_analysis=True)
         W.exec_simulation()
-        from risu.simulation import _trip_stats
-        total, completed, avg_tt, _arrivals = _trip_stats(W)
+        from risu.simulation import trip_stats
+        total, completed, avg_tt, _arrivals = trip_stats(W)
 
         assert total == s["total_trips"]
         assert completed == s["completed_trips"]
@@ -808,10 +808,10 @@ class TestStandalonePipeline:
         assert W0.random_seed is None
 
     def test_seeded_server_runs_are_reproducible(self):
-        """同じ seed の 2 回の _run_uxsim は統計もフレームも一致し，別 seed では乱数列が変わる．"""
+        """同じ seed の 2 回の run_uxsim は統計もフレームも一致し，別 seed では乱数列が変わる．"""
         import numpy as np
-        a = _run_uxsim(SimulationInput(**self.SEEDED))
-        b = _run_uxsim(SimulationInput(**self.SEEDED))
+        a = run_uxsim(SimulationInput(**self.SEEDED))
+        b = run_uxsim(SimulationInput(**self.SEEDED))
         assert a["stats"]["completed_trips"] == b["stats"]["completed_trips"]
         assert a["stats"]["average_travel_time_s"] == b["stats"]["average_travel_time_s"]
         assert a["vehicle_counts"] == b["vehicle_counts"]
@@ -842,14 +842,14 @@ class TestStandalonePipeline:
 
     def test_scenario_envelope_keeps_seed(self):
         """/results/{id}/scenario（再現用 DL）に random_seed / reaction_time が残る．"""
-        from risu.results import _build_envelope, _store_sim
-        res = _run_uxsim(SimulationInput(**self.SEEDED))
-        _store_sim("seed_env_test", res)
+        from risu.results import build_envelope, store_sim
+        res = run_uxsim(SimulationInput(**self.SEEDED))
+        store_sim("seed_env_test", res)
         try:
-            env = _build_envelope("seed_env_test", include_result=False)
+            env = build_envelope("seed_env_test", include_result=False)
             assert env["scenario"]["random_seed"] == 42
             assert env["scenario"]["reaction_time"] == 1.5
-            full = _build_envelope("seed_env_test", include_result=True)
+            full = build_envelope("seed_env_test", include_result=True)
             assert full["result"]["vehicle_counts"] == res["vehicle_counts"]
         finally:
             results_store.pop("seed_env_test", None)

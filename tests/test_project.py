@@ -56,10 +56,10 @@ sc = risu.schema.SimulationInput(
     links=[{{"name": "AB", "start": "A", "end": "B", "length": 500}}],
     demands=[{{"orig": "A", "dest": "B", "t_start": 0, "t_end": 100, "flow": 0.3}}],
 )
-res = risu.simulation._run_uxsim(sc)
-risu.results._store_sim("lic", res)
-risu.results._envelope_json_bytes("lic")
-risu.aggregate._get_simulation_data("lic")
+res = risu.simulation.run_uxsim(sc)
+risu.results.store_sim("lic", res)
+risu.results.envelope_json_bytes("lic")
+risu.aggregate.get_simulation_data("lic")
 qt = [m for m in sys.modules if m.split(".")[0] in {self.GPL_MODULES!r}]
 print("QT:" + ",".join(sorted(qt)))
 '''
@@ -103,10 +103,10 @@ sc = risu.schema.SimulationInput(
     links=[{"name": "AB", "start": "A", "end": "B", "length": 500}],
     demands=[{"orig": "A", "dest": "B", "t_start": 0, "t_end": 100, "flow": 0.3}],
 )
-res = risu.simulation._run_uxsim(sc)
-risu.results._store_sim("noqt", res)
-assert b'"columnar_v3"' in risu.results._envelope_json_bytes("noqt")
-assert risu.aggregate._get_simulation_data("noqt")
+res = risu.simulation.run_uxsim(sc)
+risu.results.store_sim("noqt", res)
+assert b'"columnar_v3"' in risu.results.envelope_json_bytes("noqt")
+assert risu.aggregate.get_simulation_data("noqt")
 
 from uxsim_bridge import build_world, scenario_from_dict
 W = build_world(scenario_from_dict({
