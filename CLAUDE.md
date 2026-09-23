@@ -99,7 +99,7 @@ LLM が扱うのは `sim_id`・差分命令・集計値だけです（§3.3）�
 | `_envelope_compressed_bytes` | 結果の直列化 + 圧縮（方式別キャッシュ） |
 | `POST /simulate` / `GET /results/{id}` | 直接実行 / 結果取得 |
 | `POST /chat` | LLM 対話（claude = SSE ストリーミング / ollama / mock） |
-| `GET /mcp` | MCP SSE エンドポイント |
+| `GET /mcp` | MCP SSE エンドポイント．ツール定義は `CLAUDE_TOOLS` をそのまま公開し，実行は `_mcp_call_tool` → `_dispatch_tool_blocks` |
 
 **LLM ツール**: `run_simulation` / `rerun_simulation` / `get_network_info` /
 `get_simulation_data` / `import_osm_network`．
@@ -156,6 +156,11 @@ LLM が扱うのは `sim_id`・差分命令・集計値だけです（§3.3）�
 - **ツールを追加するとき**: `_dispatch_tool_blocks` に分岐を 1 つ足すだけでよい．
   `follow_up` は 2 ラウンド目以降で，進捗の文言と保存メタの `round` が変わる．
 - **テスト**: `TestToolDispatch`（8 件）・`TestChatStreamingPath`（4 件）．
+
+MCP（`_mcp_call_tool`）も同じ dispatcher を通します．会話コンテキストが無いので
+`_ToolTurnState(body=None, via="mcp")` で呼び，進捗イベントは捨てます．
+ツール定義も `CLAUDE_TOOLS` を変換して公開するので，**MCP 専用の定義を書かないこと**
+（`TestMcpParity` が同一性を検証）．
 
 フロントも同様に，SSE 経路と JSON 経路の応答反映を `renderAssistantResponse` に
 一本化しています（sim バッジ・チャート・トークン使用量の付け方）．

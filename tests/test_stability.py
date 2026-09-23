@@ -2924,3 +2924,64 @@ class TestBindDefaults:
         import server
         assert all("localhost" in o or "127.0.0.1" in o for o in server.ALLOWED_ORIGINS), \
             f"CORS の既定に外部オリジンが含まれている: {server.ALLOWED_ORIGINS}"
+
+
+# ============================================================
+# MCP はチャットと同じツール定義・同じ dispatcher を通る
+# ============================================================
+
+class TestMcpParity:
+    """[修正履歴] MCP は run_simulation / get_result の 2 つだけを別定義していて，
+    差分再実行・ネットワーク照会・集計データ・OSM 取込が MCP から使えなかった．
+    いまは CLAUDE_TOOLS をそのまま公開し，_dispatch_tool_blocks を共有する（§3.2）．
+    """
+
+    def test_mcp_exposes_every_chat_tool_with_same_schema(self):
+        import server
+        tools = {t.name: t for t in server._mcp_tools()}
+        for t in server.CLAUDE_TOOLS:
+            assert t["name"] in tools, f"MCP に {t['name']} が無い"
+            assert tools[t["name"]].inputSchema == t["input_schema"]
+            assert tools[t["name"]].description == t["description"]
+        assert "get_result" in tools   # 互換ツール
+
+    def test_mcp_roundtrip_through_shared_dispatcher(self):
+        import asyncio
+        import server
+
+        async def go():
+            created = []
+            try:
+                r = await server._mcp_call_tool("run_simulation", {
+                    "grid": {"nx": 3, "spacing": 500},
+                    "auto_demands": {"strategy": "boundary", "flow_per_pair": 0.1},
+                    "tmax": 600, "random_seed": 1,
+                })
+                d = json.loads(r); sid = d["sim_id"]; created.append(sid)
+                assert server.results_store[sid]["_meta"]["source"]["via"] == "mcp"
+
+                r = await server._mcp_call_tool("get_simulation_data", {"sim_id": sid, "points": 10})
+                assert "network_avg_speed" in json.loads(r)
+
+                r = await server._mcp_call_tool("get_network_info", {"sim_id": sid, "include": "summary"})
+                assert "error" not in r.lower()[:40]
+
+                r = await server._mcp_call_tool("rerun_simulation", {
+                    "base_sim_id": sid,
+                    "modifications": [{"action": "set_params", "random_seed": 2}],
+                })
+                d2 = json.loads(r); created.append(d2["sim_id"])
+                assert d2["sim_id"] != sid
+                assert server.results_store[d2["sim_id"]]["_scenario"]["random_seed"] == 2
+
+                r = await server._mcp_call_tool("get_result", {"simulation_id": sid})
+                assert "total_trips" in r
+                r = await server._mcp_call_tool("no_such_tool", {})
+                assert "未知のツール" in r
+                r = await server._mcp_call_tool("get_result", {"simulation_id": "missing"})
+                assert "見つかりません" in r
+            finally:
+                for s in created:
+                    server.results_store.pop(s, None)
+
+        asyncio.run(go())

@@ -737,12 +737,16 @@ Claude Code の場合:
 claude mcp add --transport sse risu http://localhost:8001/mcp
 ```
 
-提供されるツール:
+提供されるツールはチャットの LLM と同じ 5 つ（定義も同一）に，互換用の `get_result` を加えたものです:
 
 | ツール | 説明 |
 |---|---|
-| `run_simulation` | ノード・リンク・需要を指定してシミュレーションを実行 |
-| `get_result` | 実行済みの結果を `simulation_id` で取得 |
+| `run_simulation` | ノード・リンク・需要（または `grid` / `auto_demands`）でシミュレーションを実行 |
+| `rerun_simulation` | 保存済みシナリオに差分命令を当てて再実行（[§9](#9-llm-にネットワークを渡さない設計)） |
+| `get_network_info` | ノード・リンクの要約と絞り込み照会 |
+| `get_simulation_data` | チャート用の集計データ（時系列・リンク別速度・速度分布） |
+| `import_osm_network` | OpenStreetMap から道路網を取り込んで実行 |
+| `get_result` | 統計 3 値だけを `simulation_id` で取得（互換用） |
 
 結果はブラウザ側にも反映されるので，MCP で実行して UI で眺める，という使い方もできます．
 

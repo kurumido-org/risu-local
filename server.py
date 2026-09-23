@@ -18,6 +18,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, NamedTuple
 
 import httpx
@@ -933,117 +934,57 @@ def _apply_link_geometries(result: dict, link_geometries: dict):
 # ──────────────────────────────────────────────
 mcp_server = Server("uxsim-mcp")
 
+def _mcp_tools() -> list[Tool]:
+    """MCP に公開するツール．チャット（CLAUDE_TOOLS）と同じ定義を変換して返す．
+
+    以前は MCP 専用に run_simulation / get_result の 2 つだけを別定義していたため，
+    差分再実行・ネットワーク照会・OSM 取込が MCP から使えず，説明も二重管理だった．
+    get_result は互換のために残す（統計だけを返す軽量ツール）．
+    """
+    tools = [Tool(name=t["name"], description=t["description"], inputSchema=t["input_schema"])
+             for t in CLAUDE_TOOLS]
+    tools.append(Tool(
+        name="get_result",
+        description="実行済みシミュレーションの統計（total_trips / completed_trips / "
+                    "average_travel_time_s）を ID で取得する．詳細は get_simulation_data を使う．",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "simulation_id": {"type": "string", "description": "run_simulation が返した sim_id"},
+            },
+            "required": ["simulation_id"],
+        },
+    ))
+    return tools
+
+
+async def _mcp_call_tool(name: str, arguments: dict | None) -> str:
+    """MCP のツール呼び出し本体．チャットと同じ _dispatch_tool_blocks を通す（§3.2）．
+
+    進捗イベントは MCP に流す先が無いので捨てる（_collect_tool_results）．
+    会話コンテキスト（body）は無いので None．保存メタの via は "mcp"．
+    """
+    arguments = arguments or {}
+    if name == "get_result":
+        sim_id = str(arguments.get("simulation_id", ""))
+        if sim_id not in results_store:
+            return f"ID {sim_id} の結果が見つかりません．"
+        return json.dumps(results_store[sim_id]["stats"], ensure_ascii=False)
+
+    block = SimpleNamespace(id=f"mcp-{uuid.uuid4().hex[:8]}", name=name, input=arguments)
+    state = _ToolTurnState(body=None, via="mcp")
+    results = await _collect_tool_results([block], state)
+    return results[0]["content"]   # 未知のツール名でも dispatcher が結果を返す
+
+
 @mcp_server.list_tools()
 async def list_tools() -> list[Tool]:
-    return [
-        Tool(
-            name="run_simulation",
-            description=(
-                "UXsim 交通流シミュレーションを実行します．"
-                "ノード・リンク・需要を指定してください．"
-                "結果は GeoJSON 形式と集計統計で返されます．"
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "name":    {"type": "string",  "description": "シミュレーション名"},
-                    "tmax":    {"type": "integer",  "description": "シミュレーション終了時刻（秒）"},
-                    "deltan":  {"type": "integer",  "description": "車両集計単位（デフォルト5台）"},
-                    "reaction_time": {"type": "number", "description": "車頭時間（秒）．省略で UXsim 既定"},
-                    "random_seed":   {"type": "integer", "description": "乱数シード（省略で毎回変わる）"},
-                    "nodes":   {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "name": {"type": "string"},
-                                "x":    {"type": "number"},
-                                "y":    {"type": "number"},
-                                "flow_capacity": {"type": "number"},
-                                "signal": {"type": "array", "items": {"type": "number"}, "description": "信号現示の青時間リスト（秒）"},
-                            },
-                            "required": ["name", "x", "y"],
-                        },
-                    },
-                    "links": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "name":             {"type": "string"},
-                                "start":            {"type": "string"},
-                                "end":              {"type": "string"},
-                                "length":           {"type": "number"},
-                                "free_flow_speed":  {"type": "number"},
-                                "jam_density":      {"type": "number"},
-                                "number_of_lanes":  {"type": "integer"},
-                                "capacity":         {"type": "number", "description": "リンク容量（台/秒）"},
-                                "signal_group":     {"type": "integer", "description": "信号現示番号（0始まり）"},
-                            },
-                            "required": ["name", "start", "end", "length"],
-                        },
-                    },
-                    "demands": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "orig":    {"type": "string"},
-                                "dest":    {"type": "string"},
-                                "t_start": {"type": "number"},
-                                "t_end":   {"type": "number"},
-                                "flow":    {"type": "number"},
-                            },
-                            "required": ["orig", "dest", "t_start", "t_end", "flow"],
-                        },
-                    },
-                },
-                "required": ["nodes", "links", "demands"],
-            },
-        ),
-        Tool(
-            name="get_result",
-            description="以前実行したシミュレーションの結果を ID で取得します．",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "simulation_id": {"type": "string", "description": "run_simulation が返した ID"},
-                },
-                "required": ["simulation_id"],
-            },
-        ),
-    ]
+    return _mcp_tools()
 
 
 @mcp_server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    if name == "run_simulation":
-        scenario, _info = _expand_run_simulation_args(arguments)  # grid / auto_demands 対応
-        sim_input = SimulationInput(**scenario)
-        result = await _run_uxsim_async(sim_input)
-        sim_id = str(uuid.uuid4())[:8]
-        _store_sim(sim_id, result, {"type": "llm", "via": "mcp"})
-        summary = result["stats"]
-        return [TextContent(
-            type="text",
-            text=(
-                f"シミュレーション完了．ID: {sim_id}\n"
-                f"総トリップ数: {summary['total_trips']}\n"
-                f"完了トリップ数: {summary['completed_trips']}\n"
-                f"平均旅行時間: {summary['average_travel_time_s']} 秒\n"
-                f"計算時間: {summary['simulation_time_s']} 秒\n"
-                f"結果取得: GET /results/{sim_id}"
-            ),
-        )]
-
-    elif name == "get_result":
-        sim_id = arguments["simulation_id"]
-        if sim_id not in results_store:
-            return [TextContent(type="text", text=f"ID {sim_id} の結果が見つかりません．")]
-        stats = results_store[sim_id]["stats"]
-        return [TextContent(type="text", text=json.dumps(stats, ensure_ascii=False))]
-
-    return [TextContent(type="text", text=f"未知のツール: {name}")]
+    return [TextContent(type="text", text=await _mcp_call_tool(name, arguments))]
 
 
 # ──────────────────────────────────────────────
@@ -2160,7 +2101,8 @@ def _handle_get_network_info(fn_args: dict) -> tuple[str, bool]:
     return (json.dumps(out, ensure_ascii=False), False)
 
 
-async def _handle_rerun_simulation(fn_args: dict, body) -> tuple[str, str | None, bool]:
+async def _handle_rerun_simulation(fn_args: dict, body, *, via: str = "chat"
+                                   ) -> tuple[str, str | None, bool]:
     """rerun_simulation ツールの共通ハンドラ（stream / sync 両系統から使用）．
 
     戻り値: (tool_result content, 新 sim_id または None, is_error)
@@ -2198,6 +2140,7 @@ async def _handle_rerun_simulation(fn_args: dict, body) -> tuple[str, str | None
         new_id = str(uuid.uuid4())[:8]
         _store_sim(new_id, result, {
             "type": "llm",
+            "via": via,
             "llm_backend": "claude",
             "tool": "rerun_simulation",
             "base_sim_id": base_id,
@@ -2796,8 +2739,8 @@ def _expand_run_simulation_args(fn_args: dict) -> tuple[dict, dict]:
     return args, info
 
 
-async def _handle_run_simulation(fn_args: dict, body, *, source_round: str | None = None
-                                 ) -> tuple[str, str | None, bool]:
+async def _handle_run_simulation(fn_args: dict, body, *, source_round: str | None = None,
+                                 via: str = "chat") -> tuple[str, str | None, bool]:
     """run_simulation ツールの共通ハンドラ（stream / sync 両系統から使用）．
 
     戻り値: (tool_result content, 新 sim_id または None, is_error)
@@ -2809,6 +2752,7 @@ async def _handle_run_simulation(fn_args: dict, body, *, source_round: str | Non
         sim_id = str(uuid.uuid4())[:8]
         src = {
             "type": "llm",
+            "via": via,
             "llm_backend": "claude",
             "tool": "run_simulation",
             "llm_user_message": _last_user_message_text(body),
@@ -2900,7 +2844,7 @@ def _sse_event(data: dict) -> str:
 
 def _conversation_sim_id(body: ChatInput) -> str | None:
     """会話に紐づく有効なシミュレーションIDを返す（なければ None）"""
-    sim_id = (body.last_sim_id or "").strip()
+    sim_id = (getattr(body, "last_sim_id", None) or "").strip()
     return sim_id if sim_id and sim_id in results_store else None
 
 
@@ -2940,10 +2884,11 @@ class _ToolTurnState:
     sim_data_cache    このターンで取得した集計データ（チャートの $data 参照解決用）
     """
 
-    __slots__ = ("body", "sim_id", "last_data_sim_id", "sim_data_cache")
+    __slots__ = ("body", "sim_id", "last_data_sim_id", "sim_data_cache", "via")
 
-    def __init__(self, body: ChatInput):
-        self.body = body
+    def __init__(self, body: ChatInput | None, via: str = "chat"):
+        self.body = body            # MCP 経由では None（会話コンテキストが無い）
+        self.via = via              # 保存メタの source.via（"chat" / "mcp"）
         self.sim_id: str | None = None
         self.last_data_sim_id: str | None = None
         self.sim_data_cache: dict[str, dict] = {}
@@ -2982,7 +2927,7 @@ async def _dispatch_tool_blocks(tool_blocks, state: _ToolTurnState, *, follow_up
             yield ("progress", "追加シミュレーションを実行中..." if follow_up
                    else "Step 2/3: UXsim でシミュレーション実行中...")
             content, new_sim_id, is_err = await _handle_run_simulation(
-                args, state.body, source_round="follow_up" if follow_up else None)
+                args, state.body, source_round="follow_up" if follow_up else None, via=state.via)
             if new_sim_id:
                 state.sim_id = new_sim_id
             results.append(_tool_result(tb.id, content, is_err))
@@ -2990,7 +2935,7 @@ async def _dispatch_tool_blocks(tool_blocks, state: _ToolTurnState, *, follow_up
         elif name == "rerun_simulation":
             yield ("progress", "修正を適用して再実行中..." if follow_up
                    else "Step 2/3: 修正を適用して再実行中...")
-            content, new_sim_id, is_err = await _handle_rerun_simulation(args, state.body)
+            content, new_sim_id, is_err = await _handle_rerun_simulation(args, state.body, via=state.via)
             if new_sim_id:
                 state.sim_id = new_sim_id
             results.append(_tool_result(tb.id, content, is_err))
@@ -3033,7 +2978,7 @@ async def _dispatch_tool_blocks(tool_blocks, state: _ToolTurnState, *, follow_up
                 new_id = str(uuid.uuid4())[:8]
                 meta = {
                     "type": "osm",
-                    "via": "llm",
+                    "via": state.via,
                     "llm_backend": "claude",
                     "place": place,
                     "distance_m": dist,
