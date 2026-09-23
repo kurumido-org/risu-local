@@ -2132,25 +2132,24 @@ class TestGuiRerunCarriesScenarioParams:
         assert "v < 0) delete lk.capacity" in block
         assert "v <= 0" not in block
 
-    def test_stats_use_server_series(self, html):
+    def test_stats_and_phase_logic_live_in_risu_core(self, html):
+        """統計・現示・フレーム復号のロジックは static/js/risu-core.js にあり，
+        index.html はグローバルを渡すだけ（ロジックの検証は node --test tests/js）．"""
         i = html.index("function computeStatsSeries()")
         block = html[i:html.index("function currentTimeSec()", i)]
-        assert "tripSeries" in block and "frameAvgSpeed" in block
+        assert "RisuCore.computeStats(" in block and "tripSeries" in block and "frameAvgSpeed" in block
         j = html.index("function updateStatValues()")
-        assert "tripAt(t)" in html[j:j + 1500]
-
-    def test_phase_log_uses_server_deltat(self, html):
-        i = html.index("function currentPhaseIdx(sig, t)")
-        block = html[i:i + 1200]
-        assert "sig.deltat" in block
-        assert "t / tmax * phaseLog.length" not in block
+        assert "RisuCore.statValuesAt(" in html[j:j + 1200]
+        k = html.index("function currentPhaseIdx(sig, t)")
+        assert "RisuCore.phaseIndexAt(" in html[k:k + 400]
+        assert "RisuCore.decodeFrames(" in html
+        assert '<script src="/js/risu-core.js"></script>' in html
 
     def test_active_vehicles_uses_real_counts(self, html):
-        i = html.index("function computeStatsSeries()")
-        block = html[i:html.index("function currentFrameIdx()", i)]
-        assert "vehicleCounts[i]" in block
-        assert "frame.n * vehScale" in block
-        assert "vehicle_counts" in html and "vehicle_sample_step" in html
+        # 実台数への換算は risu-core.js の computeStats（tests/js で検証）．
+        # index.html 側はサーバーの vehicle_counts / vehicle_sample_step を渡していること
+        assert "vehicleCounts = Array.isArray(r.vehicle_counts)" in html
+        assert "r.vehicle_sample_step" in html
 
 
 # ============================================================
@@ -2630,7 +2629,7 @@ class TestLicenseHygiene:
         with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as f:
             html = f.read()
         srcs = re.findall(r'<script[^>]+src="([^"]+)"', html)
-        assert srcs and all(s.startswith("/vendor/") for s in srcs), srcs
+        assert srcs and all(s.startswith("/vendor/") or s.startswith("/js/") for s in srcs), srcs
 
     def test_risu_does_not_import_qt(self):
         """server.py を読み込み，シミュレーションを流しても Qt を import しない．"""

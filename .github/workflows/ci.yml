@@ -42,6 +42,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+        # macOS は実機での確認はしていないが，サーバー側はここで検証する（1 組だけ．コスト対策）
+        include:
+          - os: macos-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -52,6 +56,36 @@ jobs:
         run: pip install -r requirements-dev.txt
       - name: pytest
         run: pytest -ra -q
+
+  frontend:
+    # フロントの純粋ロジック（static/js/risu-core.js）を node の組み込みランナーで検証する．
+    # npm の依存は無い（package.json も無い）．ブラウザ無しで走るので速い．
+    name: frontend logic (node --test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: node --test tests/js/*.test.js
+
+  e2e:
+    # 実ブラウザ（headless Chromium）で「読み込み → 描画 → 統計 → エディタ」の結線を確認する．
+    # ロジックの検証は frontend ジョブ，ここは壊れていないことの確認だけ（数十秒）．
+    name: browser smoke (Playwright / Chromium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: install
+        run: |
+          pip install -r requirements-dev.txt playwright
+          python -m playwright install --with-deps chromium
+      - name: pytest tests/e2e
+        run: pytest tests/e2e -ra -q
 
   licenses:
     # RISU は MIT で配布する．新しいコピーレフト依存が紛れ込んだら気づけるようにする．

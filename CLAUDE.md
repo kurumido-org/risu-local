@@ -53,12 +53,16 @@ risu-local/
 ├── uxsim_bridge.py       ← シナリオ → UXsim World（RISU 非依存の純粋モジュール）
 ├── static/
 │   ├── index.html        ← UI 本体（チャット + Canvas 可視化 + Chart.js）
+│   ├── js/risu-core.js   ← フロントの純粋ロジック（フレーム復号・統計・現示）．DOM に触らない
 │   ├── vendor/           ← marked / DOMPurify / Chart.js（同梱．ライセンス表記を消さないこと．CDN に戻さない＝オフラインで動く前提）
 │   └── sample_risu.csv
 ├── scripts/
 │   ├── run_scenario.py   ← 素の UXsim で実行する CLI（サーバー不要）
 │   └── bench.py          ← 後処理・直列化のベンチマーク
-├── tests/test_stability.py
+├── tests/
+│   ├── test_stability.py ← サーバー側（pytest）
+│   ├── js/core.test.js   ← risu-core.js の単体テスト（node --test tests/js/*.test.js，依存なし）
+│   └── e2e/              ← headless Chromium のスモークテスト（playwright が無ければ skip）
 ├── pyproject.toml        ← ruff / pytest 設定 + パッケージメタデータ
 ├── requirements.txt      ← 範囲指定（上限付き）
 ├── requirements.lock.txt ← 検証済みの正確なバージョン（再現用）
@@ -286,6 +290,11 @@ MCP（`_mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
 - **統計**: `computeStatsSeries` は各リンク timeline を 1 回だけ走査する
   （O(フレーム数 × リンク数)）．`drawSparkline` はその `avgRatio` を使うので，
   **先に `computeStatsSeries` を呼ぶこと**．
+- **ロジックとグローバルの分離**: DOM・Canvas・グローバル状態に依存しない処理
+  （フレーム復号・統計系列・現示の判定・時刻検索）は `static/js/risu-core.js` に置き，
+  index.html はグローバルを渡す薄いラッパーにする．**フロントにロジックを足すときは
+  risu-core.js に関数を足して `tests/js` に単体テストを書く**（`node --test tests/js/*.test.js`）．
+  ブラウザでの結線は `tests/e2e`（Playwright）が見る．
 - **信号**: `_drawSignals` が毎フレーム描く（現示はフレーム間でも変わるので静的レイヤーに
   入れない）．流入リンクごとに停止線バー 1 本だけ．
   最短の流入リンクの画面長が `SIGNAL_LOD_PX` 未満なら描かない．
@@ -325,6 +334,7 @@ MCP（`_mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
 | **シナリオ全体のパラメータを足す** | `SimulationInput` / `SCENARIO_DEFAULTS` / `build_world` / `set_params` / GUI `et-run` / `EMIT_TEMPLATE` の 6 箇所（§3.1） |
 | **台数を扱う集計を足す** | `vehicle_counts` を使うか `deltan` を掛ける（§3.3）．フレームの点数はプラトン数 |
 | **入力の値域を変える** | `SimulationInput` の `Field(gt=/ge=)`．`TestScenarioValidation` に 1 件足す（deltan=0・負のリンク長・負の需要・時刻逆転を受理していた） |
+| **フロントのロジックを足す** | `static/js/risu-core.js` に純粋関数として書き，`tests/js` に単体テスト（§3.7）．index.html には DOM の結線だけ |
 | **ファイルを追加する** | §6 の公開対象かどうか |
 
 ---

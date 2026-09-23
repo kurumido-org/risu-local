@@ -15,6 +15,7 @@
      ローカル利用のため CDN ではなく同梱する（オフラインでも動く）． -->
 <script src="/vendor/marked.umd.min.js"></script>
 <script src="/vendor/purify.min.js"></script>
+<script src="/js/risu-core.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@300;400;500;600;700;800&family=Noto+Sans+JP:wght@300;400;500;700&display=swap');
 
@@ -2716,70 +2717,14 @@ async function loadResult(simId) {
       for (let i = 0; i < linkNames.length; i++) linkFfsByIdx[i] = ffsMap[linkNames[i]] || 0;
     }
 
-    // フレームを列指向 → TypedArray に変換（大幅なメモリ削減）
+    // フレームを列指向 → TypedArray に変換（大幅なメモリ削減）．復号は RisuCore.decodeFrames
+    // （v3 / v2 / 旧 array-of-objects の 3 形式．node のテスト tests/js で検証）
     const rawFrames = r.frames || {};
-    framesData = {};
     // frame_format が無くても，raw.ids が存在すれば columnar 形式とみなす．
     // v3 は送出時に量子化・差分符号化された形式（サーバーの _encode_frames_v3）．
     // ダウンロード済みの古い JSON は v2 のままなので両方を読めるようにしておく．
     const isV3 = r.frame_format === 'columnar_v3';
-    for (const k of Object.keys(rawFrames)) {
-      const raw = rawFrames[k];
-      let frame;
-      if (raw && typeof raw === 'object' && !Array.isArray(raw) && Array.isArray(raw.ids)) {
-        const n = raw.ids.length;
-        if (isV3) {
-          // v3: ids は差分符号化，vs は 0.1 m/s 単位，alphas は 0.001 単位の整数．
-          // 復元はこのループ 1 回だけ（60fps の描画経路には入らない）．
-          const ids = new Uint32Array(n), vs = new Float32Array(n), alphas = new Float32Array(n);
-          const rid = raw.ids, rv = raw.vs, ra = raw.alphas;
-          let acc = 0;
-          for (let i = 0; i < n; i++) {
-            acc += rid[i];
-            ids[i] = acc;
-            vs[i] = rv[i] * 0.1;
-            alphas[i] = ra[i] * 0.001;
-          }
-          frame = {
-            n, ids, vs, alphas,
-            xs: new Float32Array(raw.xs),
-            ys: new Float32Array(raw.ys),
-            li: new Uint16Array(raw.li),
-          };
-        } else {
-          // v2 コンパクト形式 → 直接 TypedArray にコピー
-          frame = {
-            n,
-            ids:    new Uint32Array(raw.ids),
-            xs:     new Float32Array(raw.xs),
-            ys:     new Float32Array(raw.ys),
-            vs:     new Float32Array(raw.vs),
-            alphas: new Float32Array(raw.alphas),
-            li:     new Uint16Array(raw.li),
-          };
-        }
-      } else if (Array.isArray(raw)) {
-        // 旧形式（array-of-objects）との互換: TypedArray に正規化
-        const n = raw.length;
-        const ids = new Uint32Array(n), xs = new Float32Array(n), ys = new Float32Array(n);
-        const vs = new Float32Array(n), alphas = new Float32Array(n), li = new Uint16Array(n);
-        const linkIdxMap = {};
-        for (let i = 0; i < linkNames.length; i++) linkIdxMap[linkNames[i]] = i;
-        for (let i = 0; i < n; i++) {
-          const v = raw[i];
-          ids[i] = v.id | 0;
-          xs[i] = v.x; ys[i] = v.y; vs[i] = v.v;
-          alphas[i] = v.alpha != null ? v.alpha : 0;
-          li[i] = linkIdxMap[v.link] | 0;
-        }
-        frame = { n, ids, xs, ys, vs, alphas, li };
-      } else {
-        frame = { n: 0, ids: new Uint32Array(0), xs: new Float32Array(0), ys: new Float32Array(0),
-                  vs: new Float32Array(0), alphas: new Float32Array(0), li: new Uint16Array(0) };
-      }
-      framesData[String(parseFloat(k))] = frame;
-      rawFrames[k] = null; // 外側 JSON への参照を切って GC 対象に
-    }
+    framesData = RisuCore.decodeFrames(rawFrames, { isV3, linkNames, release: true });
     simTmax    = r.tmax;
     lastSimId  = simId;
 
@@ -2846,28 +2791,8 @@ function releasePrevResult() {
 // 現在時刻での信号現示 index を計算
 // sig: 信号オブジェクト全体（phase_log があれば優先使用）
 function currentPhaseIdx(sig, t) {
-  // 互換: 旧シグネチャ (phases, t) で呼ばれた場合
-  const phases = Array.isArray(sig) ? sig : sig.phases;
-  const phaseLog = (sig && sig.phase_log) || null;
-  // UXsim の実 phase ログがあれば最優先（タイミングずれを完全排除）
-  // phase_log の time step は DELTAT(=tmax/log長)．t を比例配分でインデックス化．
-  if (phaseLog && phaseLog.length) {
-    // ログ 1 件 = deltat 秒（deltan × reaction_time）．サーバーが実値 sig.deltat を送る．
-    // 旧実装の tmax / ログ件数 は tmax が deltat の整数倍でないとずれた
-    // （tmax=1000, deltat=8.5 → 8.547 として参照し，1,000 時点中 97 時点で現示が違った）．
-    const dt = (sig && sig.deltat > 0) ? sig.deltat : (simTmax || phaseLog.length) / phaseLog.length;
-    const idx = Math.max(0, Math.min(phaseLog.length - 1, Math.floor(t / dt)));
-    return phaseLog[idx];
-  }
-  if (!phases || !phases.length) return -1;
-  const cycle = phases.reduce((a, b) => a + b, 0);
-  if (cycle <= 0) return -1;
-  let tInCycle = t % cycle;
-  for (let i = 0; i < phases.length; i++) {
-    tInCycle -= phases[i];
-    if (tInCycle < 0) return i;
-  }
-  return phases.length - 1;
+  // UXsim の実ログ（phase_log，1 件 = deltat 秒）を最優先．ロジックは RisuCore.phaseIndexAt
+  return RisuCore.phaseIndexAt(sig, t, simTmax);
 }
 
 // 空フレーム（undefined アクセスのフォールバック用）
@@ -2901,13 +2826,7 @@ function speedToColor(speed, ffs) {
 
 // ── フレーム時刻の最近傍インデックスを見つける ──
 function findNearestFrameIdx(tCurrent) {
-  if (!frameTimes.length) return -1;
-  let lo = 0, hi = frameTimes.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi + 1) >> 1;
-    if (frameTimes[mid] <= tCurrent) lo = mid; else hi = mid - 1;
-  }
-  return lo;
+  return RisuCore.lowerBoundIndex(frameTimes, tCurrent);
 }
 
 // ── 車両のスクリーン座標を計算 ──
@@ -4142,84 +4061,16 @@ loadResult = async function(simId) {
 let statsSeries = null; // { active[], avgSpeed[], completed[], started[], totalTrips }
 
 function computeStatsSeries() {
-  if (!framesData || !frameTimes.length) { statsSeries = null; return; }
-  const N = frameTimes.length;
-  const active = new Array(N);
-  const started = new Array(N);
-  const completed = new Array(N);
-  const avgSpeed = new Array(N);
-  const avgRatio = new Array(N);  // 平均 (速度 / 自由流速度)，sparkline 用
-
-  // 1 パス目: 各車両の最初・最後に見えたフレーム index
-  // frame.n はプラトン数（× deltan 台）で，描画用に間引かれていることもある．
-  // ACTIVE VEHICLES はサーバーが間引き前に数えた vehicleCounts を優先し，
-  // 無ければ vehScale（deltan × 間引き間隔）で実台数に換算する．
-  const useCounts = vehicleCounts && vehicleCounts.length === N;
-  const firstSeen = new Map(), lastSeen = new Map();
-  for (let i = 0; i < N; i++) {
-    const frame = framesData[String(frameTimes[i])] || EMPTY_FRAME;
-    active[i] = useCounts ? vehicleCounts[i] : frame.n * vehScale;
-    const ids = frame.ids;
-    for (let j = 0; j < frame.n; j++) {
-      const id = ids[j];
-      if (!firstSeen.has(id)) firstSeen.set(id, i);
-      lastSeen.set(id, i);
-    }
-  }
-  // started[i] = 出現済み車両数（firstSeen ≤ i），completed[i] = 最後に見えたのが i より前の車両数
-  // （旧実装の「出現済み集合を毎フレーム走査」は O(N × 車両数) で大規模時に数秒かかった）
-  const firstCnt = new Int32Array(N), lastCnt = new Int32Array(N);
-  for (const i of firstSeen.values()) firstCnt[i]++;
-  for (const i of lastSeen.values()) lastCnt[i]++;
-  for (let i = 0, s = 0, c = 0; i < N; i++) {
-    s += firstCnt[i]; started[i] = s * vehScale;
-    completed[i] = c * vehScale; c += lastCnt[i];
-  }
-  // サーバーの実イベント系列があればそれで上書き（フレーム由来の推定は「最後に描画された
-  // 時刻」までしか分からず，全車両到着後も走行中 5 台・到着 45 台のように残っていた）
-  if (tripSeries) {
-    for (let i = 0; i < N; i++) {
-      const tr = tripAt(frameTimes[i]);
-      started[i] = tr.entered; completed[i] = tr.completed;
-    }
-  }
-
-  // 平均速度: 各リンクの timeline を先頭から 1 回だけ走査（フレーム時刻も timeline も昇順）
-  const features = (geoData && geoData.features) || [];
-  const sum = new Float64Array(N), cnt = new Int32Array(N);
-  const rsum = new Float64Array(N), rcnt = new Int32Array(N);
-  for (const f of features) {
-    const tl = f.properties.timeline || [];
-    if (!tl.length) continue;
-    const ffs = f.properties.free_flow_speed;
-    let j = 0, cur = null;
-    for (let i = 0; i < N; i++) {
-      const t = frameTimes[i];
-      while (j < tl.length && tl[j].t <= t) { cur = tl[j].speed; j++; }
-      if (cur != null) {
-        sum[i] += cur; cnt[i]++;
-        if (ffs) { rsum[i] += Math.max(0, Math.min(1, cur / ffs)); rcnt[i]++; }
-      }
-    }
-  }
-  for (let i = 0; i < N; i++) {
-    // AVG SPEED は「走行中の全車両の速度の台数重み平均」（サーバー計算，LLM の network_avg_speed と
-    // 同じ定義）．リンク別 timeline の単純平均（リンク重み）は別物なので，古い結果の代替にだけ使う
-    const fs = (frameAvgSpeed && frameAvgSpeed.length === N) ? frameAvgSpeed[i] : null;
-    avgSpeed[i] = fs != null ? fs : (cnt[i] ? sum[i] / cnt[i] : 0);
-    avgRatio[i] = rcnt[i] ? rsum[i] / rcnt[i] : 0;   // 混雑度（速度/自由流速度のリンク平均）
-  }
-
-  const totalTrips = (simStats && simStats.total_trips) ? simStats.total_trips : lastSeen.size * vehScale;
-  statsSeries = { active, avgSpeed, avgRatio, completed, started, totalTrips,
-    maxActive: Math.max(1, ...active),
-    maxSpeed: Math.max(1, ...avgSpeed),
-    maxCompleted: Math.max(1, ...completed),
-    maxStarted: Math.max(1, ...started),
-  };
-  // Also expose static numbers on hidden legacy ids (for any external code reading them)
+  // 集計本体は RisuCore.computeStats（純粋関数，tests/js で検証）．ここはグローバルを渡すだけ．
+  statsSeries = RisuCore.computeStats({
+    frameTimes, framesData,
+    features: (geoData && geoData.features) || [],
+    vehicleCounts, vehScale, tripSeries, frameAvgSpeed,
+    totalTrips: simStats && simStats.total_trips,
+  });
+  if (!statsSeries) return;
   const totalLabel = document.getElementById('sv-total-trips');
-  if (totalLabel) totalLabel.textContent = totalTrips;
+  if (totalLabel) totalLabel.textContent = statsSeries.totalTrips;
 }
 
 function currentTimeSec() {
@@ -4235,10 +4086,7 @@ function currentFrameIdx() {
 
 // tripSeries を時刻 t で引く（t 以下の最後の点）
 function tripAt(t) {
-  const ts = tripSeries.t;
-  let lo = 0, hi = ts.length - 1;
-  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (ts[m] <= t) lo = m; else hi = m - 1; }
-  return { entered: tripSeries.entered[lo], completed: tripSeries.completed[lo] };
+  return RisuCore.tripAt(tripSeries, t);
 }
 
 // テーマ色のキャッシュ（getComputedStyle は 60fps 描画では高コスト）．
@@ -4340,26 +4188,14 @@ function drawAllStatCharts() {
 
 function updateStatValues() {
   if (!statsSeries) return;
-  const idx = currentFrameIdx();
   const fmt = (v) => Number.isFinite(v) ? (v >= 100 ? Math.round(v) : v.toFixed(1)) : '—';
   const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-  let active = statsSeries.active[idx] || 0;
-  let entered = statsSeries.started[idx] || 0;
-  let completed = statsSeries.completed[idx] || 0;
-  if (tripSeries) {
-    // 表示値はフレームではなく現在時刻で引く．フレームは走行車両がいる時刻にしか無いので，
-    // 全車両到着後（最後のフレームより後）は流入 − 到着 で走行中台数を出す
-    const t = currentTimeSec();
-    const tr = tripAt(t);
-    entered = tr.entered; completed = tr.completed;
-    const n = frameTimes.length;
-    const spacing = n > 1 ? (frameTimes[n - 1] - frameTimes[0]) / (n - 1) : 1;
-    if (t > frameTimes[n - 1] + spacing || t < frameTimes[0] - spacing) active = Math.max(0, entered - completed);
-  }
-  setText('sv-active', fmt(active));
-  setText('sv-speed', fmt(statsSeries.avgSpeed[idx] || 0));
-  setText('sv-completed', fmt(completed));
-  setText('sv-inflow', fmt(entered));
+  // 表示値は現在時刻で引く（フレームは走行車両がいる時刻にしか無い）．RisuCore.statValuesAt
+  const v = RisuCore.statValuesAt(statsSeries, frameTimes, tripSeries, currentTimeSec());
+  setText('sv-active', fmt(v.active));
+  setText('sv-speed', fmt(v.avgSpeed));
+  setText('sv-completed', fmt(v.completed));
+  setText('sv-inflow', fmt(v.entered));
   const totalEl = document.getElementById('sv-total-trips');
   if (totalEl && statsSeries.totalTrips) totalEl.textContent = statsSeries.totalTrips;
 }
