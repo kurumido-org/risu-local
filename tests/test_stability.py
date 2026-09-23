@@ -3486,3 +3486,69 @@ class TestPackageLayout:
             visit(m, [])
         assert edges["runtime"] == set() and edges["schema"] == set()
         assert "api" not in {d for m, ds in edges.items() if m != "api" for d in ds}
+
+
+# ============================================================
+# results_store の並行アクセス
+# ============================================================
+
+class TestResultsStoreConcurrency:
+    """イベントループ・executor・永続化スレッドが同時に触っても壊れない．"""
+
+    def test_concurrent_store_and_read_respects_limit(self, monkeypatch):
+        import threading
+
+        import risu.results
+        monkeypatch.setattr(risu.results, "MAX_RESULTS", 5)
+        base = _run_uxsim(BOTTLENECK_SCENARIO)
+        errors = []
+        ids = [f"conc_{i}" for i in range(40)]
+
+        def writer(i):
+            try:
+                risu.results._store_sim(ids[i], dict(base), {"type": "manual"})
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        def reader():
+            try:
+                for sid in ids:
+                    if sid in risu.results.results_store:
+                        _get_simulation_data(sid)
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=writer, args=(i,)) for i in range(40)]
+        threads += [threading.Thread(target=reader) for _ in range(4)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=60)
+        try:
+            assert errors == [], errors
+            in_memory = [s for s in ids if dict.__contains__(risu.results.results_store, s)]
+            assert len(in_memory) <= 5
+        finally:
+            for sid in ids:
+                risu.results.results_store.pop(sid, None)
+
+    def test_concurrent_compression_yields_one_cache_entry(self):
+        import threading
+
+        import risu.results
+        sid = "conc_zip"
+        risu.results._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        blobs = []
+        def work():
+            blobs.append(risu.results._envelope_compressed_bytes(sid, "gzip"))
+        threads = [threading.Thread(target=work) for _ in range(6)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=60)
+        try:
+            assert len(blobs) == 6
+            assert all(b is blobs[0] for b in blobs), "キャッシュに入った 1 つが全員に返る"
+            assert set(risu.results.results_store[sid]["_enc_cache"]) == {"gzip"}
+        finally:
+            risu.results.results_store.pop(sid, None)

@@ -7,6 +7,7 @@ import gzip
 import json
 import os
 import re
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -34,24 +35,48 @@ class _ResultsStore(dict):
     遅延ロードする．呼び出し側は普通の dict として扱えばよい（`in` / `[]` / `.get`）．
     メモリ側は MAX_RESULTS 件のキャッシュで，追い出された結果もディスクから戻る．
     keys() / len() はメモリにあるものだけを数える（ディスクの一覧は _persisted_ids）．
+
+    スレッド: イベントループ・executor（シミュレーション後の保存，永続化，圧縮）が
+    同時に触るので，複数手順になる操作（追加＋追い出し，遅延ロード，圧縮キャッシュの
+    生成）は `lock`（RLock）で囲む．単発の dict 操作は GIL で壊れないので囲まない．
     """
+
+    def __init__(self):
+        super().__init__()
+        self.lock = threading.RLock()
 
     def __contains__(self, key):
         return dict.__contains__(self, key) or _persisted_path(key) is not None
 
     def __missing__(self, key):
-        path = _persisted_path(key)
-        if path is None:
-            raise KeyError(key)
-        result = _load_persisted(path)
-        dict.__setitem__(self, key, result)
-        return result
+        with self.lock:
+            if dict.__contains__(self, key):      # 他スレッドが先にロードした
+                return dict.__getitem__(self, key)
+            path = _persisted_path(key)
+            if path is None:
+                raise KeyError(key)
+            result = _load_persisted(path)
+            dict.__setitem__(self, key, result)
+            return result
 
     def get(self, key, default=None):   # dict.get は __missing__ を呼ばない
         try:
             return self[key]
         except KeyError:
             return default
+
+    def put(self, sim_id: str, result: dict, max_results: int) -> list[str]:
+        """追加して上限超過分を古い順に追い出す（1 つのロック区間で）．戻り値は追い出した id．"""
+        evicted = []
+        with self.lock:
+            dict.__setitem__(self, sim_id, result)
+            while max_results > 0 and len(self) > max_results:
+                old_id = next(iter(self))
+                if old_id == sim_id:
+                    break
+                dict.pop(self, old_id, None)
+                evicted.append(old_id)
+        return evicted
 
 
 results_store: dict[str, Any] = _ResultsStore()
@@ -82,13 +107,8 @@ def _store_sim(sim_id: str, result: dict, source: dict | None = None) -> None:
         "created_at": datetime.now(timezone.utc).isoformat(),
         "source": src,
     }
-    results_store[sim_id] = result
-    # 上限超過分を古い順に追い出す（dict は挿入順）．永続化していればディスクから戻る
-    while MAX_RESULTS > 0 and len(results_store) > MAX_RESULTS:
-        old_id = next(iter(results_store))
-        if old_id == sim_id:
-            break
-        results_store.pop(old_id, None)
+    # 追加と追い出し（古い順．永続化していればディスクから戻る）は 1 つのロック区間で
+    for old_id in results_store.put(sim_id, result, MAX_RESULTS):
         print(f"[RISU] results_store evicted {old_id} (limit {MAX_RESULTS})")
     # 永続化は executor で（圧縮に数百 ms かかることがあり，イベントループを塞がない）．
     # 戻り値の Future はテストが完了を待つために使う．
@@ -362,13 +382,15 @@ def _envelope_compressed_bytes(sim_id: str, encoding: str) -> bytes:
     （1 件数十 MB になり得るため，両方を先回りして作らない）．
     """
     raw = results_store[sim_id]
-    cache = raw.get("_enc_cache")
-    if cache is None:
-        cache = raw["_enc_cache"] = {}
-    blob = cache.get(encoding)
+    with results_store.lock:
+        cache = raw.get("_enc_cache")
+        if cache is None:
+            cache = raw["_enc_cache"] = {}
+        blob = cache.get(encoding)
     if blob is not None:
         return blob
 
+    # 圧縮はロックの外で（数百 ms かかる．同時要求が重なっても同じ内容を作るだけ）
     t0 = time.perf_counter()
     data = _envelope_json_bytes(sim_id)
     t1 = time.perf_counter()
@@ -376,7 +398,8 @@ def _envelope_compressed_bytes(sim_id: str, encoding: str) -> bytes:
         blob = _zstd.ZstdCompressor(level=RESULTS_ZSTD_LEVEL).compress(data)
     else:
         blob = gzip.compress(data, compresslevel=RESULTS_GZIP_LEVEL)
-    cache[encoding] = blob
+    with results_store.lock:
+        blob = cache.setdefault(encoding, blob)   # 先に入れた方を採用
     print(f"[RISU] /results/{sim_id}: json={len(data)/1e6:.1f}MB ({t1-t0:.2f}s) "
           f"{encoding}={len(blob)/1e6:.1f}MB ({time.perf_counter()-t1:.2f}s)")
     return blob
