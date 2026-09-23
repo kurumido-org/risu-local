@@ -70,7 +70,8 @@ risu-local/
 │   ├── css/risu.css      ← スタイル
 │   ├── js/risu-core.js   ← フロントの純粋ロジック（フレーム復号・統計・現示）．DOM に触らない．node でテスト
 │   ├── js/app.js …       ← UI の JS（app / editor / playback / chat / render / charts / tooltip / ui / stats）．
-│   │                        classic script でグローバルを共有するので index.html の読み込み順を変えない
+│   │                        配信は risu/api.py の UI_SCRIPTS の順に 1 本へ連結（/js/risu.bundle.js）．
+│   │                        classic script でグローバルを共有するので順序を変えない．ファイルを足したら UI_SCRIPTS へ
 │   ├── vendor/           ← marked / DOMPurify / Chart.js（同梱．ライセンス表記を消さないこと．CDN に戻さない＝オフラインで動く前提）
 │   └── sample_risu.csv
 ├── scripts/

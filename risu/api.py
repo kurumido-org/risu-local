@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import uuid
 from contextlib import asynccontextmanager
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -520,6 +522,37 @@ async def healthz():
 
 
 # ---- 静的ファイル（UI）----
+
+# ── UI の JS はソースを static/js/ に分けたまま，1 本に連結して配信する ──
+# ファイルごとに配信すると 10 リクエスト分の往復で読み込みが 60 → 90 ms に伸びた．
+# 連結の順序 = 実行順（classic script でグローバルを共有するので入れ替えないこと）．
+# ファイルを足したらここに追記する（TestPackageLayout が漏れを検出する）．
+UI_SCRIPTS = ["risu-core.js", "app.js", "editor.js", "playback.js", "chat.js",
+              "render.js", "charts.js", "tooltip.js", "ui.js", "stats.js"]
+_bundle_cache: dict[str, Any] = {}
+
+
+def build_js_bundle(js_dir: str = os.path.join("static", "js")) -> tuple[bytes, str]:
+    """UI_SCRIPTS を連結した JS とその ETag．ファイルの mtime が変わるまでキャッシュする．"""
+    paths = [os.path.join(js_dir, n) for n in UI_SCRIPTS]
+    key = tuple(os.path.getmtime(p) for p in paths)
+    if _bundle_cache.get("key") != key:
+        parts = []
+        for n, p in zip(UI_SCRIPTS, paths):
+            with open(p, encoding="utf-8") as f:
+                parts.append(f"\n;// ---- {n} ----\n" + f.read())
+        body = "".join(parts).encode("utf-8")
+        _bundle_cache.update({"key": key, "body": body, "etag": '"' + hashlib.md5(body).hexdigest()[:16] + '"'})
+    return _bundle_cache["body"], _bundle_cache["etag"]
+
+
+@app.get("/js/risu.bundle.js")
+async def js_bundle(request: Request):
+    body, etag = build_js_bundle()
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    return Response(body, media_type="application/javascript; charset=utf-8", headers={"ETag": etag})
+
 
 app.include_router(mcp_router)
 if os.path.exists("static"):

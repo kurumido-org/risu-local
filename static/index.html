@@ -15,7 +15,6 @@
      ローカル利用のため CDN ではなく同梱する（オフラインでも動く）． -->
 <script src="/vendor/marked.umd.min.js"></script>
 <script src="/vendor/purify.min.js"></script>
-<script src="/js/risu-core.js"></script>
 <link rel="stylesheet" href="/css/risu.css">
 </head>
 <body>
@@ -254,14 +253,7 @@
   <button class="mt-btn" data-pane="viz-col" onclick="switchPane('viz-col')">VIEW</button>
 </div>
 
-<script src="/js/app.js"></script>
-<script src="/js/editor.js"></script>
-<script src="/js/playback.js"></script>
-<script src="/js/chat.js"></script>
-<script src="/js/render.js"></script>
-<script src="/js/charts.js"></script>
-<script src="/js/tooltip.js"></script>
-<script src="/js/ui.js"></script>
-<script src="/js/stats.js"></script>
+<!-- UI の JS（static/js/*.js）はサーバーが 1 本に連結して配信する（risu/api.py の UI_SCRIPTS） -->
+<script src="/js/risu.bundle.js"></script>
 </body>
 </html>
