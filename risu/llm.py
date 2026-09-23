@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from typing import Any
 
 import httpx
 from fastapi import HTTPException
@@ -215,7 +216,7 @@ def mark_cache_tail(msgs: list[dict]) -> list[dict]:
     c = last.get("content")
     if isinstance(c, str):
         last["content"] = [{"type": "text", "text": c}]
-        c = last["content"]
+        c: Any = last["content"]
     if isinstance(c, list) and c and isinstance(c[-1], dict):
         if "cache_control" not in c[-1]:
             c[-1]["cache_control"] = _cache_ctl()
@@ -223,7 +224,8 @@ def mark_cache_tail(msgs: list[dict]) -> list[dict]:
     return msgs
 
 
-def api_messages(msgs: list[dict]) -> list[dict]:
+def api_messages(msgs: list[dict]) -> Any:
+    # 戻り値は anthropic SDK の messages= に渡す（SDK の MessageParam 型に合わせる意図で Any）
     """内部フラグ（_tail_marked）を除いた API 送信用メッセージ"""
     out = []
     for m in msgs:
@@ -512,13 +514,14 @@ async def chat_claude_stream(body: ChatInput):
 
             # 1回目のストリーミング
             yield _sse_event({"type": "stream_start"})
-            stream_result = None
+            stream_result: Any = None
             async for item in _stream_final_response(messages):
                 if item["event"] == "text_delta":
                     yield _sse_event({"type": "text_delta", "text": item["data"]})
                 elif item["event"] == "stream_done":
                     stream_result = item
 
+            assert stream_result is not None, "stream ended without stream_done"
             final_text = stream_result["text"]
             next_tool_blocks = stream_result["tool_blocks"]
 
@@ -648,6 +651,7 @@ async def _chat_claude(body: ChatInput):
         tool_results = await collect_tool_results(tool_blocks, state)
 
         # ツール結果を渡して次の回答を生成（最大3ラウンド）
+        final_text = ""
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
         mark_cache_tail(messages)

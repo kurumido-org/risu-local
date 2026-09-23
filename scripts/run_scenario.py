@@ -287,7 +287,7 @@ def main(argv=None) -> int:
         prog="run_scenario.py",
         description="RISU のシナリオを素の UXsim で実行する（サーバー不要）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__.split("使い方\n------\n")[1].split("入力として")[0],
+        epilog=(__doc__ or "").split("使い方\n------\n")[1].split("入力として")[0],
     )
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("scenario", nargs="?", help="シナリオ JSON のパス（- で標準入力）")

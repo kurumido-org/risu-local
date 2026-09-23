@@ -39,6 +39,19 @@ jobs:
       # risu/simulation.py などの数値処理は桁を揃えて書いてあり，自動整形すると
       # 数千行規模の差分が出て履歴が読めなくなるため．入れるならモジュール単位で段階的に．
 
+  typecheck:
+    # pyright（basic）．pyproject の [tool.pyright] が対象と設定を持つ
+    name: typecheck (pyright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install ${{ env.LOCK_ARGS }} -r requirements-dev.txt
+      - run: pyright --pythonpath "$(which python)"
+
   test:
     name: test (py${{ matrix.python-version }} / ${{ matrix.os }})
     runs-on: ${{ matrix.os }}

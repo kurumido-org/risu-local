@@ -191,8 +191,8 @@ def _link_mean_speeds(raw: dict) -> dict[str, float]:
 
 
 def _scenario_items_diff(a: list[dict] | None, b: list[dict] | None, limit: int = 20) -> dict:
-    da = {x.get("name"): x for x in a or []}
-    db = {x.get("name"): x for x in b or []}
+    da = {str(x.get("name")): x for x in a or []}
+    db = {str(x.get("name")): x for x in b or []}
     added = sorted(set(db) - set(da))
     removed = sorted(set(da) - set(db))
     changed = []
@@ -224,15 +224,16 @@ def compare_simulations(a_id: str, b_id: str, max_links: int = 20) -> dict | Non
     stats = {}
     for k in ("total_trips", "completed_trips", "average_travel_time_s"):
         va, vb = stat(A, k), stat(B, k)
-        num = isinstance(va, (int, float)) and isinstance(vb, (int, float))
-        stats[k] = {"a": va, "b": vb, "diff": round(vb - va, 1) if num else None}
+        diff = round(vb - va, 1) if isinstance(va, (int, float)) and isinstance(vb, (int, float)) else None
+        stats[k] = {"a": va, "b": vb, "diff": diff}
 
     def mean_speed(r):
         v = [x for x in (r.get("frame_avg_speed") or []) if x is not None]
         return round(sum(v) / len(v), 2) if v else None
 
     sa_, sb_ = mean_speed(A), mean_speed(B)
-    speed = {"a": sa_, "b": sb_, "diff": round(sb_ - sa_, 2) if None not in (sa_, sb_) else None}
+    speed = {"a": sa_, "b": sb_,
+             "diff": round(sb_ - sa_, 2) if sa_ is not None and sb_ is not None else None}
 
     la, lb = _link_mean_speeds(A), _link_mean_speeds(B)
     diffs = sorted(((n, la[n], lb[n]) for n in la if n in lb), key=lambda x: -abs(x[2] - x[1]))

@@ -72,3 +72,12 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # テストは import 順や体裁より「何を検証しているか」の並びを優先する
 "tests/*" = ["I001", "E402", "B007", "UP031"]
+
+[tool.pyright]
+# 型チェックは basic から段階的に．対象はサーバー本体と橋渡しモジュール（tests は対象外）．
+#   ローカル: .venv\Scripts\pyright --pythonpath .venv\Scripts\python.exe   （CI の typecheck ジョブと同じ）
+include = ["risu", "server.py", "uxsim_bridge.py", "scripts/run_scenario.py"]
+typeCheckingMode = "basic"
+pythonVersion = "3.10"
+# osmnx は遅延 import の任意依存．入っていない環境でも型チェックは通す
+reportMissingModuleSource = "none"

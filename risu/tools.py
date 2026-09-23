@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from typing import Any
 
 from fastapi import HTTPException
 
@@ -227,7 +228,7 @@ async def _handle_run_simulation(fn_args: dict, body, *, source_round: str | Non
                 None, True)
 
 
-def conversation_sim_id(body: ChatInput) -> str | None:
+def conversation_sim_id(body: ChatInput | None) -> str | None:
     """会話に紐づく有効なシミュレーションIDを返す（なければ None）"""
     sim_id = (getattr(body, "last_sim_id", None) or "").strip()
     return sim_id if sim_id and sim_id in results_store else None
@@ -284,7 +285,7 @@ class ToolTurnState:
 
 
 def _tool_result(tool_use_id: str, content: str, is_err: bool = False) -> dict:
-    tr = {"type": "tool_result", "tool_use_id": tool_use_id, "content": content}
+    tr: dict[str, Any] = {"type": "tool_result", "tool_use_id": tool_use_id, "content": content}
     if is_err:
         tr["is_error"] = True
     return tr
@@ -432,10 +433,10 @@ async def dispatch_tool_blocks(tool_blocks, state: ToolTurnState, *, follow_up: 
     yield ("results", results)
 
 
-async def collect_tool_results(tool_blocks, state: ToolTurnState, *, follow_up: bool = False):
+async def collect_tool_results(tool_blocks, state: ToolTurnState, *, follow_up: bool = False) -> list[dict]:
     """dispatch_tool_blocks の進捗を捨てて tool_result だけ取る（同期経路用）．"""
-    results = []
+    results: list[dict] = []
     async for kind, payload in dispatch_tool_blocks(tool_blocks, state, follow_up=follow_up):
-        if kind == "results":
+        if kind == "results" and isinstance(payload, list):
             results = payload
     return results

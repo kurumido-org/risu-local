@@ -9,8 +9,8 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import Future
 from datetime import datetime, timezone
-from typing import Any
 
 # モジュール外から使う名前（他モジュール・server.py・scripts・tests）．これ以外は内部実装．
 __all__ = [
@@ -95,7 +95,7 @@ class _ResultsStore(dict):
         return evicted
 
 
-results_store: dict[str, Any] = _ResultsStore()
+results_store: _ResultsStore = _ResultsStore()
 # 結果ストアに保持する件数の上限．超えたら古いものから捨てる（frames の numpy 列と
 # gzip キャッシュで 1 件数十 MB になり得るため，無制限だとメモリ不足で落ちる）．
 MAX_RESULTS = int(os.getenv("RISU_MAX_RESULTS", "30"))
@@ -112,7 +112,7 @@ except ImportError:
     _zstd = None
 
 
-def store_sim(sim_id: str, result: dict, source: dict | None = None) -> None:
+def store_sim(sim_id: str, result: dict, source: dict | None = None) -> Future | None:
     """シミュレーション結果を results_store に保存し，再現性メタを付与する．
 
     result は run_uxsim の戻り値（"_scenario" を含む）．
@@ -474,6 +474,7 @@ def envelope_compressed_bytes(sim_id: str, encoding: str) -> bytes:
     data = envelope_json_bytes(sim_id)
     t1 = time.perf_counter()
     if encoding == "zstd":
+        assert _zstd is not None, "zstd が要求されたが zstandard が無い（negotiate_encoding が選ばない）"
         blob = _zstd.ZstdCompressor(level=RESULTS_ZSTD_LEVEL).compress(data)
     else:
         blob = gzip.compress(data, compresslevel=RESULTS_GZIP_LEVEL)

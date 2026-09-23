@@ -110,7 +110,7 @@ def build_world(scenario, *, cpp: bool = True, disable_basic_analysis: bool = Fa
     """
     from uxsim import World
 
-    world_kwargs = dict(
+    world_kwargs: dict[str, Any] = dict(
         name=getattr(scenario, "name", "sim"),
         tmax=getattr(scenario, "tmax", 3600),
         deltan=getattr(scenario, "deltan", 5),
@@ -180,9 +180,9 @@ def build_world(scenario, *, cpp: bool = True, disable_basic_analysis: bool = Fa
     if disable_basic_analysis:
         _disable_basic_analysis(W)
 
-    # 呼び出し側が名前からオブジェクトを引けるように残しておく
-    W._risu_node_map = node_map
-    W._risu_link_map = link_map
+    # 呼び出し側が名前からオブジェクトを引けるように残しておく（World に無い動的属性）
+    W._risu_node_map = node_map  # type: ignore[attr-defined]
+    W._risu_link_map = link_map  # type: ignore[attr-defined]
     return W
 
 

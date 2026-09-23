@@ -325,7 +325,7 @@ def run_uxsim(scenario: SimulationInput) -> dict:
     # 構築するが，RISU は後段で C++ のフラット配列を直接読むので不要（数万台で数秒）．
     # フォールバック経路では _ensure_log_raw() が必要に応じて構築する．
     if hasattr(W, "_skip_log_on_terminate"):
-        W._skip_log_on_terminate = True
+        W._skip_log_on_terminate = True  # type: ignore[attr-defined]
 
     t0 = time.perf_counter()
     W.exec_simulation()
@@ -512,8 +512,7 @@ def run_uxsim(scenario: SimulationInput) -> dict:
     stats = {
         "total_trips":           int(_trip_all),
         "completed_trips":       int(_trip_completed),
-        "average_travel_time_s": round(float(_avg_tt), 1)
-            if _trip_completed > 0 else None,
+        "average_travel_time_s": round(_avg_tt, 1) if _avg_tt is not None else None,
         "simulation_time_s":     round(elapsed, 2),
         "post_processing_s":     round(post_elapsed, 2),
     }
@@ -601,12 +600,12 @@ def startup_selfcheck() -> None:
     RISU_STARTUP_SELFCHECK=0 で無効化できる．
     """
     try:
-        tiny = SimulationInput(
-            name="selfcheck", tmax=60, deltan=5,
-            nodes=[{"name": "a", "x": 0, "y": 0}, {"name": "b", "x": 500, "y": 0}],
-            links=[{"name": "ab", "start": "a", "end": "b", "length": 500}],
-            demands=[{"orig": "a", "dest": "b", "t_start": 0, "t_end": 30, "flow": 0.5}],
-        )
+        tiny = SimulationInput.model_validate({
+            "name": "selfcheck", "tmax": 60, "deltan": 5,
+            "nodes": [{"name": "a", "x": 0, "y": 0}, {"name": "b", "x": 500, "y": 0}],
+            "links": [{"name": "ab", "start": "a", "end": "b", "length": 500}],
+            "demands": [{"orig": "a", "dest": "b", "t_start": 0, "t_end": 30, "flow": 0.5}],
+        })
         rt = run_uxsim(tiny)["_runtime"]
     except Exception as e:  # 起動は止めない
         log.warning(f"startup self-check failed: {e.__class__.__name__}: {e}")

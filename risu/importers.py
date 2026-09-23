@@ -95,7 +95,7 @@ def parse_csv_scenario(content: str) -> dict:
         col_flow = _find_col(raw_fields, ["flow", "volume", "demand", "rate"])
 
         for row in reader:
-            t = _get_val(row, col_type, "").lower()
+            t = (_get_val(row, col_type, "") or "").lower()
             if t == "node":
                 nodes.append({
                     "name": _get_val(row, col_name, ""),

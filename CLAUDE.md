@@ -28,6 +28,7 @@
 python server.py                     # 起動 → http://localhost:8001
 pytest tests/ -v                     # テスト全件（サーバー起動が要るものは未起動なら自動 skip）
 ruff check .                         # lint（CI の lint ジョブと同一設定）
+pyright --pythonpath .venv\Scripts\python.exe   # 型チェック（basic．対象は pyproject の [tool.pyright]）
 python scripts\bench.py              # 性能ベンチ（§3.5 / §3.6 の前提を確認）
 python scripts\bench.py --sizes 20 --profile   # cProfile 付き
 ```
@@ -360,6 +361,7 @@ MCP（`mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
 | **フレームの精度・形式を変える** | サーバーの `encode_frames_v3` とフロントの `isV3` を**同時に**（§3.5）．v2 読み込み経路は残す |
 | **圧縮方式を変える** | `negotiate_encoding` と `_enc_cache` のキー．非圧縮応答に `Vary` を付けない（§5） |
 | **SYSTEM_PROMPT を変える** | system に動的な文字列を入れない（§3.4）．トークン量はログの `usage` 行で確認 |
+| **型が絡む変更** | `pyright` を通す（CI の typecheck ジョブ）．外部ライブラリの動的属性は `# type: ignore[attr-defined]` を最小限に |
 | **ログを出す** | `from .runtime import log` で logger `risu` を使う（`print` は `TestLogging` が弾く）．info = 通常の進行，warning = 劣化して続行，error = 失敗．`RISU_LOG_LEVEL` で制御 |
 | **依存を追加する** | `requirements.txt`（上限付き）+ `pyproject.toml`．`requirements.lock.txt` は clean な venv の `pip freeze` で作り直す（手順はファイル冒頭）．ライセンスは THIRD_PARTY_LICENSES.md に追記．CI の `licenses` ジョブが GPL 系を弾く |
 | **CI が依存の更新で落ちた** | 週次 / 手動実行は最新版で走る（`LOCK_ARGS=--upgrade`）．push/PR は lock 固定なので，落ちたら「依存が動いた」と分かる．直したら lock を作り直す |
