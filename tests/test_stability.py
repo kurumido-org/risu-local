@@ -1475,6 +1475,31 @@ class TestPostProcessingPipeline:
     def result(self):
         return _run_uxsim(GRID_BIDIRECTIONAL_SCENARIO)
 
+    def test_fast_path_is_active_for_installed_uxsim(self):
+        """uxsim の内部 API（CLAUDE.md §3.6）が使えなくなると，動作は止まらず車両別ログの
+        フォールバックで「遅くなるだけ」なので気づけない．cpp backend がある環境では
+        高速経路が効いていることを CI で固定する（uxsim 更新時の検知）．"""
+        import server
+        rt = _run_uxsim(BOTTLENECK_SCENARIO)["_runtime"]
+        assert rt["uxsim_version"] == server.UXSIM_VERSION
+        if rt["backend"] != "cpp":
+            pytest.skip("uxsim cpp backend が無い環境（高速経路は cpp 前提）")
+        assert rt["fast_path"] is True, (
+            f"uxsim {rt['uxsim_version']} で車両ログの高速経路が使えずフォールバックしている．"
+            f"§3.6 の内部 API（build_all_vehicle_logs_flat_compact / _LOG_STATE_MAP / offsets）を確認: "
+            f"{server.RUNTIME_STATUS.get('fast_path_error')}")
+        assert server.RUNTIME_STATUS["fast_path"] is True
+
+    def test_healthz_reports_uxsim_runtime(self):
+        from fastapi.testclient import TestClient
+        import server
+        _run_uxsim(BOTTLENECK_SCENARIO)
+        body = TestClient(server.app).get("/healthz").json()
+        assert body["status"] == "ok"
+        assert body["uxsim"]["uxsim_version"] == server.UXSIM_VERSION
+        assert body["uxsim"]["backend"] in ("cpp", "python")
+        assert body["uxsim"]["fast_path"] in (True, False)
+
     def test_frames_are_numpy_columns_sorted_by_vehicle(self, result):
         """frames の列は numpy 配列で，フレーム内の ids は昇順（フロントのマージ結合前提）"""
         import numpy as np

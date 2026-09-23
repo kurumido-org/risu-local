@@ -250,6 +250,10 @@ LLM が扱うのは `sim_id`・差分命令・集計値だけです（§3.3）�
   **uxsim 更新時はこの内部 API の互換性を確認すること**（`_LOG_STATE_MAP`，
   `_veh_by_index` の順序 = `VEHICLES` の順序，`offsets`）．失敗すると車両別ログの
   フォールバックに落ちる（動くが遅い）．
+  **静かに遅くなるのを防ぐ仕組み**: 使われた経路は結果の `_runtime.fast_path`・
+  `RUNTIME_STATUS`（`/healthz`）・実行ログ（`fast_path=on/OFF`）に出る．起動時に
+  `_startup_selfcheck` が最小シナリオを流して警告し（`RISU_STARTUP_SELFCHECK=0` で無効），
+  `test_fast_path_is_active_for_installed_uxsim` が cpp 環境でフォールバックしたら CI を落とす．
 - **時刻方向の間引き**（`MAX_FRAMES`，既定 200）は `_select_frames` が bincount + LUT で
   O(N) に行い，**列抽出の前に**適用する（np.unique / isin のソートは 5,000 万点で数秒かかった）．
 - uxsim は C++ バックエンド（`World(cpp=True)`，1.14 以降）優先．`TypeError` で

@@ -18,7 +18,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 from dotenv import load_dotenv
@@ -61,6 +61,15 @@ try:
     UXSIM_VERSION = getattr(_uxsim_module, "__version__", "unknown")
 except Exception:
     UXSIM_VERSION = "unknown"
+
+# 直近のシミュレーションで実際に使われた経路．uxsim の内部 API（§3.6）が使えなくなると
+# 動作は止まらず「遅くなる」だけなので，ここに記録して /healthz・起動ログ・テストで見えるようにする．
+RUNTIME_STATUS: dict[str, Any] = {
+    "uxsim_version": UXSIM_VERSION,
+    "backend": None,      # "cpp" / "python"（直近の実行）
+    "fast_path": None,    # True = フラット配列の高速経路，False = 車両別ログのフォールバック
+    "fast_path_error": None,
+}
 
 # ──────────────────────────────────────────────
 # グローバル状態（本番はRedis等に置き換える）
@@ -467,15 +476,28 @@ def _select_frames(tk, max_frames: int):
     return kept, lut[tk]
 
 
-def _collect_run_points(W, n_links: int, max_frames: int):
+class _RunPoints(NamedTuple):
+    """_collect_run_points の戻り値．fast_path は使われた経路（テスト・/healthz が参照）．"""
+    kept: Any
+    fidx: Any
+    li: Any
+    vid: Any
+    x: Any
+    v: Any
+    entry_t: Any
+    fast_path: bool
+
+
+def _collect_run_points(W, n_links: int, max_frames: int) -> _RunPoints:
     """全車両のログから「run 状態かつ有効リンク上」の点を，可視化フレーム分だけ列として取り出す．
 
-    戻り値: (kept, fidx, li, vid, x, v, entry_t)
+    戻り値 _RunPoints:
       kept: 昇順のフレーム時刻キー（0.1 秒精度の整数）
       fidx: 各点のフレーム index（kept への index），li: リンク index，
       vid: W.VEHICLES の登録順 index，x: リンク上位置，v: 速度
       entry_t: 車両ごと（W.VEHICLES 順）の実流入時刻（最初に run になった秒．未流入は NaN）．
                流入累積の集計に使う．departure_time は「予定」で，入口待ちの車両は含んでしまう．
+      fast_path: True なら C++ のフラット配列経路，False なら車両別ログのフォールバック（遅い）
 
     fast path (uxsim cpp backend): C++ 側の build_all_vehicle_logs_flat_compact() で
     全車両のログを 1 回でフラット配列として受け取り，車両ごとの Python ループを行わない．
@@ -515,15 +537,18 @@ def _collect_run_points(W, n_links: int, max_frames: int):
                 vid_run = np.searchsorted(offsets, run_all, side="right") - 1
                 uniq, first = np.unique(vid_run, return_index=True)  # 車両ごとの最初の run
                 entry_t[uniq] = log_t_all[run_all[first]]
-            return (
+            RUNTIME_STATUS["fast_path_error"] = None
+            return _RunPoints(
                 kept, fidx,
                 link[idx].astype(np.int64),
                 vid,
                 np.asarray(flat["log_x"], dtype=np.float64)[idx],
                 np.asarray(flat["log_v"], dtype=np.float64)[idx],
                 entry_t,
+                True,
             )
         except Exception as e:  # 内部 API 変更時は遅い経路にフォールバック
+            RUNTIME_STATUS["fast_path_error"] = f"{e.__class__.__name__}: {e}"
             print(f"[RISU] flat vehicle log fast path unavailable ({e.__class__.__name__}: {e}); "
                   f"falling back to per-vehicle logs")
 
@@ -565,13 +590,13 @@ def _collect_run_points(W, n_links: int, max_frames: int):
         v_parts.append(np.asarray(veh.log_v, dtype=np.float64)[sel])
     if not tk_parts:
         e = np.empty(0, dtype=np.int64)
-        return e, e, e, e, np.empty(0), np.empty(0), entry_t
+        return _RunPoints(e, e, e, e, np.empty(0), np.empty(0), entry_t, False)
     tk = np.concatenate(tk_parts)
     li, vid = np.concatenate(li_parts), np.concatenate(vid_parts)
     x, v = np.concatenate(x_parts), np.concatenate(v_parts)
     kept, fidx = _select_frames(tk, max_frames)
     m = fidx >= 0
-    return kept, fidx[m], li[m], vid[m], x[m], v[m], entry_t
+    return _RunPoints(kept, fidx[m], li[m], vid[m], x[m], v[m], entry_t, False)
 
 
 def _run_uxsim(scenario: SimulationInput) -> dict:
@@ -675,7 +700,11 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
     _ffs = np.fromiter((lk.free_flow_speed for lk in W.LINKS), dtype=np.float64, count=_n_links)
 
     # 時刻方向の間引き（MAX_FRAMES）は _collect_run_points 内で列抽出前に適用済み
-    kept, fidx, li_all, vid_all, x_all, v_all, entry_t = _collect_run_points(W, _n_links, MAX_FRAMES)
+    rp = _collect_run_points(W, _n_links, MAX_FRAMES)
+    kept, fidx, li_all, vid_all, x_all, v_all, entry_t = (
+        rp.kept, rp.fidx, rp.li, rp.vid, rp.x, rp.v, rp.entry_t)
+    backend = "cpp" if getattr(W, "_cpp_world", None) is not None else "python"
+    RUNTIME_STATUS.update({"backend": backend, "fast_path": rp.fast_path})
 
     frames = {}
     frame_times = []
@@ -776,7 +805,8 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
         coord_pairs.add((c[0][0], c[0][1], c[1][0], c[1][1]))
     print(f"[RISU] Simulation done: {len(W.NODES)} nodes, {len(W.LINKS)} links, "
           f"{len(features)} GeoJSON features, {len(coord_pairs)} unique coord pairs "
-          f"(exec={elapsed:.2f}s, post={post_elapsed:.2f}s)")
+          f"(exec={elapsed:.2f}s, post={post_elapsed:.2f}s, backend={backend}, "
+          f"fast_path={'on' if rp.fast_path else 'OFF'})")
     stats = {
         "total_trips":           int(_trip_all),
         "completed_trips":       int(_trip_completed),
@@ -856,7 +886,36 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
         "speed_histogram": speed_hist,
         # 流入・到着の累積台数（実イベント，時間軸 0〜tmax）
         "trip_series": trip_series,
+        # 実行環境（内部用．エンベロープには載せない）．fast_path=False は §3.6 のフォールバック
+        "_runtime": {"uxsim_version": UXSIM_VERSION, "backend": backend, "fast_path": rp.fast_path},
     }
+
+
+def _startup_selfcheck() -> None:
+    """起動時に最小シナリオを 1 回流し，uxsim のバックエンドと高速経路の可否をログに出す．
+
+    uxsim を更新して内部 API（§3.6）が変わっても例外にはならず，車両別ログの
+    フォールバックで「遅くなるだけ」なので，起動時に必ず見える形にする．
+    RISU_STARTUP_SELFCHECK=0 で無効化できる．
+    """
+    try:
+        tiny = SimulationInput(
+            name="selfcheck", tmax=60, deltan=5,
+            nodes=[{"name": "a", "x": 0, "y": 0}, {"name": "b", "x": 500, "y": 0}],
+            links=[{"name": "ab", "start": "a", "end": "b", "length": 500}],
+            demands=[{"orig": "a", "dest": "b", "t_start": 0, "t_end": 30, "flow": 0.5}],
+        )
+        rt = _run_uxsim(tiny)["_runtime"]
+    except Exception as e:  # 起動は止めない
+        print(f"[RISU] startup self-check failed: {e.__class__.__name__}: {e}")
+        return
+    if rt["backend"] == "cpp" and rt["fast_path"]:
+        print(f"[RISU] uxsim {rt['uxsim_version']}: backend=cpp, vehicle-log fast path=on")
+    else:
+        print(f"[RISU] WARNING: uxsim {rt['uxsim_version']}: backend={rt['backend']}, "
+              f"fast path=OFF -> 後処理が車両別ログのフォールバックになり数万台で数秒遅くなります．"
+              f"CLAUDE.md §3.6 の内部 API を確認してください"
+              + (f" ({RUNTIME_STATUS['fast_path_error']})" if RUNTIME_STATUS.get("fast_path_error") else ""))
 
 
 def _apply_link_geometries(result: dict, link_geometries: dict):
@@ -992,6 +1051,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 # ──────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if os.getenv("RISU_STARTUP_SELFCHECK", "1").lower() not in ("0", "false", "no"):
+        await asyncio.get_event_loop().run_in_executor(executor, _startup_selfcheck)
     yield
     executor.shutdown(wait=False)
 
@@ -4266,7 +4327,8 @@ async def mcp_messages(request: Request):
 # ---- ヘルスチェック ----
 @app.get("/healthz")
 async def healthz():
-    return {"status": "ok"}
+    # uxsim のバックエンドと高速経路の状態（直近の実行）．fast_path=false なら §3.6 を確認
+    return {"status": "ok", "uxsim": dict(RUNTIME_STATUS)}
 
 
 # ---- 静的ファイル（UI）----
