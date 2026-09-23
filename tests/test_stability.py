@@ -15,6 +15,7 @@ RISU 安定性テスト
 """
 
 import json
+import re
 import pytest
 import sys
 import os
@@ -2238,9 +2239,15 @@ class TestGuiRerunCarriesScenarioParams:
 
     @pytest.fixture(scope="class")
     def html(self):
-        p = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "index.html")
-        with open(p, encoding="utf-8") as f:
-            return f.read()
+        """index.html と，そこから読み込む static/js/*.js を読み込み順に連結したもの．"""
+        static = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
+        with open(os.path.join(static, "index.html"), encoding="utf-8") as f:
+            page = f.read()
+        parts = [page]
+        for src in re.findall(r'<script src="/js/([^"]+)"', page):
+            with open(os.path.join(static, "js", src), encoding="utf-8") as f:
+                parts.append(f.read())
+        return "\n".join(parts)
 
     def _run_handler(self, html):
         i = html.index("document.getElementById('et-run').addEventListener")

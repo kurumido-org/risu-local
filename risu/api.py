@@ -124,7 +124,11 @@ app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 @app.middleware("http")
 async def no_cache_html_mw(request, call_next):
     response = await call_next(request)
-    if "text/html" in response.headers.get("content-type", ""):
+    ctype = response.headers.get("content-type", "")
+    path = request.url.path
+    # HTML と自前の JS / CSS は no-cache（更新直後に古い画面・古いロジックが動かないように．
+    # /vendor/ の同梱ライブラリはバージョンが上がったときだけ変わるので通常のキャッシュでよい）
+    if "text/html" in ctype or path.startswith("/js/") or path.startswith("/css/"):
         response.headers["Cache-Control"] = "no-cache"
     return response
 

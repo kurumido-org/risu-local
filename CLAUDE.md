@@ -65,8 +65,11 @@ risu-local/
 │   └── api.py            ← FastAPI app・ミドルウェア・エンドポイント
 ├── uxsim_bridge.py       ← シナリオ → UXsim World（RISU 非依存の純粋モジュール）
 ├── static/
-│   ├── index.html        ← UI 本体（チャット + Canvas 可視化 + Chart.js）
-│   ├── js/risu-core.js   ← フロントの純粋ロジック（フレーム復号・統計・現示）．DOM に触らない
+│   ├── index.html        ← UI のマークアップだけ（CSS / JS は読み込む）
+│   ├── css/risu.css      ← スタイル
+│   ├── js/risu-core.js   ← フロントの純粋ロジック（フレーム復号・統計・現示）．DOM に触らない．node でテスト
+│   ├── js/app.js …       ← UI の JS（app / editor / playback / chat / render / charts / tooltip / ui / stats）．
+│   │                        classic script でグローバルを共有するので index.html の読み込み順を変えない
 │   ├── vendor/           ← marked / DOMPurify / Chart.js（同梱．ライセンス表記を消さないこと．CDN に戻さない＝オフラインで動く前提）
 │   └── sample_risu.csv
 ├── scripts/
