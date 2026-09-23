@@ -2790,7 +2790,10 @@ class TestResultsEncodingNegotiation:
             r = c.get(f"/results/{self.sid}", headers={"Accept-Encoding": ae})
             vary = r.headers.get("vary", "")
             tokens = [t.strip().lower() for t in vary.split(",") if t.strip()]
-            assert tokens == ["accept-encoding"], f"Vary が不正（{ae}）: {vary!r}"
+            # 検証するのは「Accept-Encoding が 1 回だけ」．他のトークンは許す
+            # （starlette >= 1.7 の CORSMiddleware は全応答に Vary: Origin を足す）
+            assert tokens.count("accept-encoding") == 1, f"Vary が不正（{ae}）: {vary!r}"
+            assert len(tokens) == len(set(tokens)), f"Vary に重複（{ae}）: {vary!r}"
 
     def test_cache_is_per_encoding_and_reused(self):
         """方式ごとに別キャッシュを持ち，2 回目は再圧縮しない．"""

@@ -26,7 +26,7 @@
 .venv\Scripts\activate
 
 python server.py                     # 起動 → http://localhost:8001
-pytest tests/ -v                     # テスト（183 件．サーバー起動が要る 9 件は自動 skip）
+pytest tests/ -v                     # テスト全件（サーバー起動が要るものは未起動なら自動 skip）
 ruff check .                         # lint（CI の lint ジョブと同一設定）
 python scripts\bench.py              # 性能ベンチ（§3.5 / §3.6 の前提を確認）
 python scripts\bench.py --sizes 20 --profile   # cProfile 付き
