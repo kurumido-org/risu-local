@@ -109,9 +109,13 @@ LLM が扱うのは `sim_id`・差分命令・集計値だけです（§3.3）�
 `get_simulation_data` / `import_osm_network`．
 チャートは LLM が ````chart```` ブロックで Chart.js 設定を出力し，フロントが描画します．
 
-**結果ストア**は in-memory dict（`results_store`）で，再起動すると消えます．
-`MAX_RESULTS`（既定 30）を超えると `_store_sim` が古い順に追い出します
-（1 件数十 MB になり得るため）．
+**結果ストア**は `results_store`（`_ResultsStore`，dict 派生）です．既定では in-memory で
+再起動すると消え，`MAX_RESULTS`（既定 30）を超えると `_store_sim` が古い順に追い出します
+（1 件数十 MB になり得るため）．`RISU_RESULTS_DIR` を設定すると `_store_sim` が executor で
+`_persist_sim` を走らせ，メモリに無い sim_id は `__missing__` でディスクから遅延ロードします
+（呼び出し側は普通の dict として扱う）．**保存形式はダウンロードの `.json+result`
+（`_build_envelope`）と同一**で，別形式を増やさないこと．読み戻しは `_result_from_envelope`
+（frames は `_decode_frames_v3` で v2 に戻す．risu-core.js の decodeFrame と同じ規則）．
 
 **GUI ネットワークエディタ**（index.html の「EDIT」）は `editNet` を編集して
 `/simulate` に POST します．編集モード中は `drawFrame` が `drawEditFrame` に委譲され，

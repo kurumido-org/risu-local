@@ -13,6 +13,7 @@ import io
 import json
 import math
 import os
+import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -75,7 +76,40 @@ RUNTIME_STATUS: dict[str, Any] = {
 # ──────────────────────────────────────────────
 # グローバル状態（本番はRedis等に置き換える）
 # ──────────────────────────────────────────────
-results_store: dict[str, Any] = {}
+# 結果の永続化先（任意）．設定するとシミュレーション結果をここに書き，再起動後も
+# results_store が透過的に読み戻す（_ResultsStore）．形式はダウンロードの .json+result と同じ．
+RESULTS_DIR = os.getenv("RISU_RESULTS_DIR", "").strip()
+_SAFE_SIM_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")   # ファイル名に使うので経路要素を許さない
+
+
+class _ResultsStore(dict):
+    """シミュレーション結果のメモリストア（sim_id → _run_uxsim の戻り値）．
+
+    RISU_RESULTS_DIR が設定されているときは，メモリに無い sim_id をディスクから
+    遅延ロードする．呼び出し側は普通の dict として扱えばよい（`in` / `[]` / `.get`）．
+    メモリ側は MAX_RESULTS 件のキャッシュで，追い出された結果もディスクから戻る．
+    keys() / len() はメモリにあるものだけを数える（ディスクの一覧は _persisted_ids）．
+    """
+
+    def __contains__(self, key):
+        return dict.__contains__(self, key) or _persisted_path(key) is not None
+
+    def __missing__(self, key):
+        path = _persisted_path(key)
+        if path is None:
+            raise KeyError(key)
+        result = _load_persisted(path)
+        dict.__setitem__(self, key, result)
+        return result
+
+    def get(self, key, default=None):   # dict.get は __missing__ を呼ばない
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+
+results_store: dict[str, Any] = _ResultsStore()
 executor = ThreadPoolExecutor(max_workers=4)
 # 結果ストアに保持する件数の上限．超えたら古いものから捨てる（frames の numpy 列と
 # gzip キャッシュで 1 件数十 MB になり得るため，無制限だとメモリ不足で落ちる）．
@@ -189,13 +223,152 @@ def _store_sim(sim_id: str, result: dict, source: dict | None = None) -> None:
         "source": src,
     }
     results_store[sim_id] = result
-    # 上限超過分を古い順に追い出す（dict は挿入順）
+    # 上限超過分を古い順に追い出す（dict は挿入順）．永続化していればディスクから戻る
     while MAX_RESULTS > 0 and len(results_store) > MAX_RESULTS:
         old_id = next(iter(results_store))
         if old_id == sim_id:
             break
         results_store.pop(old_id, None)
         print(f"[RISU] results_store evicted {old_id} (limit {MAX_RESULTS})")
+    # 永続化は executor で（圧縮に数百 ms かかることがあり，イベントループを塞がない）．
+    # 戻り値の Future はテストが完了を待つために使う．
+    if RESULTS_DIR:
+        return executor.submit(_persist_sim, sim_id)
+    return None
+
+
+# ──────────────────────────────────────────────
+# 結果の永続化（RISU_RESULTS_DIR）
+#   ファイル形式はダウンロードの .json+result（_build_envelope）と同じ．
+#   圧縮は zstd（zstandard が無ければ gzip）．ダウンロードした JSON をそのまま置いても読める．
+#   frames はエンベロープと同じく v3（量子化）で保存されるので，読み戻した結果の位置・速度は
+#   v3 の分解能（1 m / 0.1 m/s / 0.001）になる．統計・台数・累積系列は無損失．
+# ──────────────────────────────────────────────
+def _persisted_path(sim_id: str) -> str | None:
+    """RESULTS_DIR に sim_id の保存ファイルがあればそのパス．"""
+    if not RESULTS_DIR or not isinstance(sim_id, str) or not _SAFE_SIM_ID.match(sim_id):
+        return None
+    for ext in (".json.zst", ".json.gz", ".json"):
+        p = os.path.join(RESULTS_DIR, sim_id + ext)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def _persisted_ids() -> list[str]:
+    """RESULTS_DIR にある sim_id の一覧（新しい順）．"""
+    if not RESULTS_DIR or not os.path.isdir(RESULTS_DIR):
+        return []
+    found = []
+    for name in os.listdir(RESULTS_DIR):
+        for ext in (".json.zst", ".json.gz", ".json"):
+            if name.endswith(ext):
+                sid = name[: -len(ext)]
+                if _SAFE_SIM_ID.match(sid):
+                    found.append((os.path.getmtime(os.path.join(RESULTS_DIR, name)), sid))
+                break
+    return [sid for _, sid in sorted(found, reverse=True)]
+
+
+def _persist_sim(sim_id: str) -> str | None:
+    """results_store[sim_id] を RESULTS_DIR に書く．戻り値は書いたパス．
+
+    _envelope_compressed_bytes を使うので，あとで /results が同じ方式を要求したときは
+    キャッシュがそのまま使われる．一時ファイルに書いてから rename する（途中で落ちても壊れない）．
+    """
+    if not RESULTS_DIR or sim_id not in results_store:
+        return None
+    try:
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        encoding = "zstd" if _zstd is not None else "gzip"
+        blob = _envelope_compressed_bytes(sim_id, encoding)
+        path = os.path.join(RESULTS_DIR, f"{sim_id}.json.{'zst' if encoding == 'zstd' else 'gz'}")
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(blob)
+        os.replace(tmp, path)
+        print(f"[RISU] persisted {sim_id} -> {path} ({len(blob)/1e6:.1f}MB)")
+        return path
+    except Exception as e:   # 永続化の失敗でシミュレーション自体は失敗させない
+        print(f"[RISU] persist {sim_id} failed: {e.__class__.__name__}: {e}")
+        return None
+
+
+def _decode_frames_v3(frames: dict) -> dict:
+    """columnar_v3（送出/保存形式）を results_store 内部の columnar_v2 に戻す．
+
+    _encode_frames_v3 の逆変換．static/js/risu-core.js の decodeFrame と同じ規則
+    （ids 累積和 / xs,ys 整数 m / vs ×0.1 / alphas ×0.001）．
+    """
+    import numpy as np
+    out = {}
+    for key, f in frames.items():
+        ids = np.cumsum(np.asarray(f.get("ids", ()), dtype=np.int64)).astype(np.int32)
+        out[key] = {
+            "ids":    ids,
+            "xs":     np.asarray(f.get("xs", ()), dtype=np.float64),
+            "ys":     np.asarray(f.get("ys", ()), dtype=np.float64),
+            "vs":     np.round(np.asarray(f.get("vs", ()), dtype=np.float64) * 0.1, 2),
+            "alphas": np.round(np.asarray(f.get("alphas", ()), dtype=np.float64) * 0.001, 4),
+            "li":     np.asarray(f.get("li", ()), dtype=np.int32),
+        }
+    return out
+
+
+def _result_from_envelope(env: dict) -> dict:
+    """ダウンロード/保存形式のエンベロープを results_store の内部表現に組み立てる．"""
+    import numpy as np
+    res = env.get("result") or {}
+    frames = res.get("frames") or {}
+    if res.get("frame_format") == "columnar_v3":
+        frames = _decode_frames_v3(frames)
+    else:   # v2（素の値のリスト）→ numpy 列
+        frames = {k: {c: np.asarray(v.get(c, ()), dtype=(np.int32 if c in ("ids", "li") else np.float64))
+                      for c in ("ids", "xs", "ys", "vs", "alphas", "li")}
+                  for k, v in frames.items() if isinstance(v, dict)}
+    return {
+        "_scenario":  env.get("scenario") or {},
+        "_meta": {
+            "created_at": env.get("created_at"),
+            "source": env.get("source") or {"type": "unknown"},
+            "persisted": True,
+        },
+        "geojson":     res.get("geojson"),
+        "frames":      frames,
+        "frame_times": res.get("frame_times") or [],
+        "stats":       res.get("stats") or {},
+        "tmax":        res.get("tmax"),
+        "signals":     res.get("signals") or [],
+        "link_names":  res.get("link_names"),
+        "frame_format": "columnar_v2",
+        "vehicle_sample_step": res.get("vehicle_sample_step", 1),
+        "vehicle_counts":  res.get("vehicle_counts"),
+        "frame_avg_speed": res.get("frame_avg_speed"),
+        "speed_histogram": res.get("speed_histogram"),
+        "trip_series":     res.get("trip_series"),
+    }
+
+
+def _load_persisted(path: str) -> dict:
+    """保存ファイル（.json.zst / .json.gz / .json）を読み，内部表現に戻す．"""
+    with open(path, "rb") as f:
+        blob = f.read()
+    if path.endswith(".zst"):
+        if _zstd is None:
+            raise RuntimeError(f"{path}: zstandard が無いので読めません（pip install zstandard）")
+        data = _zstd.ZstdDecompressor().decompressobj().decompress(blob)
+    elif path.endswith(".gz"):
+        data = gzip.decompress(blob)
+    else:
+        data = blob
+    env = orjson.loads(data) if orjson is not None else json.loads(data.decode("utf-8"))
+    result = _result_from_envelope(env)
+    # 保存したバイト列は圧縮済みエンベロープそのものなので，同じ方式の応答キャッシュに使う
+    enc = "zstd" if path.endswith(".zst") else ("gzip" if path.endswith(".gz") else None)
+    if enc:
+        result["_enc_cache"] = {enc: blob}
+    print(f"[RISU] loaded persisted result {os.path.basename(path)} ({len(blob)/1e6:.1f}MB)")
+    return result
 
 
 def _build_envelope(sim_id: str, *, include_result: bool = True) -> dict:
@@ -233,6 +406,8 @@ def _build_envelope(sim_id: str, *, include_result: bool = True) -> dict:
             "vehicle_counts": raw.get("vehicle_counts"),
             # フレームごとの車両平均速度（台数重み，間引き前）
             "frame_avg_speed": raw.get("frame_avg_speed"),
+            # 速度分布（全フレーム・全車両の観測点，間引き前）
+            "speed_histogram": raw.get("speed_histogram"),
             # 流入・到着の累積台数（実イベント．時間軸は 0・各フレーム・tmax）
             "trip_series": raw.get("trip_series"),
         }
@@ -992,6 +1167,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 # ──────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if RESULTS_DIR:
+        print(f"[RISU] results dir: {os.path.abspath(RESULTS_DIR)} "
+              f"({len(_persisted_ids())} persisted results, loaded on demand)")
     if os.getenv("RISU_STARTUP_SELFCHECK", "1").lower() not in ("0", "false", "no"):
         await asyncio.get_event_loop().run_in_executor(executor, _startup_selfcheck)
     yield

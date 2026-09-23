@@ -2984,3 +2984,102 @@ class TestMcpParity:
                     server.results_store.pop(s, None)
 
         asyncio.run(go())
+
+
+# ============================================================
+# 結果の永続化（RISU_RESULTS_DIR）
+# ============================================================
+
+class TestResultsPersistence:
+    """RISU_RESULTS_DIR を設定すると結果をディスクに書き，再起動（= メモリから消えた）後も
+    results_store が透過的に読み戻す．形式はダウンロードの .json+result と同じ．"""
+
+    @pytest.fixture
+    def store_dir(self, tmp_path, monkeypatch):
+        import server
+        monkeypatch.setattr(server, "RESULTS_DIR", str(tmp_path))
+        return tmp_path
+
+    def _store(self, sid):
+        import server
+        fut = server._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        assert fut is not None
+        assert fut.result(timeout=60) is not None
+        return server.results_store[sid]
+
+    def test_disabled_by_default_writes_nothing(self, tmp_path, monkeypatch):
+        import server
+        monkeypatch.setattr(server, "RESULTS_DIR", "")
+        assert server._store_sim("p_off", _run_uxsim(BOTTLENECK_SCENARIO)) is None
+        assert list(tmp_path.iterdir()) == []
+        server.results_store.pop("p_off", None)
+
+    def test_store_writes_file_and_reloads_after_eviction(self, store_dir):
+        import numpy as np
+        import server
+        sid = "p_reload"
+        original = self._store(sid)
+        files = list(store_dir.iterdir())
+        assert len(files) == 1 and files[0].name.startswith(sid + ".json.")
+        orig_data = _get_simulation_data(sid)
+
+        # メモリから消しても（再起動・MAX_RESULTS の追い出し相当）透過的に戻る
+        dict.pop(server.results_store, sid)
+        assert not dict.__contains__(server.results_store, sid)
+        assert sid in server.results_store
+        loaded = server.results_store[sid]
+        assert loaded["_meta"]["persisted"] is True
+        assert loaded["stats"] == original["stats"]
+        assert loaded["_scenario"] == original["_scenario"]
+        assert loaded["vehicle_counts"] == original["vehicle_counts"]
+        assert loaded["trip_series"] == original["trip_series"]
+        assert loaded["frame_avg_speed"] == original["frame_avg_speed"]
+        assert loaded["speed_histogram"] == original["speed_histogram"]
+        assert loaded["frame_times"] == original["frame_times"]
+        # frames は v3 の分解能で戻る（ids は無損失，vs は 0.1 m/s，alphas は 0.001）
+        for k in original["frames"]:
+            a, b = original["frames"][k], loaded["frames"][k]
+            assert isinstance(b["vs"], np.ndarray)
+            assert np.array_equal(a["ids"], b["ids"]) and np.array_equal(a["li"], b["li"])
+            assert np.abs(a["vs"] - b["vs"]).max() <= 0.051
+            assert np.abs(a["alphas"] - b["alphas"]).max() <= 0.00051
+        # LLM 向け集計は同じ（台数・累積は無損失，速度は保存済みの系列）
+        re_data = _get_simulation_data(sid)
+        assert re_data["network_vehicle_count"] == orig_data["network_vehicle_count"]
+        assert re_data["network_avg_speed"] == orig_data["network_avg_speed"]
+        assert re_data["network_completed_count"] == orig_data["network_completed_count"]
+        server.results_store.pop(sid, None)
+
+    def test_results_endpoint_serves_persisted_result(self, store_dir):
+        from fastapi.testclient import TestClient
+        import server
+        sid = "p_http"
+        self._store(sid)
+        dict.pop(server.results_store, sid)
+        c = TestClient(server.app)
+        r = c.get(f"/results/{sid}", headers={"Accept-Encoding": "gzip"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["sim_id"] == sid and body["result"]["stats"]["total_trips"] > 0
+        assert c.get(f"/results/{sid}/scenario").status_code == 200
+        server.results_store.pop(sid, None)
+
+    def test_unsafe_ids_never_touch_disk(self, store_dir):
+        import server
+        for bad in ("../x", "a/b", "", "x" * 65, "..\\x"):
+            assert bad not in server.results_store
+            assert server._persisted_path(bad) is None
+
+    def test_downloaded_json_can_be_dropped_in(self, store_dir):
+        """ダウンロードした .json+result（素の JSON）をディレクトリに置くだけで読める．"""
+        import server
+        sid = "p_src"
+        self._store(sid)
+        env_bytes = server._envelope_json_bytes(sid)
+        (store_dir / "dropped.json").write_bytes(env_bytes)
+        server.results_store.pop(sid, None)
+        assert "dropped" in server._persisted_ids()
+        assert "dropped" in server.results_store
+        d = _get_simulation_data("dropped")
+        assert d and d["stats"]["total_trips"] > 0
+        server.results_store.pop("dropped", None)
