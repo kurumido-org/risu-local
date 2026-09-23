@@ -76,7 +76,9 @@ risu-local/
 │   ├── run_scenario.py   ← 素の UXsim で実行する CLI（サーバー不要）
 │   └── bench.py          ← 後処理・直列化のベンチマーク
 ├── tests/
-│   ├── test_stability.py ← サーバー側（pytest）
+│   ├── helpers.py        ← 共通のシナリオ定数とフェイク Anthropic クライアント
+│   ├── test_<module>.py  ← risu/<module>.py に対応（simulation / schema / results / llm / tools / api …）
+│   ├── test_frontend.py  ← フロントのソース検査，test_project.py ← ライセンス衛生・構成ガード
 │   ├── js/core.test.js   ← risu-core.js の単体テスト（node --test tests/js/*.test.js，依存なし）
 │   └── e2e/              ← headless Chromium のスモークテスト（playwright が無ければ skip）
 ├── pyproject.toml        ← ruff / pytest 設定 + パッケージメタデータ
