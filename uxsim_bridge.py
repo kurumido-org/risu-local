@@ -141,11 +141,18 @@ def build_world(scenario, *, cpp: bool = True, disable_basic_analysis: bool = Fa
             kwargs["signal"] = n.signal
         node_map[n.name] = W.addNode(n.name, x=n.x, y=n.y, **kwargs)
 
+    # signal_group 省略時の意味は「その交差点の全現示で青（常時通行可能）」．
+    # UXsim の既定は [0]（現示 0 だけ青）なので，終端が多現示の信号ノードなら全現示に展開する．
+    # （RISU の LLM 向け説明・GUI の表示と一致させる．run_scenario.py の EMIT_TEMPLATE も同じ）
+    signal_phases = {n.name: len(n.signal) for n in scenario.nodes
+                     if getattr(n, "signal", None) and len(n.signal) > 1}
     link_map = {}
     for lk in scenario.links:
         link_kwargs = {}
         if lk.signal_group is not None:
             link_kwargs["signal_group"] = lk.signal_group
+        elif lk.end in signal_phases:
+            link_kwargs["signal_group"] = list(range(signal_phases[lk.end]))
         if lk.capacity is not None:
             # 明示容量: 下流端の流出容量として与える（渋滞の待ち行列が
             # このリンク上に物理的に形成される，標準的なボトルネック表現）

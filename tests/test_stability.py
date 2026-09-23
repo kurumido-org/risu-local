@@ -759,6 +759,54 @@ class TestSignalMetadata:
         names = sorted(s["node"] for s in result["signals"])
         assert names == ["I1", "I2"]
 
+    def test_groups_are_lists_and_deltat_is_sent(self, result):
+        """groups は実際に適用された現示番号のリスト．deltat は UXsim の実 DELTAT．"""
+        by_node = {s["node"]: s for s in result["signals"]}
+        assert by_node["I1"]["groups"]["W_I1"] == [0]
+        assert by_node["I1"]["deltat"] == 5.0        # deltan 5 × reaction_time 1.0
+        assert len(by_node["I1"]["phase_log"]) == 600 / 5
+
+    def test_omitted_signal_group_means_all_phases(self):
+        """[修正履歴] signal_group 省略時，説明は「常時通行可能」なのに UXsim の既定 [0]
+        （現示 0 だけ青）が使われ，画面の信号データにもそのリンクが出なかった．"""
+        from uxsim_bridge import build_world, scenario_from_dict
+        sc = {
+            "name": "omit_group", "tmax": 600, "deltan": 5, "reaction_time": 1.7,
+            "nodes": [{"name": "W", "x": 0, "y": 0}, {"name": "S", "x": 1000, "y": -1000},
+                      {"name": "I", "x": 1000, "y": 0, "signal": [30, 30]},
+                      {"name": "E", "x": 2000, "y": 0}],
+            "links": [{"name": "W_I", "start": "W", "end": "I", "length": 1000, "signal_group": 0},
+                      {"name": "S_I", "start": "S", "end": "I", "length": 1000},   # 省略
+                      {"name": "I_E", "start": "I", "end": "E", "length": 1000}],
+            "demands": [{"orig": "W", "dest": "E", "t_start": 0, "t_end": 300, "flow": 0.3},
+                        {"orig": "S", "dest": "E", "t_start": 0, "t_end": 300, "flow": 0.3}],
+        }
+        W = build_world(scenario_from_dict(sc))
+        assert list(W._risu_link_map["S_I"].signal_group) == [0, 1]
+        assert list(W._risu_link_map["W_I"].signal_group) == [0]
+        assert list(W._risu_link_map["I_E"].signal_group) == [0]  # 信号なしノードへは既定のまま
+
+        res = _run_uxsim(SimulationInput(**sc))
+        sig = {s["node"]: s for s in res["signals"]}["I"]
+        assert sig["groups"] == {"W_I": [0], "S_I": [0, 1]}
+        assert sig["deltat"] == 8.5   # 5 × 1.7．tmax/len(phase_log) = 600/70 = 8.571 ではない
+        assert len(sig["phase_log"]) == int(600 / 8.5)
+
+        # --emit した単体スクリプトも同じ展開をする
+        import importlib.util
+        import tempfile
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts"))
+        import run_scenario
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "emitted_sig.py")
+            run_scenario.emit_python({"scenario": sc}, out, source="test")
+            spec = importlib.util.spec_from_file_location("emitted_sig_mod", out)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            W2 = mod.build()
+            groups = {lk.name: list(lk.signal_group) for lk in W2.LINKS}
+            assert groups["S_I"] == [0, 1] and groups["W_I"] == [0]
+
     def test_groups_scoped_to_intersection(self, result):
         """groups はその交差点への流入リンクのみ（重複描画バグの回帰テスト）"""
         by_node = {s["node"]: s for s in result["signals"]}
@@ -974,7 +1022,64 @@ class TestSimulationDataAggregation:
         assert sim_data["network_vehicle_count"][0] == counts[0]
         assert max(sim_data["network_vehicle_count"]) == max(counts[::max(1, -(-len(counts) // 30))])
         assert max(counts) > 0
-        assert "deltan=5" in sim_data["vehicle_count_note"]
+        assert "deltan=5" in sim_data["metric_note"]
+
+    def test_trip_series_matches_stats_and_covers_end(self, sim_data):
+        """[修正履歴] 画面の到着台数はフレームから推定していて，全車両到着後も
+        「到着 45 / 走行中 5」のように残った．実イベントの累積を 0〜tmax で返す．"""
+        res = results_store["test_aggregation"]
+        ts = res["trip_series"]
+        assert ts["t"][0] == 0.0 and ts["t"][-1] == float(res["tmax"])
+        assert ts["completed"][-1] == res["stats"]["completed_trips"]
+        assert ts["entered"][-1] == res["stats"]["total_trips"]   # 全車両が流入したケース
+        assert ts["entered"][0] == 0 and ts["completed"][0] == 0
+        for k in ("entered", "completed"):
+            assert all(a <= b for a, b in zip(ts[k], ts[k][1:]))   # 単調増加
+        assert all(e >= c for e, c in zip(ts["entered"], ts["completed"]))
+        # LLM 向けにも累積が渡る
+        assert sim_data["network_completed_count"][-1] <= res["stats"]["completed_trips"]
+        assert len(sim_data["network_entered_count"]) == len(sim_data["time_labels"])
+
+    def test_trip_series_all_arrived_case(self):
+        """指摘の再現: 50 台全部が到着するケースで，終了時刻の到着 = 50，走行中 = 0 になる．
+        （フレームは走行車両がいる時刻までしか無いので，最後のフレームでは 45 / 5 のまま）"""
+        sc = SimulationInput(
+            name="all_arrive", tmax=1000, deltan=5,
+            nodes=[{"name": "A", "x": 0, "y": 0}, {"name": "B", "x": 2000, "y": 0}],
+            links=[{"name": "AB", "start": "A", "end": "B", "length": 2000}],
+            demands=[{"orig": "A", "dest": "B", "t_start": 0, "t_end": 200, "flow": 0.25}],
+        )
+        res = _run_uxsim(sc)
+        assert res["stats"]["total_trips"] == 50 and res["stats"]["completed_trips"] == 50
+        ts = res["trip_series"]
+        assert ts["t"][-1] == 1000.0
+        assert ts["entered"][-1] == 50 and ts["completed"][-1] == 50
+        assert ts["entered"][-1] - ts["completed"][-1] == 0
+        # 最後のフレーム（走行車両がいる最後の時刻）は tmax より前で，そこでは走行中がまだいる．
+        # 旧実装はこのフレームの値を終了時刻まで引きずっていた
+        last_t = res["frame_times"][-1]
+        assert last_t < 1000
+        assert last_t in ts["t"] and res["vehicle_counts"][-1] > 0
+
+    def test_avg_speed_is_vehicle_weighted_and_shared(self, sim_data):
+        """[修正履歴] 画面はリンク別速度の単純平均，LLM は描画車両の平均で，同じ時刻に
+        15.2 と 6.2 m/s のように食い違った．定義を「走行中全車両の台数重み平均」に統一する．"""
+        import numpy as np
+        res = results_store["test_aggregation"]
+        fas = res["frame_avg_speed"]
+        assert len(fas) == len(res["frame_times"])
+        # 間引きなしの結果ではフレームの車両速度の平均と一致する
+        for t, v in zip(res["frame_times"], fas):
+            vs = np.asarray(res["frames"][str(t)]["vs"], dtype=np.float64)
+            if vs.size:
+                assert abs(v - float(vs.mean())) < 0.02
+        # LLM に渡る系列はこの値（0.1 m/s 丸め）
+        i0 = 0
+        assert sim_data["network_avg_speed"][0] == round(fas[i0], 1)
+        assert "台数重み" in sim_data["metric_note"]
+        # 速度分布はサーバー保存のもの
+        assert sim_data["speed_histogram"] == res["speed_histogram"]
+        assert sum(res["speed_histogram"]["counts"]) == sum(res["vehicle_counts"]) // res["_scenario"]["deltan"]
 
     def test_vehicle_count_fallback_for_old_results(self):
         """vehicle_counts の無い古い結果でも deltan × 間引き で換算される．"""
@@ -1420,6 +1525,12 @@ class TestPostProcessingPipeline:
             # （旧実装は「サンプル数 × step」の近似で，時刻ごとに誤差が出ていた）
             assert sampled["vehicle_counts"] == base["vehicle_counts"]
             assert sd["network_vehicle_count"] == sd_base["network_vehicle_count"]
+            # 平均速度・速度分布・流入到着も間引き前の全点から作るので不変
+            assert sampled["frame_avg_speed"] == base["frame_avg_speed"]
+            assert sampled["speed_histogram"] == base["speed_histogram"]
+            assert sampled["trip_series"] == base["trip_series"]
+            assert sd["network_avg_speed"] == sd_base["network_avg_speed"]
+            assert sd["speed_histogram"] == sd_base["speed_histogram"]
             deltan = base["_scenario"]["deltan"]
             assert all(a % deltan == 0 for a in sd["network_vehicle_count"])
         finally:
@@ -1849,7 +1960,7 @@ class TestStandalonePipeline:
                         disable_basic_analysis=True)
         W.exec_simulation()
         from server import _trip_stats
-        total, completed, avg_tt = _trip_stats(W)
+        total, completed, avg_tt, _arrivals = _trip_stats(W)
 
         assert total == s["total_trips"]
         assert completed == s["completed_trips"]
@@ -1988,6 +2099,26 @@ class TestGuiRerunCarriesScenarioParams:
         block = html[i:i + 2000]
         assert "src.reaction_time" in block and "src.random_seed" in block
         assert 'id="et-rt"' in html and 'id="et-seed"' in html
+
+    def test_capacity_zero_is_kept(self, html):
+        """[修正履歴] 容量欄に 0 を入れると capacity が削除され，容量制約が外れていた．"""
+        i = html.index("field === 'capacity'")
+        block = html[i:i + 500]
+        assert "v < 0) delete lk.capacity" in block
+        assert "v <= 0" not in block
+
+    def test_stats_use_server_series(self, html):
+        i = html.index("function computeStatsSeries()")
+        block = html[i:html.index("function currentTimeSec()", i)]
+        assert "tripSeries" in block and "frameAvgSpeed" in block
+        j = html.index("function updateStatValues()")
+        assert "tripAt(t)" in html[j:j + 1500]
+
+    def test_phase_log_uses_server_deltat(self, html):
+        i = html.index("function currentPhaseIdx(sig, t)")
+        block = html[i:i + 1200]
+        assert "sig.deltat" in block
+        assert "t / tmax * phaseLog.length" not in block
 
     def test_active_vehicles_uses_real_counts(self, html):
         i = html.index("function computeStatsSeries()")

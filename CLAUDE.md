@@ -26,7 +26,7 @@
 .venv\Scripts\activate
 
 python server.py                     # 起動 → http://localhost:8001
-pytest tests/ -v                     # テスト（166 件．サーバー起動が要る 9 件は自動 skip）
+pytest tests/ -v                     # テスト（183 件．サーバー起動が要る 9 件は自動 skip）
 ruff check .                         # lint（CI の lint ジョブと同一設定）
 python scripts\bench.py              # 性能ベンチ（§3.5 / §3.6 の前提を確認）
 python scripts\bench.py --sizes 20 --profile   # cProfile 付き
@@ -176,6 +176,9 @@ LLM が扱うのは `sim_id`・差分命令・集計値だけです（§3.3）�
   `limit` ≤200 + `offset`）の順で使う．全件取得はできない設計．
 - **集計データ**: `_get_simulation_data` は `points`（既定 30）・`max_links`（既定 20）で
   量を制御し，速度は 0.1 m/s に丸める．1 回あたり数 KB に収めること．
+- **分析用の系列はフレームから作らない**: `_run_uxsim` が間引き前の全点・実イベントから
+  `vehicle_counts` / `frame_avg_speed` / `speed_histogram` / `trip_series` を作り，画面と
+  LLM（`_get_simulation_data`）はそれを共有する．フレームは描画専用（時刻・車両とも間引かれる）．
 - **台数の単位**: フレームの `ids` は UXsim の**プラトン**（1 個 = `deltan` 台）で，
   描画用にさらに `vehicle_sample_step` 個に 1 個へ間引かれることがある．台数として
   LLM や画面に出す値は `_run_uxsim` が**間引き前の全点**から数えた `vehicle_counts`
@@ -329,6 +332,11 @@ LLM が扱うのは `sim_id`・差分命令・集計値だけです（§3.3）�
 | CSV 取込で `float("")` エラー | 空セルの扱い．`_get_float` の既定値経由で読む（`TestCSVParser`） |
 | 重複ノード名で UXsim の生エラーが出る | `SimulationInput` の検証で名前つきのメッセージに変換済み（`TestScenarioValidation`） |
 | 台数が想定の 1/5 に見える | フレームの `ids` はプラトン（`deltan` 台）．`vehicle_counts` を使う（§3.3） |
+| 全車両到着後も画面が「到着 45 / 走行中 5」のまま | フレームは走行車両がいる時刻にしか無い．累積台数はフレームから推定せず，実イベントの `trip_series`（時間軸 0〜tmax）を使う |
+| 画面と LLM で平均速度が違う / 間引きで変わる | 定義は「走行中全車両の台数重み平均」の 1 つ（`frame_avg_speed`，間引き前）．リンク timeline の単純平均を「平均速度」と呼ばない．分析用の値は `vehicle_sample_step` の前で計算する |
+| `signal_group` 省略で現示 0 だけ青になる | UXsim の既定は `[0]`．RISU の意味は「全現示で青」なので `build_world` と `EMIT_TEMPLATE` が展開し，`signals[].groups` は適用後のリストを返す |
+| 現示表示が後半ほどずれる | ログ 1 件 = `W.DELTAT` 秒（`deltan × reaction_time`）．`tmax / len(phase_log)` で逆算しない．`signals[].deltat` を送る |
+| GUI で容量 0 が消える | 空欄だけが「自動」．`0` は有効値として送る（`v < 0` のときだけ削除） |
 | 同じ入力で結果が毎回変わる | `random_seed` 未指定．比較・追試ではシナリオに持たせる（§3.1） |
 | GUI で再実行すると容量の前提が変わる | 送信データから `reaction_time` が落ちていた．`et-run` は全体パラメータを引き継ぐ（`TestGuiRerunCarriesScenarioParams`） |
 | `pip install` が `No such file or directory` で止まる | Windows の 260 文字パス長制限（`anthropic` の長いファイル名）．浅い場所に clone するか長いパスを有効化 |

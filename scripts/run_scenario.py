@@ -199,10 +199,16 @@ def build():
             extra["signal"] = n["signal"]
         nodes[n["name"]] = W.addNode(n["name"], x=n["x"], y=n["y"], **extra)
 
+    # signal_group 省略 = その交差点の全現示で青（常時通行可能）．
+    # UXsim の既定 [0] は現示 0 だけ青なので，多現示の信号ノードへ入るリンクは全現示に展開する
+    signal_phases = {{n["name"]: len(n["signal"]) for n in NODES
+                     if n.get("signal") and len(n["signal"]) > 1}}
     for lk in LINKS:
         extra = {{}}
         if lk.get("signal_group") is not None:
             extra["signal_group"] = lk["signal_group"]
+        elif lk["end"] in signal_phases:
+            extra["signal_group"] = list(range(signal_phases[lk["end"]]))
         if lk.get("capacity") is not None:
             # RISU の capacity は UXsim の capacity_out（下流端の流出容量）にマップする
             extra["capacity_out"] = lk["capacity"]

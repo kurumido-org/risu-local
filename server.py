@@ -221,6 +221,10 @@ def _build_envelope(sim_id: str, *, include_result: bool = True) -> dict:
             "vehicle_sample_step": raw.get("vehicle_sample_step", 1),
             # フレームごとの走行中台数（実台数 = プラトン数 × deltan．間引き前の全点から集計）
             "vehicle_counts": raw.get("vehicle_counts"),
+            # フレームごとの車両平均速度（台数重み，間引き前）
+            "frame_avg_speed": raw.get("frame_avg_speed"),
+            # 流入・到着の累積台数（実イベント．時間軸は 0・各フレーム・tmax）
+            "trip_series": raw.get("trip_series"),
         }
     return envelope
 
@@ -244,7 +248,10 @@ class LinkInput(BaseModel):
     number_of_lanes: int = Field(default=1, ge=1)
     capacity: float | None = Field(default=None, ge=0)  # リンク容量（台/s，リンク全体）．UXsim の capacity_out にマップ．
                                    # None なら FD（速度・密度・車線数）由来の容量のまま
-    signal_group: int | None = None  # この進入リンクが青になる信号現示番号（0始まり）
+    # この進入リンクが青になる信号現示番号（0 始まり）．複数の現示で青なら list．
+    # None（省略）は「その交差点の全現示で青 = 常時通行可能」．UXsim の既定 [0]（現示 0 だけ青）
+    # とは違うので，uxsim_bridge.build_world と run_scenario.py の EMIT_TEMPLATE が展開する．
+    signal_group: int | list[int] | None = None
 
 class DemandInput(BaseModel):
     orig: str
@@ -372,11 +379,12 @@ class ChatInput(BaseModel):
 # ──────────────────────────────────────────────
 # UXsim 実行（同期 → Executor で非同期化）
 # ──────────────────────────────────────────────
-def _trip_stats(W) -> tuple[int, int, float | None]:
+def _trip_stats(W) -> tuple[int, int, float | None, list[float]]:
     """basic_analysis / od_analysis と同じ数え方でトリップ統計を計算する．
 
     dest を持つ車両 × DELTAN がトリップ数，travel_time != -1 が完了，
     平均旅行時間は完了車両の travel_time の平均．
+    戻り値の 4 番目は完了車両の到着時刻（秒）のリスト（到着累積の集計用）．
     cpp backend では CppVehicle のプロパティ（毎回 state 判定で C++ を複数回参照）を
     経由せず C++ オブジェクトを直接読む．
     """
@@ -384,6 +392,7 @@ def _trip_stats(W) -> tuple[int, int, float | None]:
     trip_all = 0
     trip_completed = 0
     tt_sum = 0.0
+    arrivals: list[float] = []
     for veh in W.VEHICLES.values():
         cv = veh.__dict__.get("_cpp_vehicle")
         if cv is not None:
@@ -401,8 +410,31 @@ def _trip_stats(W) -> tuple[int, int, float | None]:
         if tt != -1:
             trip_completed += dn
             tt_sum += tt
+            if cv is not None:
+                arrivals.append(float(cv.arrival_time))
+            else:
+                # 純 Python: departure_time はステップ単位．秒の出発 + 旅行時間 = 到着（秒）
+                arrivals.append(float(veh.departure_time_in_second) + float(tt))
     avg_tt = (tt_sum * dn / trip_completed) if trip_completed else None
-    return trip_all, trip_completed, avg_tt
+    return trip_all, trip_completed, avg_tt, arrivals
+
+
+def _speed_histogram(v) -> dict:
+    """速度分布（全フレーム・全車両の観測点）．labels は "lo-hi" m/s，counts は観測点数．
+
+    描画用の間引き前の全点から作る（_run_uxsim）．_get_simulation_data はこれをそのまま返す．
+    """
+    import numpy as np
+    v = np.asarray(v, dtype=np.float64)
+    if v.size == 0:
+        return {"labels": [], "counts": []}
+    max_spd = float(v.max())
+    bin_size = max(1, round(max_spd / 12))
+    bins = list(range(0, int(max_spd) + bin_size + 1, bin_size))
+    n_bins = len(bins) - 1
+    idx = np.minimum((v / bin_size).astype(np.int64), n_bins - 1)
+    counts = np.bincount(idx, minlength=n_bins).tolist()
+    return {"labels": [f"{bins[i]}-{bins[i+1]}" for i in range(n_bins)], "counts": counts}
 
 
 def _select_frames(tk, max_frames: int):
@@ -438,10 +470,12 @@ def _select_frames(tk, max_frames: int):
 def _collect_run_points(W, n_links: int, max_frames: int):
     """全車両のログから「run 状態かつ有効リンク上」の点を，可視化フレーム分だけ列として取り出す．
 
-    戻り値: (kept, fidx, li, vid, x, v)
+    戻り値: (kept, fidx, li, vid, x, v, entry_t)
       kept: 昇順のフレーム時刻キー（0.1 秒精度の整数）
       fidx: 各点のフレーム index（kept への index），li: リンク index，
       vid: W.VEHICLES の登録順 index，x: リンク上位置，v: 速度
+      entry_t: 車両ごと（W.VEHICLES 順）の実流入時刻（最初に run になった秒．未流入は NaN）．
+               流入累積の集計に使う．departure_time は「予定」で，入口待ちの車両は含んでしまう．
 
     fast path (uxsim cpp backend): C++ 側の build_all_vehicle_logs_flat_compact() で
     全車両のログを 1 回でフラット配列として受け取り，車両ごとの Python ループを行わない．
@@ -473,12 +507,21 @@ def _collect_run_points(W, n_links: int, max_frames: int):
             # entry index → 車両 index（offsets[v] <= e < offsets[v+1]）．
             # W.VEHICLES の登録順 == C++ vehicle index 順（_register_new_cpp_vehicles）．
             vid = np.searchsorted(offsets, idx, side="right") - 1
+            # 車両ごとの実流入時刻: 最初の run 状態のログ時刻（間引き・リンク範囲に依らない）
+            log_t_all = np.asarray(flat["log_t"], dtype=np.float64)
+            run_all = np.flatnonzero(state == run_code)
+            entry_t = np.full(n_veh, np.nan)
+            if run_all.size:
+                vid_run = np.searchsorted(offsets, run_all, side="right") - 1
+                uniq, first = np.unique(vid_run, return_index=True)  # 車両ごとの最初の run
+                entry_t[uniq] = log_t_all[run_all[first]]
             return (
                 kept, fidx,
                 link[idx].astype(np.int64),
                 vid,
                 np.asarray(flat["log_x"], dtype=np.float64)[idx],
                 np.asarray(flat["log_v"], dtype=np.float64)[idx],
+                entry_t,
             )
         except Exception as e:  # 内部 API 変更時は遅い経路にフォールバック
             print(f"[RISU] flat vehicle log fast path unavailable ({e.__class__.__name__}: {e}); "
@@ -486,6 +529,7 @@ def _collect_run_points(W, n_links: int, max_frames: int):
 
     link_idx_map = {lk.name: i for i, lk in enumerate(W.LINKS)}
     tk_parts, vid_parts, li_parts, x_parts, v_parts = [], [], [], [], []
+    entry_t = np.full(len(W.VEHICLES), np.nan)
     for vid, veh in enumerate(W.VEHICLES.values()):
         cache = getattr(veh, "_log_cache", None)
         if cache is None and hasattr(veh, "_ensure_log_raw"):
@@ -513,6 +557,7 @@ def _collect_run_points(W, n_links: int, max_frames: int):
                 continue
             li_sel = li[sel]
         log_t = np.asarray(veh.log_t, dtype=np.float64)
+        entry_t[vid] = log_t[sel[0]]
         tk_parts.append(np.rint(log_t[sel] * 10.0).astype(np.int64))
         li_parts.append(li_sel)
         vid_parts.append(np.full(sel.size, vid, dtype=np.int64))
@@ -520,13 +565,13 @@ def _collect_run_points(W, n_links: int, max_frames: int):
         v_parts.append(np.asarray(veh.log_v, dtype=np.float64)[sel])
     if not tk_parts:
         e = np.empty(0, dtype=np.int64)
-        return e, e, e, e, np.empty(0), np.empty(0)
+        return e, e, e, e, np.empty(0), np.empty(0), entry_t
     tk = np.concatenate(tk_parts)
     li, vid = np.concatenate(li_parts), np.concatenate(vid_parts)
     x, v = np.concatenate(x_parts), np.concatenate(v_parts)
     kept, fidx = _select_frames(tk, max_frames)
     m = fidx >= 0
-    return kept, fidx[m], li[m], vid[m], x[m], v[m]
+    return kept, fidx[m], li[m], vid[m], x[m], v[m], entry_t
 
 
 def _run_uxsim(scenario: SimulationInput) -> dict:
@@ -542,10 +587,6 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
          "signal": [float(p) for p in n.signal]}
         for n in scenario.nodes if n.signal and sum(n.signal) > 0
     ]
-    _orig_signal_groups = {
-        lk.name: int(lk.signal_group)
-        for lk in scenario.links if lk.signal_group is not None
-    }
 
     # ネットワーク構築は uxsim_bridge に集約している（素の UXsim から実行する
     # scripts/run_scenario.py と同じコードを通す．二重に持つと片方だけ直して挙動がずれる）．
@@ -566,7 +607,7 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
     # ---- 基本統計（basic_analysis 相当を直接計算） ----
     # od_analysis と同じ数え方: dest を持つ車両 × DELTAN がトリップ数，
     # travel_time != -1 が完了，平均旅行時間は完了車両の travel_time の平均．
-    _trip_all, _trip_completed, _avg_tt = _trip_stats(W)
+    _trip_all, _trip_completed, _avg_tt, _arrivals = _trip_stats(W)
 
     # ---- リンク情報（GeoJSON） ----
     # 同一座標ペアのリンクを検出し，重複分にオフセットを付与して視覚的に区別
@@ -634,13 +675,15 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
     _ffs = np.fromiter((lk.free_flow_speed for lk in W.LINKS), dtype=np.float64, count=_n_links)
 
     # 時刻方向の間引き（MAX_FRAMES）は _collect_run_points 内で列抽出前に適用済み
-    kept, fidx, li_all, vid_all, x_all, v_all = _collect_run_points(W, _n_links, MAX_FRAMES)
+    kept, fidx, li_all, vid_all, x_all, v_all, entry_t = _collect_run_points(W, _n_links, MAX_FRAMES)
 
     frames = {}
     frame_times = []
     link_timeline = {ln: [] for ln in link_names}
     vehicle_sample_step = 1
     vehicle_counts: list[int] = []
+    frame_avg_speed: list = []
+    speed_hist = {"labels": [], "counts": []}
 
     if kept.size:
         n_frames = kept.size
@@ -660,8 +703,15 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
 
         # ── フレームごとの走行中台数（分析用．描画用の間引きとは独立に全点から数える） ──
         # UXsim の 1 車両（プラトン）は deltan 台を表すので，実台数に換算して保持する．
-        vehicle_counts = (np.bincount(fidx, minlength=n_frames)[:n_frames]
-                          * int(W.DELTAN)).tolist()
+        _cnt_f = np.bincount(fidx, minlength=n_frames)[:n_frames]
+        vehicle_counts = (_cnt_f * int(W.DELTAN)).tolist()
+        # ── フレームごとの車両平均速度（台数重み）と速度分布．どちらも間引き前の全点 ──
+        # 「平均速度」の定義はこれ 1 つ（画面の AVG SPEED と LLM の network_avg_speed が共有）．
+        # リンク別 timeline の単純平均（リンク重み）とは別物なので混ぜない．
+        _vsum_f = np.bincount(fidx, weights=v_all, minlength=n_frames)[:n_frames]
+        frame_avg_speed = [round(float(s / c), 2) if c > 0 else None
+                           for s, c in zip(_vsum_f.tolist(), _cnt_f.tolist())]
+        speed_hist = _speed_histogram(v_all)
 
         # ── 総点数の上限: 車両 ID を等間隔サンプリング（描画用のみ） ──
         if MAX_FRAME_POINTS > 0 and fidx.size > MAX_FRAME_POINTS:
@@ -703,6 +753,19 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
     for f in features:
         f["properties"]["timeline"] = link_timeline[f["properties"]["name"]]
 
+    # ---- 流入・到着の累積台数（実イベントから．描画用フレームとは独立） ----
+    # 時間軸は 0・各フレーム時刻・tmax．フレームは「走行車両がいる時刻」にしか無いので，
+    # 全車両到着後の状態（走行中 0 台・到着 = 全台）はこの系列でしか表せない．
+    _axis = sorted({0.0, float(scenario.tmax), *frame_times})
+    _ent = np.sort(entry_t[np.isfinite(entry_t)]) if entry_t.size else np.empty(0)
+    _arr = np.sort(np.asarray(_arrivals, dtype=np.float64))
+    _dn = int(W.DELTAN)
+    trip_series = {
+        "t":         _axis,
+        "entered":   (np.searchsorted(_ent, _axis, side="right") * _dn).tolist(),
+        "completed": (np.searchsorted(_arr, _axis, side="right") * _dn).tolist(),
+    }
+
     post_elapsed = time.perf_counter() - t_post0
 
     # ---- 集計統計 ----
@@ -739,14 +802,20 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
             if w_node.name in {n["name"] for n in _orig_signal_nodes}:
                 log_by_orig_id[w_node.name] = list(sl)
 
+        w_link_map = getattr(W, "_risu_link_map", {})
         for orig_node in _orig_signal_nodes:
-            # この交差点に流入する signal_group 付きリンクのみ．
-            # （全 signal_group リンクを渡すと，複数の信号交差点があるとき
-            #   同じ信号機が交差点の数だけ重複描画されてしまう）
-            groups = {
-                lk_name: g for lk_name, g in _orig_signal_groups.items()
-                if link_end_map.get(lk_name) == orig_node["name"]
-            }
+            # この交差点に流入する全リンクと，**実際に適用された**現示番号のリスト．
+            # signal_group 省略時は build_world が全現示に展開する（UXsim の既定 [0] ではない）．
+            # 他の交差点のリンクを混ぜない（混ぜると同じ信号機が交差点の数だけ重複描画される）．
+            groups = {}
+            for lk_name, end_name in link_end_map.items():
+                if end_name != orig_node["name"]:
+                    continue
+                w_link = w_link_map.get(lk_name)
+                g = getattr(w_link, "signal_group", None) if w_link is not None else None
+                if g is None:
+                    g = list(range(len(orig_node["signal"])))
+                groups[lk_name] = [int(x) for x in g] if isinstance(g, (list, tuple)) else [int(g)]
             phase_log = log_by_orig_id.get(orig_node["name"], [])
             signals.append({
                 "node":     orig_node["name"],
@@ -754,7 +823,10 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
                 "y":        orig_node["y"],
                 "phases":   orig_node["signal"],
                 "groups":   groups,
-                "phase_log": phase_log,    # UXsim 実 phase（秒単位）
+                "phase_log": phase_log,    # UXsim 実 phase（ログ 1 件 = deltat 秒）
+                # ログの時間刻み（deltan × reaction_time）．tmax / len(phase_log) は
+                # tmax が deltat の整数倍でないとずれるので，実値を送る
+                "deltat":   float(W.DELTAT),
             })
     except Exception as e:
         print(f"[RISU] signal metadata extraction failed: {e}")
@@ -778,6 +850,12 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
         # フレームごとの走行中台数（frame_times と同じ長さ．実台数 = プラトン数 × deltan）．
         # 間引き前の全点から数えるので，vehicle_sample_step の影響を受けない．
         "vehicle_counts": vehicle_counts,
+        # フレームごとの車両平均速度（台数重み，間引き前）．画面と LLM で共通の定義
+        "frame_avg_speed": frame_avg_speed,
+        # 速度分布（全フレーム・全車両の観測点，間引き前）
+        "speed_histogram": speed_hist,
+        # 流入・到着の累積台数（実イベント，時間軸 0〜tmax）
+        "trip_series": trip_series,
     }
 
 
@@ -1312,7 +1390,7 @@ UXsim は交差点ノードに信号制御を設定できる．2 つのパラメ
 - データを受け取ったら，ユーザーの要望に合った Chart.js 設定を ```chart ... ``` コードブロックで出力する
 - Chart.js設定は完全なJSON: {type, data: {labels, datasets}, options} 形式
 - 【必須】get_simulation_data の配列は書き写さず参照で指定する（出力トークン節約）:
-  {"$data":"time_labels"} / {"$data":"network_avg_speed"} / {"$data":"network_vehicle_count"} /
+  {"$data":"time_labels"} / {"$data":"network_avg_speed"} / {"$data":"network_vehicle_count"} / {"$data":"network_completed_count"} /
   {"$data":"link_speeds.<リンク名>"} / {"$data":"speed_histogram.labels"} / {"$data":"speed_histogram.counts"}
   複数の sim を比較するときは {"$data":"network_avg_speed","sim_id":"xxxxxxxx"} と sim_id を付ける
 - 例: ```chart\n{"type":"line","data":{"labels":{"$data":"time_labels"},"datasets":[{"label":"平均速度","data":{"$data":"network_avg_speed"},"borderColor":"#0d9668"}]}}\n```
@@ -1566,6 +1644,11 @@ def _get_simulation_data(sim_id: str, points: int = 30, max_links: int = 20) -> 
     vehicle_counts = data.get("vehicle_counts")
     if vehicle_counts is not None and len(vehicle_counts) != len(frame_times):
         vehicle_counts = None
+    # 車両平均速度（台数重み，間引き前）．無い古い結果は描画フレームの車両から近似
+    frame_avg_speed = data.get("frame_avg_speed")
+    if frame_avg_speed is not None and len(frame_avg_speed) != len(frame_times):
+        frame_avg_speed = None
+    trip_series = data.get("trip_series") or None
 
     # 間引き（最大 points 点）
     step = max(1, -(-len(frame_times) // points))
@@ -1589,11 +1672,24 @@ def _get_simulation_data(sim_id: str, points: int = 30, max_links: int = 20) -> 
             net_vehicle_count.append(int(vehicle_counts[fi]))
         else:
             net_vehicle_count.append(int(speeds.size) * sample_step * deltan)
-        if speeds.size:
+        if frame_avg_speed is not None:
+            v = frame_avg_speed[fi]
+            net_avg_speed.append(round(float(v), 1) if v is not None else None)
+        elif speeds.size:
             net_avg_speed.append(round(float(speeds.mean()), 1))
-            sampled_speeds.append(speeds)
         else:
             net_avg_speed.append(None)
+        if speeds.size:
+            sampled_speeds.append(speeds)
+
+    # 流入・到着の累積（実イベント）を time_labels に合わせて引く
+    net_entered = net_completed = None
+    if trip_series and trip_series.get("t"):
+        ts_t = np.asarray(trip_series["t"], dtype=np.float64)
+        pos = np.clip(np.searchsorted(ts_t, np.asarray(sampled, dtype=np.float64), side="right") - 1,
+                      0, ts_t.size - 1)
+        net_entered   = [int(trip_series["entered"][p])   for p in pos.tolist()]
+        net_completed = [int(trip_series["completed"][p]) for p in pos.tolist()]
 
     # リンク別速度
     # 大規模ネットワーク（数千〜1万リンク）で全リンクを返すと LLM の
@@ -1634,9 +1730,13 @@ def _get_simulation_data(sim_id: str, points: int = 30, max_links: int = 20) -> 
             speeds.append(round(tl[lo]["speed"], 1))
         link_speeds[ln] = speeds
 
-    # 速度分布（全期間，サンプル時刻の全車両点）
+    # 速度分布: サーバーが間引き前の全点から作ったものを優先．
+    # 無い古い結果はサンプル時刻の描画フレームから近似
     speed_hist = {"labels": [], "counts": []}
-    if sampled_speeds:
+    stored_hist = data.get("speed_histogram")
+    if stored_hist and stored_hist.get("labels"):
+        speed_hist = {"labels": list(stored_hist["labels"]), "counts": list(stored_hist["counts"])}
+    elif sampled_speeds:
         all_speeds = np.round(np.concatenate(sampled_speeds), 1)
         max_spd = float(all_speeds.max())
         bin_size = max(1, round(max_spd / 12))
@@ -1654,6 +1754,8 @@ def _get_simulation_data(sim_id: str, points: int = 30, max_links: int = 20) -> 
         "time_labels": time_labels,
         "network_avg_speed": net_avg_speed,
         "network_vehicle_count": net_vehicle_count,
+        "network_entered_count": net_entered,
+        "network_completed_count": net_completed,
         "total_links": total_links,
         "link_names": link_names,
         "link_speeds": link_speeds,
@@ -1665,9 +1767,13 @@ def _get_simulation_data(sim_id: str, points: int = 30, max_links: int = 20) -> 
             f"混雑度上位 {MAX_DETAIL_LINKS} 本のみ．ネットワーク全体の傾向は"
             f" network_avg_speed / speed_histogram を参照．"
         )
-    data["vehicle_count_note"] = (
-        f"network_vehicle_count は実台数（deltan={deltan} 換算済み，間引き前の全車両から集計）．"
-        f"speed_histogram の counts はプラトン（{deltan} 台単位）のサンプル数．"
+    data["metric_note"] = (
+        f"network_vehicle_count: その時刻に走行中の実台数（deltan={deltan} 換算済み，間引き前の全車両）．"
+        "network_avg_speed: 走行中の全車両の速度の台数重み平均 m/s（画面の AVG SPEED と同じ定義）．"
+        "link_speeds: リンク別の平均速度（そのリンク上の車両の平均）で，network_avg_speed の"
+        "リンク単純平均とは一致しない．"
+        "network_entered_count / network_completed_count: 流入・到着の累積台数（実イベント）．"
+        f"speed_histogram の counts は全フレーム・全車両の観測点数（プラトン={deltan} 台単位）．"
     )
     if sample_step > 1:
         data["vehicle_sample_note"] = (
@@ -2134,7 +2240,7 @@ CLAUDE_TOOLS = [
                             "jam_density":      {"type": "number", "description": "渋滞密度（台/m）．デフォルト0.2"},
                             "number_of_lanes":  {"type": "integer", "description": "車線数．デフォルト1"},
                             "capacity":         {"type": "number", "description": "リンク容量（台/秒，リンク全体）．ボトルネックの明示表現に使う（例: 0.5）．省略時は速度・密度・車線数から決まる容量"},
-                            "signal_group":     {"type": "integer", "description": "この進入リンクが青になる信号現示番号（0始まり）．退出リンクには不要．省略=常時通行可能"},
+                            "signal_group":     {"type": "integer", "description": "この進入リンクが青になる信号現示番号（0始まり）．退出リンクには不要．省略=その交差点の全現示で青（常時通行可能）"},
                         },
                         "required": ["name", "start", "end", "length"],
                     },
@@ -2233,7 +2339,8 @@ CLAUDE_TOOLS = [
         "description": (
             "シミュレーション結果の集計データを取得する．"
             "ユーザーがグラフ・チャート・分析を求めた場合に呼び出す．"
-            "返されるデータ: time_labels, network_avg_speed, network_vehicle_count, "
+            "返されるデータ: time_labels, network_avg_speed（走行中車両の台数重み平均）, "
+            "network_vehicle_count, network_entered_count, network_completed_count, "
             "link_speeds(混雑度上位リンク別), speed_histogram, stats．"
             "チャートでは配列を書き写さず {\"$data\":\"network_avg_speed\"} のような参照を使う"
             "（サーバーが実データに置換する）．"

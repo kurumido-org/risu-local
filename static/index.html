@@ -1445,21 +1445,21 @@
     </div>
     <div class="stat-chart" data-metric="avgSpeed">
       <div class="sc-head">
-        <span class="sc-label">AVG SPEED <span class="sc-unit">m/s</span></span>
+        <span class="sc-label" title="走行中の全車両の速度の平均（台数重み）．LLM に渡る network_avg_speed と同じ定義">AVG SPEED <span class="sc-unit">m/s</span></span>
         <span class="sc-value" id="sv-speed">—</span>
       </div>
       <canvas class="sc-canvas"></canvas>
     </div>
     <div class="stat-chart" data-metric="completed">
       <div class="sc-head">
-        <span class="sc-label">COMPLETED</span>
+        <span class="sc-label" title="到着台数の累積（実際の到着イベントから集計）">COMPLETED</span>
         <span class="sc-value" id="sv-completed">—<span class="sv-total" id="sv-total-trips"></span></span>
       </div>
       <canvas class="sc-canvas"></canvas>
     </div>
     <div class="stat-chart" data-metric="inflow">
       <div class="sc-head">
-        <span class="sc-label">ENTERED</span>
+        <span class="sc-label" title="流入台数の累積（実際にネットワークへ入った時刻から集計）">ENTERED</span>
         <span class="sc-value" id="sv-inflow">—</span>
       </div>
       <canvas class="sc-canvas"></canvas>
@@ -1560,6 +1560,13 @@ let nodeByCoord = {};    // "x,y" → node name (高速ルックアップ)
 //  - vehScale: 古い結果（vehicle_counts なし）用の近似係数 = deltan × vehicle_sample_step
 let vehicleCounts = null;
 let vehScale = 1;
+// サーバーが実イベントから集計した系列（描画用フレームとは独立）
+//  - tripSeries: {t[], entered[], completed[]} 流入・到着の累積台数．時間軸は 0〜tmax
+//  - frameAvgSpeed: フレームごとの車両平均速度（台数重み，間引き前）．LLM と同じ定義
+//  - simStats: サーバーの統計（total_trips 等）
+let tripSeries = null;
+let frameAvgSpeed = null;
+let simStats = null;
 let simTmax    = 3600;
 let lastSimId  = null;
 // lastResult は廃止（メモリ節約）— ダウンロードはサーバーから直接取得
@@ -2107,8 +2114,10 @@ function applyEditProp(field, value) {
       const v = parseInt(value);
       if (isNaN(v) || value === '') delete lk.signal_group; else lk.signal_group = v;
     } else if (field === 'capacity') {
+      // 空欄だけが「自動（FD 由来）」．0 は「流出を止める」という有効な指定なので削除しない
+      // （以前は 0 も削除していて，容量制約が外れて基本図由来の容量に戻っていた）
       const v = parseFloat(value);
-      if (isNaN(v) || value === '' || v <= 0) delete lk.capacity; else lk.capacity = v;
+      if (isNaN(v) || value === '' || v < 0) delete lk.capacity; else lk.capacity = v;
     } else {
       const v = parseFloat(value);
       if (!isNaN(v)) lk[field] = field === 'number_of_lanes' ? Math.max(1, Math.round(v)) : v;
@@ -2684,6 +2693,9 @@ async function loadResult(simId) {
     // 台数換算（vehicle_counts が無い古い JSON は プラトン数 × deltan × 間引き で近似）
     vehicleCounts = Array.isArray(r.vehicle_counts) ? r.vehicle_counts : null;
     vehScale = ((scenarioData && scenarioData.deltan) || 1) * (r.vehicle_sample_step || 1);
+    tripSeries = (r.trip_series && Array.isArray(r.trip_series.t)) ? r.trip_series : null;
+    frameAvgSpeed = Array.isArray(r.frame_avg_speed) ? r.frame_avg_speed : null;
+    simStats = r.stats || null;
     // 座標→ノード名のルックアップを構築
     nodeByCoord = {};
     if (scenarioData && scenarioData.nodes) {
@@ -2822,6 +2834,9 @@ function releasePrevResult() {
   scenarioData = null;
   vehicleCounts = null;
   vehScale = 1;
+  tripSeries = null;
+  frameAvgSpeed = null;
+  simStats = null;
   nodeByCoord = {};
   hitTargets = { nodes: [], links: [] };
   statsSeries = null;
@@ -2837,9 +2852,11 @@ function currentPhaseIdx(sig, t) {
   // UXsim の実 phase ログがあれば最優先（タイミングずれを完全排除）
   // phase_log の time step は DELTAT(=tmax/log長)．t を比例配分でインデックス化．
   if (phaseLog && phaseLog.length) {
-    const tmax = simTmax || phaseLog.length;
-    const idx = Math.max(0, Math.min(phaseLog.length - 1,
-      Math.floor(t / tmax * phaseLog.length)));
+    // ログ 1 件 = deltat 秒（deltan × reaction_time）．サーバーが実値 sig.deltat を送る．
+    // 旧実装の tmax / ログ件数 は tmax が deltat の整数倍でないとずれた
+    // （tmax=1000, deltat=8.5 → 8.547 として参照し，1,000 時点中 97 時点で現示が違った）．
+    const dt = (sig && sig.deltat > 0) ? sig.deltat : (simTmax || phaseLog.length) / phaseLog.length;
+    const idx = Math.max(0, Math.min(phaseLog.length - 1, Math.floor(t / dt)));
     return phaseLog[idx];
   }
   if (!phases || !phases.length) return -1;
@@ -3483,7 +3500,9 @@ function _drawSignals(ctx, tCurrent, linkDrawInfo, px, py, denseNetwork) {
       const info = linkDrawInfo[linkName];
       if (!info) continue;
       const g = _approachGeom(info);
-      approaches.push({ g, isActive: groupIdx === activePhase });
+      // groups の値は実際に適用された現示番号のリスト（省略時は全現示 = 常時青）．旧形式の int も許容
+      const isActive = Array.isArray(groupIdx) ? groupIdx.includes(activePhase) : groupIdx === activePhase;
+      approaches.push({ g, isActive });
       if (g.len < minLen) minLen = g.len;
     }
     if (!approaches.length || minLen < SIGNAL_LOD_PX) continue;
@@ -3732,7 +3751,11 @@ document.getElementById('user-input').addEventListener('input', function() {
       // 該当 link が信号制御下なら group を表示
       for (const sig of signalsData) {
         if (sig.groups && sig.groups[lk.name] !== undefined) {
-          html += `信号 group: <b>${sig.groups[lk.name]}</b> @ ノード <b>${escapeHtml(sig.node)}</b><br>`;
+          const gg = sig.groups[lk.name];
+          const nPh = (sig.phases || []).length;
+          const label = (Array.isArray(gg) && nPh > 1 && gg.length >= nPh) ? '全現示（常時青）'
+                      : Array.isArray(gg) ? gg.join(', ') : String(gg);
+          html += `信号 group: <b>${escapeHtml(label)}</b> @ ノード <b>${escapeHtml(sig.node)}</b><br>`;
           break;
         }
       }
@@ -4152,6 +4175,14 @@ function computeStatsSeries() {
     s += firstCnt[i]; started[i] = s * vehScale;
     completed[i] = c * vehScale; c += lastCnt[i];
   }
+  // サーバーの実イベント系列があればそれで上書き（フレーム由来の推定は「最後に描画された
+  // 時刻」までしか分からず，全車両到着後も走行中 5 台・到着 45 台のように残っていた）
+  if (tripSeries) {
+    for (let i = 0; i < N; i++) {
+      const tr = tripAt(frameTimes[i]);
+      started[i] = tr.entered; completed[i] = tr.completed;
+    }
+  }
 
   // 平均速度: 各リンクの timeline を先頭から 1 回だけ走査（フレーム時刻も timeline も昇順）
   const features = (geoData && geoData.features) || [];
@@ -4172,11 +4203,14 @@ function computeStatsSeries() {
     }
   }
   for (let i = 0; i < N; i++) {
-    avgSpeed[i] = cnt[i] ? sum[i] / cnt[i] : 0;
-    avgRatio[i] = rcnt[i] ? rsum[i] / rcnt[i] : 0;
+    // AVG SPEED は「走行中の全車両の速度の台数重み平均」（サーバー計算，LLM の network_avg_speed と
+    // 同じ定義）．リンク別 timeline の単純平均（リンク重み）は別物なので，古い結果の代替にだけ使う
+    const fs = (frameAvgSpeed && frameAvgSpeed.length === N) ? frameAvgSpeed[i] : null;
+    avgSpeed[i] = fs != null ? fs : (cnt[i] ? sum[i] / cnt[i] : 0);
+    avgRatio[i] = rcnt[i] ? rsum[i] / rcnt[i] : 0;   // 混雑度（速度/自由流速度のリンク平均）
   }
 
-  const totalTrips = lastSeen.size * vehScale;
+  const totalTrips = (simStats && simStats.total_trips) ? simStats.total_trips : lastSeen.size * vehScale;
   statsSeries = { active, avgSpeed, avgRatio, completed, started, totalTrips,
     maxActive: Math.max(1, ...active),
     maxSpeed: Math.max(1, ...avgSpeed),
@@ -4188,12 +4222,23 @@ function computeStatsSeries() {
   if (totalLabel) totalLabel.textContent = totalTrips;
 }
 
-function currentFrameIdx() {
-  if (!frameTimes.length) return 0;
+function currentTimeSec() {
   const slider = document.getElementById('time-slider');
   const ratio = (parseFloat(slider.value) || 0) / 1000;
-  const t = (simTmax || frameTimes[frameTimes.length - 1] || 0) * ratio;
-  return findNearestFrameIdx(t);
+  return (simTmax || frameTimes[frameTimes.length - 1] || 0) * ratio;
+}
+
+function currentFrameIdx() {
+  if (!frameTimes.length) return 0;
+  return findNearestFrameIdx(currentTimeSec());
+}
+
+// tripSeries を時刻 t で引く（t 以下の最後の点）
+function tripAt(t) {
+  const ts = tripSeries.t;
+  let lo = 0, hi = ts.length - 1;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (ts[m] <= t) lo = m; else hi = m - 1; }
+  return { entered: tripSeries.entered[lo], completed: tripSeries.completed[lo] };
 }
 
 // テーマ色のキャッシュ（getComputedStyle は 60fps 描画では高コスト）．
@@ -4298,10 +4343,23 @@ function updateStatValues() {
   const idx = currentFrameIdx();
   const fmt = (v) => Number.isFinite(v) ? (v >= 100 ? Math.round(v) : v.toFixed(1)) : '—';
   const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-  setText('sv-active', fmt(statsSeries.active[idx] || 0));
+  let active = statsSeries.active[idx] || 0;
+  let entered = statsSeries.started[idx] || 0;
+  let completed = statsSeries.completed[idx] || 0;
+  if (tripSeries) {
+    // 表示値はフレームではなく現在時刻で引く．フレームは走行車両がいる時刻にしか無いので，
+    // 全車両到着後（最後のフレームより後）は流入 − 到着 で走行中台数を出す
+    const t = currentTimeSec();
+    const tr = tripAt(t);
+    entered = tr.entered; completed = tr.completed;
+    const n = frameTimes.length;
+    const spacing = n > 1 ? (frameTimes[n - 1] - frameTimes[0]) / (n - 1) : 1;
+    if (t > frameTimes[n - 1] + spacing || t < frameTimes[0] - spacing) active = Math.max(0, entered - completed);
+  }
+  setText('sv-active', fmt(active));
   setText('sv-speed', fmt(statsSeries.avgSpeed[idx] || 0));
-  setText('sv-completed', fmt(statsSeries.completed[idx] || 0));
-  setText('sv-inflow', fmt(statsSeries.started[idx] || 0));
+  setText('sv-completed', fmt(completed));
+  setText('sv-inflow', fmt(entered));
   const totalEl = document.getElementById('sv-total-trips');
   if (totalEl && statsSeries.totalTrips) totalEl.textContent = statsSeries.totalTrips;
 }
