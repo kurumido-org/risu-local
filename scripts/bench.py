@@ -33,7 +33,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("LLM_BACKEND", "mock")
 
-import server  # noqa: E402
+import risu.aggregate
+import risu.results
+import risu.schema
+import risu.simulation
 
 
 def grid_scenario(n: int, tmax: int = 3600, demands: int = 200, seed: int = 0) -> dict:
@@ -75,27 +78,27 @@ def grid_scenario(n: int, tmax: int = 3600, demands: int = 200, seed: int = 0) -
 
 
 def run_one(label: str, scenario: dict, *, profile: bool = False) -> None:
-    sim_input = server._scenario_to_input(scenario)
+    sim_input = risu.schema._scenario_to_input(scenario)
 
     t0 = time.perf_counter()
     if profile:
         import cProfile
         pr = cProfile.Profile()
         pr.enable()
-    result = server._run_uxsim(sim_input)
+    result = risu.simulation._run_uxsim(sim_input)
     if profile:
         pr.disable()
     t1 = time.perf_counter()
 
     sim_id = f"bench_{label}"
-    server._store_sim(sim_id, result)
+    risu.results._store_sim(sim_id, result)
     try:
         t2 = time.perf_counter()
-        payload = server._envelope_json_bytes(sim_id)
+        payload = risu.results._envelope_json_bytes(sim_id)
         t3 = time.perf_counter()
-        gz = server._envelope_gzip_bytes(sim_id)
+        gz = risu.results._envelope_gzip_bytes(sim_id)
         t4 = time.perf_counter()
-        server._get_simulation_data(sim_id)
+        risu.aggregate._get_simulation_data(sim_id)
         t5 = time.perf_counter()
 
         frames = result["frames"]
@@ -111,7 +114,7 @@ def run_one(label: str, scenario: dict, *, profile: bool = False) -> None:
             f"simdata={t5 - t4:.3f}s  →  {len(payload) / max(1, points):.1f} bytes/点"
         )
     finally:
-        server.results_store.pop(sim_id, None)
+        risu.results.results_store.pop(sim_id, None)
 
     if profile:
         import pstats

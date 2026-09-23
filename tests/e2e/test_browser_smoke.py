@@ -44,10 +44,10 @@ def base_url():
     os.chdir(ROOT)   # static/ の相対パスで mount している
     import uvicorn
 
-    import server
+    import risu.api
 
     port = _free_port()
-    config = uvicorn.Config(server.app, host="127.0.0.1", port=port, log_level="warning")
+    config = uvicorn.Config(risu.api.app, host="127.0.0.1", port=port, log_level="warning")
     srv = uvicorn.Server(config)
     th = threading.Thread(target=srv.run, daemon=True)
     th.start()

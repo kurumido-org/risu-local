@@ -49,7 +49,20 @@ python scripts\run_scenario.py scenario.json --emit x.py  # 単体で動くス�
 
 ```
 risu-local/
-├── server.py             ← FastAPI + UXsim + LLM + MCP（単一ファイル）
+├── server.py             ← 起動だけ（python server.py）．関数を足さない（TestPackageLayout）
+├── risu/                 ← サーバー本体．import は一方向（上 → 下）で循環させない
+│   ├── runtime.py        ← .env 読込・バージョン・executor・uxsim 経路の状態（依存なし）
+│   ├── schema.py         ← pydantic の入力スキーマと検証（依存なし）
+│   ├── simulation.py     ← UXsim 実行と後処理（フレーム / 統計 / 系列）§3.5 §3.6
+│   ├── results.py        ← results_store・エンベロープ・v3 符号化・圧縮・永続化
+│   ├── aggregate.py      ← LLM 向け集計 _get_simulation_data §3.3
+│   ├── scenario_ops.py   ← 差分命令・grid・OD 自動生成
+│   ├── importers.py      ← CSV / GMNS / OSM 取込
+│   ├── prompts.py        ← SYSTEM_PROMPT・CLAUDE_TOOLS・mock（固定文字列）§3.4
+│   ├── tools.py          ← ツール実行 _dispatch_tool_blocks と各ハンドラ §3.2
+│   ├── llm.py            ← claude / ollama / mock，Prompt Caching，履歴，使用量
+│   ├── mcp_server.py     ← MCP（ツール定義と実行は tools と共有）
+│   └── api.py            ← FastAPI app・ミドルウェア・エンドポイント
 ├── uxsim_bridge.py       ← シナリオ → UXsim World（RISU 非依存の純粋モジュール）
 ├── static/
 │   ├── index.html        ← UI 本体（チャット + Canvas 可視化 + Chart.js）
@@ -91,19 +104,23 @@ LLM が扱うのは `sim_id`・差分命令・集計値だけです（§3.3）�
 
 ### 2.3 モジュールの責務
 
-| 関数 / エンドポイント | 役割 |
-|---|---|
-| `uxsim_bridge.build_world` | シナリオ → UXsim World．**サーバーと CLI の共通経路**（§3.1） |
-| `_run_uxsim(scenario)` | UXsim 実行 → GeoJSON + 個車フレーム + 統計 |
-| `_dispatch_tool_blocks` | LLM ツールの実行．**全経路で共通**（§3.2） |
-| `_get_simulation_data(sim_id)` | LLM に渡す集計データ（数 KB に制限） |
-| `_apply_modifications` | `rerun_simulation` の差分命令をシナリオに適用 |
-| `_parse_csv_scenario` / `_gmns_to_scenario` | CSV / GMNS パーサー |
-| `_run_osm_import(place)` | OSMnx で道路ネットワーク取得 |
-| `_envelope_compressed_bytes` | 結果の直列化 + 圧縮（方式別キャッシュ） |
-| `POST /simulate` / `GET /results/{id}` | 直接実行 / 結果取得 |
-| `POST /chat` | LLM 対話（claude = SSE ストリーミング / ollama / mock） |
-| `GET /mcp` | MCP SSE エンドポイント．ツール定義は `CLAUDE_TOOLS` をそのまま公開し，実行は `_mcp_call_tool` → `_dispatch_tool_blocks` |
+| 関数 / エンドポイント | モジュール | 役割 |
+|---|---|---|
+| `build_world` | `uxsim_bridge` | シナリオ → UXsim World．**サーバーと CLI の共通経路**（§3.1） |
+| `_run_uxsim(scenario)` | `risu.simulation` | UXsim 実行 → GeoJSON + 個車フレーム + 統計 |
+| `_dispatch_tool_blocks` | `risu.tools` | LLM ツールの実行．**全経路で共通**（§3.2） |
+| `_get_simulation_data(sim_id)` | `risu.aggregate` | LLM に渡す集計データ（数 KB に制限） |
+| `_apply_modifications` | `risu.scenario_ops` | `rerun_simulation` の差分命令をシナリオに適用 |
+| `_parse_csv_scenario` / `_gmns_to_scenario` | `risu.importers` | CSV / GMNS パーサー |
+| `_run_osm_import(place)` | `risu.importers` | OSMnx で道路ネットワーク取得 |
+| `_envelope_compressed_bytes` | `risu.results` | 結果の直列化 + 圧縮（方式別キャッシュ） |
+| `POST /simulate` / `GET /results/{id}` | `risu.api` | 直接実行 / 結果取得 |
+| `POST /chat` | `risu.api` → `risu.llm` | LLM 対話（claude = SSE ストリーミング / ollama / mock） |
+| `GET /mcp` | `risu.mcp_server` | MCP SSE．ツール定義は `CLAUDE_TOOLS` をそのまま公開し，実行は `_mcp_call_tool` → `_dispatch_tool_blocks` |
+
+設定値（`MAX_FRAME_POINTS` や `RESULTS_DIR` など）は**それを使うモジュールが env から読む**．
+テストで差し替えるときはそのモジュールを `monkeypatch.setattr` する
+（`from risu.x import Y` で束縛した先を差し替えても効かない）．
 
 **LLM ツール**: `run_simulation` / `rerun_simulation` / `get_network_info` /
 `get_simulation_data` / `import_osm_network`．
@@ -364,9 +381,9 @@ MCP（`_mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
 | GUI で再実行すると容量の前提が変わる | 送信データから `reaction_time` が落ちていた．`et-run` は全体パラメータを引き継ぐ（`TestGuiRerunCarriesScenarioParams`） |
 | `pip install` が `No such file or directory` で止まる | Windows の 260 文字パス長制限（`anthropic` の長いファイル名）．浅い場所に clone するか長いパスを有効化 |
 
-`ruff format` は**意図的に CI へ入れていません**．`server.py` の数値処理は桁を揃えて
-書いてあり，自動整形すると数千行の差分が出て履歴が読めなくなるためです．
-入れるならファイル分割の後に段階的に．
+`ruff format` は**意図的に CI へ入れていません**．`risu/simulation.py` などの数値処理は
+桁を揃えて書いてあり，自動整形すると数千行の差分が出て履歴が読めなくなるためです．
+ファイル分割は済んだので，入れるならモジュール単位で段階的に（1 モジュール 1 コミット）．
 
 ---
 

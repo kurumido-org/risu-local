@@ -30,9 +30,8 @@ jobs:
       - name: ruff check
         run: ruff check --output-format=github .
       # NOTE: `ruff format` は意図的に CI へ入れていない．
-      # server.py の数値処理は桁を揃えて書いてあり，自動整形すると
-      # 4,000 行規模の差分が出て履歴が読めなくなるため．
-      # 整形を入れるなら，まずファイル分割をしてから段階的に．
+      # risu/simulation.py などの数値処理は桁を揃えて書いてあり，自動整形すると
+      # 数千行規模の差分が出て履歴が読めなくなるため．入れるならモジュール単位で段階的に．
 
   test:
     name: test (py${{ matrix.python-version }} / ${{ matrix.os }})

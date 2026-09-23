@@ -21,13 +21,11 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from server import (
-    SimulationInput,
-    _run_uxsim,
-    _parse_csv_scenario,
-    _get_simulation_data,
-    results_store,
-)
+from risu.aggregate import _get_simulation_data
+from risu.importers import _parse_csv_scenario
+from risu.results import results_store
+from risu.schema import SimulationInput
+from risu.simulation import _run_uxsim
 
 
 # ============================================================
@@ -377,7 +375,7 @@ class TestScenarioValidation:
     def test_validation_error_reaches_client_as_422(self):
         """/simulate 経由でも 500 ではなく，どの項目かが分かる 422 になる．"""
         from fastapi.testclient import TestClient
-        from server import app
+        from risu.api import app
         client = TestClient(app)
         r = client.post("/simulate", json=self._valid(deltan=0))
         assert r.status_code == 422
@@ -415,7 +413,7 @@ class TestScenarioModifications:
         }
 
     def test_update_links_by_name(self):
-        from server import _apply_modifications
+        from risu.scenario_ops import _apply_modifications
         sc, applied = _apply_modifications(self._base(), [
             {"action": "update_links", "names": ["r1"], "set": {"capacity": 0.3}},
         ])
@@ -424,28 +422,28 @@ class TestScenarioModifications:
         assert len(applied) == 1
 
     def test_update_links_all(self):
-        from server import _apply_modifications
+        from risu.scenario_ops import _apply_modifications
         sc, _ = _apply_modifications(self._base(), [
             {"action": "update_links", "all": True, "set": {"free_flow_speed": 10}},
         ])
         assert all(l["free_flow_speed"] == 10 for l in sc["links"])
 
     def test_unknown_link_name_raises(self):
-        from server import _apply_modifications
+        from risu.scenario_ops import _apply_modifications
         with pytest.raises(ValueError, match="r99"):
             _apply_modifications(self._base(), [
                 {"action": "update_links", "names": ["r99"], "set": {"capacity": 1}},
             ])
 
     def test_update_demands_scale(self):
-        from server import _apply_modifications
+        from risu.scenario_ops import _apply_modifications
         sc, _ = _apply_modifications(self._base(), [
             {"action": "update_demands", "all": True, "scale_flow": 1.5},
         ])
         assert sc["demands"][0]["flow"] == 0.6
 
     def test_remove_nodes_cascades(self):
-        from server import _apply_modifications
+        from risu.scenario_ops import _apply_modifications
         sc, _ = _apply_modifications(self._base(), [
             {"action": "remove_nodes", "names": ["B"]},
         ])
@@ -454,7 +452,7 @@ class TestScenarioModifications:
         assert len(sc["demands"]) == 1  # A→C は残る
 
     def test_add_and_signal(self):
-        from server import _apply_modifications
+        from risu.scenario_ops import _apply_modifications
         sc, _ = _apply_modifications(self._base(), [
             {"action": "update_nodes", "names": ["B"], "set": {"signal": [30, 30]}},
             {"action": "update_links", "names": ["r1"], "set": {"signal_group": 0}},
@@ -466,7 +464,7 @@ class TestScenarioModifications:
         assert len(sc["demands"]) == 2
 
     def test_base_scenario_not_mutated(self):
-        from server import _apply_modifications
+        from risu.scenario_ops import _apply_modifications
         base = self._base()
         _apply_modifications(base, [
             {"action": "update_links", "all": True, "set": {"capacity": 0.1}},
@@ -478,7 +476,8 @@ class TestScenarioModifications:
         import asyncio
         import types
         import json as _json
-        from server import _handle_rerun_simulation, _store_sim
+        from risu.results import _store_sim
+        from risu.tools import _handle_rerun_simulation
 
         base_result = _run_uxsim(SimulationInput(**self._base()))
         _store_sim("rerun_base", base_result)
@@ -503,7 +502,7 @@ class TestScenarioModifications:
     def test_rerun_handler_bad_sim_id(self):
         import asyncio
         import types
-        from server import _handle_rerun_simulation
+        from risu.tools import _handle_rerun_simulation
         content, new_id, is_err = asyncio.run(_handle_rerun_simulation(
             {"base_sim_id": "no_such_id", "modifications": []},
             types.SimpleNamespace(messages=[])))
@@ -511,7 +510,7 @@ class TestScenarioModifications:
 
     def test_generate_demands_random(self):
         """ノード名を知らなくてもサーバー側でランダム OD を生成できる"""
-        from server import _apply_modifications
+        from risu.scenario_ops import _apply_modifications
         sc, applied = _apply_modifications(self._base(), [
             {"action": "generate_demands", "strategy": "random",
              "n_pairs": 5, "flow_per_pair": 0.1, "seed": 42, "clear_existing": True},
@@ -530,7 +529,7 @@ class TestScenarioModifications:
         assert sc["demands"] == sc2["demands"]
 
     def test_generate_demands_flow_total(self):
-        from server import _apply_modifications
+        from risu.scenario_ops import _apply_modifications
         sc, _ = _apply_modifications(self._base(), [
             {"action": "generate_demands", "strategy": "random",
              "n_pairs": 4, "flow_total": 1.0, "clear_existing": True},
@@ -538,14 +537,14 @@ class TestScenarioModifications:
         assert all(d["flow"] == 0.25 for d in sc["demands"])
 
     def test_generate_demands_boundary(self):
-        from server import _apply_modifications
+        from risu.scenario_ops import _apply_modifications
         sc, _ = _apply_modifications(self._base(), [
             {"action": "generate_demands", "strategy": "boundary", "clear_existing": True},
         ])
         assert len(sc["demands"]) >= 2  # 周縁ノード全ペア
 
     def test_set_params_sets_seed_and_reaction_time(self):
-        from server import _apply_modifications
+        from risu.scenario_ops import _apply_modifications
         sc, applied = _apply_modifications(self._base(), [
             {"action": "set_params", "random_seed": 42, "reaction_time": 1.7},
         ])
@@ -557,7 +556,7 @@ class TestScenarioModifications:
         assert "random_seed" not in sc2 and sc2["reaction_time"] == 1.7
 
     def test_set_params_rejects_unknown_field(self):
-        from server import _apply_modifications
+        from risu.scenario_ops import _apply_modifications
         with pytest.raises(ValueError, match="set_params"):
             _apply_modifications(self._base(), [{"action": "set_params", "foo": 1}])
         with pytest.raises(ValueError, match="set_params"):
@@ -565,7 +564,7 @@ class TestScenarioModifications:
 
     def test_seed_survives_rerun_derivation(self):
         """base に seed があれば，別の差分だけ当てた派生シナリオにも同じ seed が残る．"""
-        from server import _apply_modifications
+        from risu.scenario_ops import _apply_modifications
         base = self._base(); base["random_seed"] = 7; base["reaction_time"] = 1.5
         sc, _ = _apply_modifications(base, [
             {"action": "update_links", "names": ["r1"], "set": {"capacity": 0.3}},
@@ -592,7 +591,7 @@ class TestNetworkInfo:
         return "info_test"
 
     def test_summary(self, sim_id):
-        from server import _handle_get_network_info
+        from risu.tools import _handle_get_network_info
         content, is_err = _handle_get_network_info({"sim_id": sim_id})
         assert not is_err
         d = json.loads(content)
@@ -601,7 +600,7 @@ class TestNetworkInfo:
         assert len(d["sample_node_names"]) == 20
 
     def test_nodes_paging_and_filter(self, sim_id):
-        from server import _handle_get_network_info
+        from risu.tools import _handle_get_network_info
         content, _ = _handle_get_network_info(
             {"sim_id": sim_id, "include": "nodes", "limit": 10, "offset": 5})
         d = json.loads(content)
@@ -615,14 +614,14 @@ class TestNetworkInfo:
         assert d["matched"] == 11
 
     def test_limit_cap(self, sim_id):
-        from server import _handle_get_network_info
+        from risu.tools import _handle_get_network_info
         content, _ = _handle_get_network_info(
             {"sim_id": sim_id, "include": "nodes", "limit": 9999})
         d = json.loads(content)
         assert len(d["nodes"]) <= 200
 
     def test_bad_sim_id(self):
-        from server import _handle_get_network_info
+        from risu.tools import _handle_get_network_info
         content, is_err = _handle_get_network_info({"sim_id": "nope"})
         assert is_err
 
@@ -648,17 +647,17 @@ class TestConversationContext:
         results_store.pop(sim_id, None)
 
     def _body(self, last_sim_id):
-        from server import ChatInput
+        from risu.schema import ChatInput
         return ChatInput(messages=[{"role": "user", "content": "hi"}],
                          last_sim_id=last_sim_id)
 
     def test_no_last_sim_id_injects_nothing(self, stored_sim):
         # results_store に sim があっても，会話が指定しなければ注入しない
-        from server import _conversation_context_block
+        from risu.tools import _conversation_context_block
         assert _conversation_context_block(self._body(None)) == ""
 
     def test_valid_last_sim_id_injects_that_sim(self, stored_sim):
-        from server import _conversation_context_block
+        from risu.tools import _conversation_context_block
         block = _conversation_context_block(self._body(stored_sim))
         assert stored_sim in block
         assert f'rerun_simulation(base_sim_id="{stored_sim}")' in block
@@ -666,11 +665,11 @@ class TestConversationContext:
 
     def test_unknown_last_sim_id_injects_nothing(self, stored_sim):
         # サーバー再起動などで sim が消えた場合は注入しない
-        from server import _conversation_context_block
+        from risu.tools import _conversation_context_block
         assert _conversation_context_block(self._body("gone123")) == ""
 
     def test_conversation_sim_id_helper(self, stored_sim):
-        from server import _conversation_sim_id
+        from risu.tools import _conversation_sim_id
         assert _conversation_sim_id(self._body(stored_sim)) == stored_sim
         assert _conversation_sim_id(self._body(None)) is None
         assert _conversation_sim_id(self._body("  ")) is None
@@ -1145,13 +1144,13 @@ class TestToolDefinitions:
     """LLM ツール定義がサーバー実装と整合していることを検証"""
 
     def test_claude_tools_defined(self):
-        from server import CLAUDE_TOOLS
+        from risu.prompts import CLAUDE_TOOLS
         tool_names = [t["name"] for t in CLAUDE_TOOLS]
         assert "run_simulation" in tool_names
         assert "get_simulation_data" in tool_names
 
     def test_run_simulation_schema(self):
-        from server import CLAUDE_TOOLS
+        from risu.prompts import CLAUDE_TOOLS
         tool = next(t for t in CLAUDE_TOOLS if t["name"] == "run_simulation")
         schema = tool["input_schema"]
         assert "nodes" in schema["properties"]
@@ -1159,7 +1158,7 @@ class TestToolDefinitions:
         assert "demands" in schema["properties"]
 
     def test_get_simulation_data_schema(self):
-        from server import CLAUDE_TOOLS
+        from risu.prompts import CLAUDE_TOOLS
         tool = next(t for t in CLAUDE_TOOLS if t["name"] == "get_simulation_data")
         schema = tool["input_schema"]
         assert "sim_id" in schema["properties"]
@@ -1168,7 +1167,7 @@ class TestToolDefinitions:
         """
         [修正履歴] AI の一人称を RISU に変更した．
         """
-        from server import SYSTEM_PROMPT
+        from risu.prompts import SYSTEM_PROMPT
         assert "RISU" in SYSTEM_PROMPT
         assert "一人称" in SYSTEM_PROMPT or "RISU" in SYSTEM_PROMPT
 
@@ -1176,7 +1175,7 @@ class TestToolDefinitions:
         """
         [修正履歴] チャート生成の指示がシステムプロンプトに含まれる．
         """
-        from server import SYSTEM_PROMPT
+        from risu.prompts import SYSTEM_PROMPT
         assert "chart" in SYSTEM_PROMPT.lower() or "チャート" in SYSTEM_PROMPT or "グラフ" in SYSTEM_PROMPT
 
 
@@ -1440,7 +1439,7 @@ class TestPostProcessingPipeline:
 
     def test_select_frames_no_thinning_when_small(self):
         import numpy as np
-        from server import _select_frames
+        from risu.simulation import _select_frames
         tk = np.array([0, 50, 50, 100, 150, 150, 150], dtype=np.int64)
         kept, fidx = _select_frames(tk, max_frames=200)
         assert kept.tolist() == [0, 50, 100, 150]
@@ -1448,7 +1447,7 @@ class TestPostProcessingPipeline:
 
     def test_select_frames_thins_to_max(self):
         import numpy as np
-        from server import _select_frames
+        from risu.simulation import _select_frames
         # 0.1 秒精度キーで 1000 ユニーク時刻 → max 200 なら 5 個おき
         tk = np.repeat(np.arange(1000, dtype=np.int64) * 50, 3)
         kept, fidx = _select_frames(tk, max_frames=200)
@@ -1461,13 +1460,22 @@ class TestPostProcessingPipeline:
     def test_select_frames_matches_unique_fallback(self):
         """LUT 経路と np.unique 経路（想定外に大きな時刻）は同じ結果を返す"""
         import numpy as np
-        import server
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
         rng = np.random.default_rng(0)
         tk = rng.integers(0, 3000, size=5000, dtype=np.int64) * 10
-        kept_a, fidx_a = server._select_frames(tk, 100)
+        kept_a, fidx_a = risu.simulation._select_frames(tk, 100)
         # 巨大な値を足して汎用経路を強制し，同じオフセットを引いて比較
         off = 60_000_000
-        kept_b, fidx_b = server._select_frames(tk + off, 100)
+        kept_b, fidx_b = risu.simulation._select_frames(tk + off, 100)
         assert (kept_b - off).tolist() == kept_a.tolist()
         assert fidx_b.tolist() == fidx_a.tolist()
 
@@ -1479,24 +1487,42 @@ class TestPostProcessingPipeline:
         """uxsim の内部 API（CLAUDE.md §3.6）が使えなくなると，動作は止まらず車両別ログの
         フォールバックで「遅くなるだけ」なので気づけない．cpp backend がある環境では
         高速経路が効いていることを CI で固定する（uxsim 更新時の検知）．"""
-        import server
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
         rt = _run_uxsim(BOTTLENECK_SCENARIO)["_runtime"]
-        assert rt["uxsim_version"] == server.UXSIM_VERSION
+        assert rt["uxsim_version"] == risu.runtime.UXSIM_VERSION
         if rt["backend"] != "cpp":
             pytest.skip("uxsim cpp backend が無い環境（高速経路は cpp 前提）")
         assert rt["fast_path"] is True, (
             f"uxsim {rt['uxsim_version']} で車両ログの高速経路が使えずフォールバックしている．"
             f"§3.6 の内部 API（build_all_vehicle_logs_flat_compact / _LOG_STATE_MAP / offsets）を確認: "
-            f"{server.RUNTIME_STATUS.get('fast_path_error')}")
-        assert server.RUNTIME_STATUS["fast_path"] is True
+            f"{risu.runtime.RUNTIME_STATUS.get('fast_path_error')}")
+        assert risu.runtime.RUNTIME_STATUS["fast_path"] is True
 
     def test_healthz_reports_uxsim_runtime(self):
         from fastapi.testclient import TestClient
-        import server
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
         _run_uxsim(BOTTLENECK_SCENARIO)
-        body = TestClient(server.app).get("/healthz").json()
+        body = TestClient(risu.api.app).get("/healthz").json()
         assert body["status"] == "ok"
-        assert body["uxsim"]["uxsim_version"] == server.UXSIM_VERSION
+        assert body["uxsim"]["uxsim_version"] == risu.runtime.UXSIM_VERSION
         assert body["uxsim"]["backend"] in ("cpp", "python")
         assert body["uxsim"]["fast_path"] in (True, False)
 
@@ -1519,10 +1545,19 @@ class TestPostProcessingPipeline:
 
     def test_vehicle_sampling_when_over_point_limit(self, monkeypatch):
         """総点数が上限を超えたら車両を等間隔サンプリングし，timeline / 統計は変わらない"""
-        import server
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
         base = _run_uxsim(GRID_BIDIRECTIONAL_SCENARIO)
         total = sum(int(len(c["ids"])) for c in base["frames"].values())
-        monkeypatch.setattr(server, "MAX_FRAME_POINTS", max(1, total // 3))
+        monkeypatch.setattr(risu.simulation, "MAX_FRAME_POINTS", max(1, total // 3))
         sampled = _run_uxsim(GRID_BIDIRECTIONAL_SCENARIO)
         step = sampled["vehicle_sample_step"]
         assert step >= 2
@@ -1565,11 +1600,20 @@ class TestPostProcessingPipeline:
     def test_results_endpoint_gzip_cached(self):
         """/results は gzip 済みバイト列を返し，2 回目はキャッシュを使う．identity でも同じ内容．"""
         from fastapi.testclient import TestClient
-        import server
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
         sid = "test_results_gz"
-        server._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        risu.results._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
         try:
-            c = TestClient(server.app)
+            c = TestClient(risu.api.app)
             r = c.get(f"/results/{sid}", headers={"Accept-Encoding": "gzip"})
             assert r.status_code == 200
             assert r.headers.get("content-encoding") == "gzip"
@@ -1595,11 +1639,20 @@ class TestPostProcessingPipeline:
 
     def test_envelope_json_stdlib_parseable(self):
         """orjson が直列化した numpy 列は標準 json で読み戻せる（クライアント互換）"""
-        import server
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
         sid = "test_env_json"
-        server._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        risu.results._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
         try:
-            d = json.loads(server._envelope_json_bytes(sid))
+            d = json.loads(risu.results._envelope_json_bytes(sid))
             assert d["result"]["link_names"] == results_store[sid]["link_names"]
             assert d["result"]["frame_times"] == results_store[sid]["frame_times"]
         finally:
@@ -1623,11 +1676,20 @@ class TestLLMTokenSaving:
     """
 
     def _body(self, msgs, last_sim_id=None):
-        from server import ChatInput
+        from risu.schema import ChatInput
         return ChatInput(messages=msgs, last_sim_id=last_sim_id)
 
     def test_system_prompt_stays_static_and_context_goes_to_last_user(self):
-        import server
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
         sid = "tok_ctx"
         results_store[sid] = {
             "geojson": {"features": [{"properties": {"name": "L1"}}]},
@@ -1639,7 +1701,7 @@ class TestLLMTokenSaving:
                 {"role": "assistant", "content": "a1"},
                 {"role": "user", "content": "u2"},
             ], last_sim_id=sid)
-            msgs = server._build_llm_messages(body)
+            msgs = risu.llm._build_llm_messages(body)
             assert [m["role"] for m in msgs] == ["user", "assistant", "user"]
             # 履歴の最後の assistant にキャッシュ境界
             a1 = msgs[1]["content"]
@@ -1649,34 +1711,52 @@ class TestLLMTokenSaving:
             assert u2[0]["text"] == "u2" and "cache_control" not in u2[0]
             assert sid in u2[1]["text"] and "cache_control" in u2[1]
             # 送信用には内部フラグが残らない
-            api = server._api_messages(msgs)
+            api = risu.llm._api_messages(msgs)
             assert all("_tail_marked" not in b for m in api for b in m["content"])
             # コンテキストが無い場合は本文ブロックだけ（末尾にキャッシュ境界）
-            msgs2 = server._build_llm_messages(self._body([{"role": "user", "content": "hi"}]))
+            msgs2 = risu.llm._build_llm_messages(self._body([{"role": "user", "content": "hi"}]))
             assert len(msgs2[0]["content"]) == 1 and "cache_control" in msgs2[0]["content"][0]
         finally:
             results_store.pop(sid, None)
 
     def test_tail_cache_mark_moves_with_rounds(self):
-        import server
-        msgs = server._build_llm_messages(self._body([{"role": "user", "content": "hi"}]))
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
+        msgs = risu.llm._build_llm_messages(self._body([{"role": "user", "content": "hi"}]))
         msgs.append({"role": "assistant", "content": [{"type": "text", "text": "calling"}]})
         msgs.append({"role": "user", "content": [
             {"type": "tool_result", "tool_use_id": "t1", "content": "{}"}]})
-        server._mark_cache_tail(msgs)
+        risu.llm._mark_cache_tail(msgs)
         # 末尾の印は tool_result に移り，以前の末尾（user "hi"）からは外れる
         assert "cache_control" in msgs[-1]["content"][-1]
         assert "cache_control" not in msgs[0]["content"][0]
 
     def test_trim_history_hysteresis_and_first_role(self, monkeypatch):
-        import server
-        monkeypatch.setattr(server, "MAX_HISTORY_CHARS", 1000)
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
+        monkeypatch.setattr(risu.llm, "MAX_HISTORY_CHARS", 1000)
         msgs = []
         for i in range(20):
             msgs.append({"role": "user", "content": f"u{i} " + "x" * 100})
             msgs.append({"role": "assistant", "content": f"a{i} " + "y" * 100})
         msgs.append({"role": "user", "content": "last"})
-        kept = server._trim_history(msgs)
+        kept = risu.llm._trim_history(msgs)
         assert kept[0]["role"] == "user"
         assert kept[-1]["content"] == "last"
         assert "省略" in kept[0]["content"]
@@ -1684,14 +1764,23 @@ class TestLLMTokenSaving:
         assert total <= 1000 // 2 + 200  # 予算の半分まで落とす（先頭の注記分は許容）
         # 予算内なら手を付けない
         small = msgs[-3:]
-        assert server._trim_history(small) is small
+        assert risu.llm._trim_history(small) is small
 
     def test_grid_template_and_auto_demands(self):
-        import server
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
         args = {"grid": {"nx": 4, "ny": 3, "spacing": 250, "free_flow_speed": 15},
                 "auto_demands": {"strategy": "random", "n_pairs": 5, "flow_per_pair": 0.1, "seed": 1},
                 "tmax": 1200}
-        scenario, info = server._expand_run_simulation_args(args)
+        scenario, info = risu.scenario_ops._expand_run_simulation_args(args)
         assert len(scenario["nodes"]) == 12
         # 双方向: 横 (3×3) + 縦 (4×2) = 17 本 × 2
         assert len(scenario["links"]) == 34
@@ -1703,18 +1792,18 @@ class TestLLMTokenSaving:
         r = _run_uxsim(SimulationInput(**scenario))
         assert r["stats"]["total_trips"] > 0
         # 片方向グリッド
-        one, _ = server._expand_run_simulation_args(
+        one, _ = risu.scenario_ops._expand_run_simulation_args(
             {"grid": {"nx": 3, "bidirectional": False}, "demands": [
                 {"orig": "n0_0", "dest": "n2_2", "t_start": 0, "t_end": 100, "flow": 0.2}]})
         assert len(one["links"]) == 12
         # nodes/links も demands も無ければエラー
         with pytest.raises(ValueError):
-            server._expand_run_simulation_args({"nodes": [], "links": [], "demands": []})
+            risu.scenario_ops._expand_run_simulation_args({"nodes": [], "links": [], "demands": []})
         with pytest.raises(ValueError):
-            server._expand_run_simulation_args({"grid": {"nx": 3}})
+            risu.scenario_ops._expand_run_simulation_args({"grid": {"nx": 3}})
 
     def test_generate_demands_shared_with_rerun(self):
-        from server import _apply_modifications
+        from risu.scenario_ops import _apply_modifications
         sc = {"nodes": [{"name": f"n{i}", "x": i * 100, "y": 0} for i in range(6)],
               "links": [{"name": f"l{i}", "start": f"n{i}", "end": f"n{i+1}", "length": 100} for i in range(5)],
               "demands": [], "tmax": 600}
@@ -1725,20 +1814,29 @@ class TestLLMTokenSaving:
             _apply_modifications(sc, [{"action": "generate_demands", "strategy": "nope"}])
 
     def test_chart_data_refs_resolved(self):
-        import server
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
         sid = "tok_chart"
-        server._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        risu.results._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
         try:
             cache = {}
             text = ('結果です．\n```chart\n{"type":"line","data":{"labels":{"$data":"time_labels"},'
                     '"datasets":[{"label":"v","data":{"$data":"network_avg_speed"}},'
                     '{"label":"r1","data":{"$data":"link_speeds.r1","sim_id":"%s"}},'
                     '{"label":"missing","data":{"$data":"nope.x"}}]}}\n```\n以上．' % sid)
-            charts, clean = server._extract_charts(text, cache, sid)
+            charts, clean = risu.llm._extract_charts(text, cache, sid)
             assert clean == "結果です．\n\n以上．".replace("\n\n", "\n\n") or "chart" not in clean
             assert len(charts) == 1
             d = charts[0]["data"]
-            sd = server._get_simulation_data(sid)
+            sd = risu.aggregate._get_simulation_data(sid)
             assert d["labels"] == sd["time_labels"]
             assert d["datasets"][0]["data"] == sd["network_avg_speed"]
             assert d["datasets"][1]["data"] == sd["link_speeds"]["r1"]
@@ -1748,14 +1846,23 @@ class TestLLMTokenSaving:
             results_store.pop(sid, None)
 
     def test_simulation_data_is_compact(self):
-        import server
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
         sid = "tok_compact"
-        server._store_sim(sid, _run_uxsim(GRID_BIDIRECTIONAL_SCENARIO), {"type": "manual"})
+        risu.results._store_sim(sid, _run_uxsim(GRID_BIDIRECTIONAL_SCENARIO), {"type": "manual"})
         try:
-            sd = server._get_simulation_data(sid)
+            sd = risu.aggregate._get_simulation_data(sid)
             assert len(sd["time_labels"]) <= 30
             assert len(sd["link_speeds"]) <= 20
-            sd2 = server._get_simulation_data(sid, points=10, max_links=0)
+            sd2 = risu.aggregate._get_simulation_data(sid, points=10, max_links=0)
             assert len(sd2["time_labels"]) <= 10 and sd2["link_speeds"] == {}
             assert len(json.dumps(sd)) < 8000
         finally:
@@ -1766,7 +1873,16 @@ class TestLLMTokenSaving:
         grid テンプレートで実行 → get_simulation_data → $data 参照チャート → usage 付き done．
         各リクエストの messages にキャッシュ境界が正しく付くことも確認．"""
         import anthropic
-        import server
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
         from types import SimpleNamespace as NS
 
         captured = []
@@ -1818,15 +1934,15 @@ class TestLLMTokenSaving:
                 self.messages = FakeMessages()
 
         monkeypatch.setattr(anthropic, "Anthropic", FakeClient)
-        monkeypatch.setattr(server, "ANTHROPIC_API_KEY", "dummy")
+        monkeypatch.setattr(risu.llm, "ANTHROPIC_API_KEY", "dummy")
 
-        body = server.ChatInput(messages=[
+        body = risu.schema.ChatInput(messages=[
             {"role": "user", "content": "前の話"}, {"role": "assistant", "content": "前の返事"},
             {"role": "user", "content": "3x3 グリッドで実行してグラフも"}])
 
         import asyncio as _aio
         async def run():
-            resp = await server._chat_claude_stream(body)
+            resp = await risu.llm._chat_claude_stream(body)
             events = []
             async for chunk in resp.body_iterator:
                 for line in chunk.split("\n\n"):
@@ -1840,13 +1956,13 @@ class TestLLMTokenSaving:
             assert done["usage"]["calls"] == 3 and done["usage"]["output_tokens"] == 60
             assert done["usage"]["cache_read_tokens"] == 150
             assert len(done["charts"]) == 1
-            sd = server._get_simulation_data(done["sim_id"])
+            sd = risu.aggregate._get_simulation_data(done["sim_id"])
             assert done["charts"][0]["data"]["labels"] == sd["time_labels"]
             assert "```" not in done["content"]
             # ─ リクエスト構造 ─
             assert len(captured) == 3
             for kw in captured:
-                assert kw["system"][0]["text"] == server.SYSTEM_PROMPT  # system は不変
+                assert kw["system"][0]["text"] == risu.prompts.SYSTEM_PROMPT  # system は不変
                 assert "cache_control" in kw["system"][0]
                 assert "cache_control" in kw["tools"][-1]
                 msgs = kw["messages"]
@@ -1869,13 +1985,22 @@ class TestLLMTokenSaving:
 
 class TestStoreLimitAndUsageCost:
     def test_results_store_evicts_oldest(self, monkeypatch):
-        import server
-        monkeypatch.setattr(server, "MAX_RESULTS", 2)
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
+        monkeypatch.setattr(risu.results, "MAX_RESULTS", 2)
         base = _run_uxsim(BOTTLENECK_SCENARIO)
         ids = ["evict_a", "evict_b", "evict_c"]
         try:
             for sid in ids:
-                server._store_sim(sid, dict(base), {"type": "manual"})
+                risu.results._store_sim(sid, dict(base), {"type": "manual"})
             assert "evict_a" not in results_store
             assert "evict_b" in results_store and "evict_c" in results_store
         finally:
@@ -1885,12 +2010,21 @@ class TestStoreLimitAndUsageCost:
     def test_usage_cost_never_negative_with_cached_input(self):
         """新 API の usage は input_tokens にキャッシュ分を含まない．以前の式は負の円額を出した"""
         from types import SimpleNamespace as NS
-        import server
-        u = server._log_usage("test", NS(usage=NS(input_tokens=2, output_tokens=190,
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
+        u = risu.llm._log_usage("test", NS(usage=NS(input_tokens=2, output_tokens=190,
                                                   cache_read_input_tokens=8234,
                                                   cache_creation_input_tokens=1359)))
         assert u["cost_jpy"] > 0
-        tally = server._UsageTally()
+        tally = risu.llm._UsageTally()
         tally.add("t", NS(usage=NS(input_tokens=2, output_tokens=10, cache_read_input_tokens=10000,
                                    cache_creation_input_tokens=0)))
         d = tally.as_dict()
@@ -1984,7 +2118,7 @@ class TestStandalonePipeline:
         W = build_world(scenario_from_dict(self.SCENARIO_DICT),
                         disable_basic_analysis=True)
         W.exec_simulation()
-        from server import _trip_stats
+        from risu.simulation import _trip_stats
         total, completed, avg_tt, _arrivals = _trip_stats(W)
 
         assert total == s["total_trips"]
@@ -2081,7 +2215,7 @@ class TestStandalonePipeline:
 
     def test_scenario_envelope_keeps_seed(self):
         """/results/{id}/scenario（再現用 DL）に random_seed / reaction_time が残る．"""
-        from server import _build_envelope, _store_sim
+        from risu.results import _build_envelope, _store_sim
         res = _run_uxsim(SimulationInput(**self.SEEDED))
         _store_sim("seed_env_test", res)
         try:
@@ -2165,7 +2299,7 @@ class TestFrameWireEncodingV3:
 
     @classmethod
     def setup_class(cls):
-        from server import _store_sim
+        from risu.results import _store_sim
         cls.res = _run_uxsim(BOTTLENECK_SCENARIO)
         cls.sim_id = "wire_v3_test"
         _store_sim(cls.sim_id, cls.res)
@@ -2191,7 +2325,7 @@ class TestFrameWireEncodingV3:
     def test_roundtrip_matches_within_tolerance(self):
         """量子化 → 復元で，描画に影響しない誤差に収まること．"""
         import numpy as np
-        from server import _encode_frames_v3
+        from risu.results import _encode_frames_v3
 
         src = self.res["frames"]
         enc = _encode_frames_v3(src)
@@ -2219,7 +2353,7 @@ class TestFrameWireEncodingV3:
     def test_envelope_marks_v3_and_shrinks(self):
         """エンベロープの frame_format が v3 になり，バイト数が v2 より小さいこと．"""
         import orjson
-        from server import _build_envelope, _envelope_json_bytes
+        from risu.results import _build_envelope, _envelope_json_bytes
 
         v2_env = _build_envelope(self.sim_id, include_result=True)
         assert v2_env["result"]["frame_format"] == "columnar_v2"
@@ -2238,7 +2372,7 @@ class TestFrameWireEncodingV3:
         （_enc_cache は一度作ると使い回されるため，壊すと以後ずっと壊れる）．
         """
         import numpy as np
-        from server import _envelope_json_bytes
+        from risu.results import _envelope_json_bytes
 
         before = {k: np.asarray(v["xs"]).copy() for k, v in self.res["frames"].items()}
         _envelope_json_bytes(self.sim_id)
@@ -2276,7 +2410,7 @@ class TestToolDispatch:
 
     @staticmethod
     def _body(messages=None, last_sim_id=None):
-        from server import ChatInput
+        from risu.schema import ChatInput
         return ChatInput(
             messages=messages or [{"role": "user", "content": "テスト"}],
             last_sim_id=last_sim_id,
@@ -2285,7 +2419,7 @@ class TestToolDispatch:
     def _run(self, blocks, *, follow_up=False, body=None):
         """dispatch を回して (progress メッセージ列, tool_results, state) を返す．"""
         import asyncio
-        from server import _ToolTurnState, _dispatch_tool_blocks
+        from risu.tools import _ToolTurnState, _dispatch_tool_blocks
 
         state = _ToolTurnState(body or self._body())
         progress, results = [], []
@@ -2345,7 +2479,7 @@ class TestToolDispatch:
 
     def test_get_simulation_data_fills_cache_for_chart_refs(self):
         """get_simulation_data の結果が $data 解決用キャッシュに入ること．"""
-        from server import _store_sim
+        from risu.results import _store_sim
         sid = "dispatch_data_test"
         _store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
         try:
@@ -2377,7 +2511,7 @@ class TestToolDispatch:
     def test_sync_path_helper_drops_progress(self):
         """_collect_tool_results は進捗を捨てて results だけ返す．"""
         import asyncio
-        from server import _ToolTurnState, _collect_tool_results
+        from risu.tools import _ToolTurnState, _collect_tool_results
 
         state = _ToolTurnState(self._body())
         blocks = [self._tb("get_simulation_data", {"sim_id": "x"}, "s1")]
@@ -2389,7 +2523,7 @@ class TestToolDispatch:
         """同じ入力なら，進捗を拾う経路（SSE）と捨てる経路（同期）で
         tool_result が完全に一致すること．共通化の目的そのもの．"""
         import asyncio
-        from server import _ToolTurnState, _collect_tool_results
+        from risu.tools import _ToolTurnState, _collect_tool_results
 
         blocks = [
             self._tb("get_network_info", {"sim_id": "nope"}, "a"),
@@ -2501,7 +2635,16 @@ class TestChatStreamingPath:
         import asyncio
         import sys
 
-        import server
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
 
         anthropic_mod = sys.modules.get("anthropic")
         if anthropic_mod is None:
@@ -2511,7 +2654,7 @@ class TestChatStreamingPath:
         anthropic_mod.Anthropic = lambda **kw: _FakeAnthropic(script)
         try:
             async def go():
-                resp = await server._chat_claude_stream(body)
+                resp = await risu.llm._chat_claude_stream(body)
                 chunks = []
                 async for c in resp.body_iterator:
                     chunks.append(c if isinstance(c, str) else c.decode("utf-8"))
@@ -2530,7 +2673,7 @@ class TestChatStreamingPath:
 
     @staticmethod
     def _body(text="テスト"):
-        from server import ChatInput
+        from risu.schema import ChatInput
         return ChatInput(messages=[{"role": "user", "content": text}], last_sim_id=None)
 
     def test_text_only_response_streams_and_finishes(self):
@@ -2638,17 +2781,17 @@ class TestLicenseHygiene:
         code = f'''
 import sys, os
 os.environ["LLM_BACKEND"] = "mock"
-import server
-sc = server.SimulationInput(
+import risu.aggregate, risu.api, risu.llm, risu.mcp_server, risu.prompts, risu.results, risu.runtime, risu.scenario_ops, risu.schema, risu.simulation
+sc = risu.schema.SimulationInput(
     name="lic", tmax=300, deltan=5,
     nodes=[{{"name": "A", "x": 0, "y": 0}}, {{"name": "B", "x": 500, "y": 0}}],
     links=[{{"name": "AB", "start": "A", "end": "B", "length": 500}}],
     demands=[{{"orig": "A", "dest": "B", "t_start": 0, "t_end": 100, "flow": 0.3}}],
 )
-res = server._run_uxsim(sc)
-server._store_sim("lic", res)
-server._envelope_json_bytes("lic")
-server._get_simulation_data("lic")
+res = risu.simulation._run_uxsim(sc)
+risu.results._store_sim("lic", res)
+risu.results._envelope_json_bytes("lic")
+risu.aggregate._get_simulation_data("lic")
 qt = [m for m in sys.modules if m.split(".")[0] in {self.GPL_MODULES!r}]
 print("QT:" + ",".join(sorted(qt)))
 '''
@@ -2685,17 +2828,17 @@ class _Block:
 
 sys.meta_path.insert(0, _Block())
 os.environ["LLM_BACKEND"] = "mock"
-import server
-sc = server.SimulationInput(
+import risu.aggregate, risu.api, risu.llm, risu.mcp_server, risu.prompts, risu.results, risu.runtime, risu.scenario_ops, risu.schema, risu.simulation
+sc = risu.schema.SimulationInput(
     name="noqt", tmax=300, deltan=5,
     nodes=[{"name": "A", "x": 0, "y": 0}, {"name": "B", "x": 500, "y": 0}],
     links=[{"name": "AB", "start": "A", "end": "B", "length": 500}],
     demands=[{"orig": "A", "dest": "B", "t_start": 0, "t_end": 100, "flow": 0.3}],
 )
-res = server._run_uxsim(sc)
-server._store_sim("noqt", res)
-assert b'"columnar_v3"' in server._envelope_json_bytes("noqt")
-assert server._get_simulation_data("noqt")
+res = risu.simulation._run_uxsim(sc)
+risu.results._store_sim("noqt", res)
+assert b'"columnar_v3"' in risu.results._envelope_json_bytes("noqt")
+assert risu.aggregate._get_simulation_data("noqt")
 
 from uxsim_bridge import build_world, scenario_from_dict
 W = build_world(scenario_from_dict({
@@ -2757,9 +2900,18 @@ class TestResultsEncodingNegotiation:
 
     @classmethod
     def setup_class(cls):
-        import server
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
         cls.sid = "test_enc_negotiation"
-        server._store_sim(cls.sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        risu.results._store_sim(cls.sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
 
     @classmethod
     def teardown_class(cls):
@@ -2768,40 +2920,94 @@ class TestResultsEncodingNegotiation:
     @staticmethod
     def _client():
         from fastapi.testclient import TestClient
-        import server
-        return TestClient(server.app)
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
+        return TestClient(risu.api.app)
 
     # ── 選択ロジック単体 ──────────────────────────
 
     def test_negotiate_prefers_zstd_when_available(self):
-        import server
-        if server._zstd is None:
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
+        if risu.results._zstd is None:
             pytest.skip("zstandard 未インストール")
-        assert server._negotiate_encoding("gzip, deflate, br, zstd") == "zstd"
-        assert server._negotiate_encoding("ZSTD") == "zstd", "大文字small文字を無視すべき"
+        assert risu.results._negotiate_encoding("gzip, deflate, br, zstd") == "zstd"
+        assert risu.results._negotiate_encoding("ZSTD") == "zstd", "大文字small文字を無視すべき"
 
     def test_negotiate_falls_back_to_gzip(self):
-        import server
-        assert server._negotiate_encoding("gzip, deflate, br") == "gzip"
-        assert server._negotiate_encoding("gzip") == "gzip"
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
+        assert risu.results._negotiate_encoding("gzip, deflate, br") == "gzip"
+        assert risu.results._negotiate_encoding("gzip") == "gzip"
 
     def test_negotiate_identity_when_nothing_supported(self):
-        import server
-        assert server._negotiate_encoding("") == "identity"
-        assert server._negotiate_encoding("identity") == "identity"
-        assert server._negotiate_encoding(None) == "identity"
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
+        assert risu.results._negotiate_encoding("") == "identity"
+        assert risu.results._negotiate_encoding("identity") == "identity"
+        assert risu.results._negotiate_encoding(None) == "identity"
 
     def test_negotiate_uses_gzip_if_zstandard_missing(self, monkeypatch):
         """zstandard が入っていない環境では zstd を要求されても gzip になる．"""
-        import server
-        monkeypatch.setattr(server, "_zstd", None)
-        assert server._negotiate_encoding("gzip, deflate, br, zstd") == "gzip"
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
+        monkeypatch.setattr(risu.results, "_zstd", None)
+        assert risu.results._negotiate_encoding("gzip, deflate, br, zstd") == "gzip"
 
     # ── エンドポイントの実挙動 ────────────────────
 
     def test_all_encodings_return_identical_payload(self):
         """圧縮方式が変わっても中身は同一（TestClient が透過的に解凍する）．"""
-        import server
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
         c = self._client()
         base = c.get(f"/results/{self.sid}", headers={"Accept-Encoding": "identity"})
         assert base.status_code == 200
@@ -2812,14 +3018,14 @@ class TestResultsEncodingNegotiation:
         assert gz.headers.get("content-encoding") == "gzip"
         assert gz.json() == expected
 
-        if server._zstd is not None:
+        if risu.results._zstd is not None:
             zs = c.get(f"/results/{self.sid}", headers={"Accept-Encoding": "gzip, zstd"})
             assert zs.headers.get("content-encoding") == "zstd"
             # TestClient(httpx) が zstd を解凍できない場合は自前で解凍して比較する
             try:
                 got = zs.json()
             except Exception:
-                got = json.loads(server._zstd.ZstdDecompressor().decompress(zs.content))
+                got = json.loads(risu.results._zstd.ZstdDecompressor().decompress(zs.content))
             assert got == expected
 
     def test_vary_header_is_set_exactly_once(self):
@@ -2840,9 +3046,18 @@ class TestResultsEncodingNegotiation:
 
     def test_cache_is_per_encoding_and_reused(self):
         """方式ごとに別キャッシュを持ち，2 回目は再圧縮しない．"""
-        import server
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
         sid = "test_enc_cache"
-        server._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        risu.results._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
         try:
             c = self._client()
             r1 = c.get(f"/results/{sid}", headers={"Accept-Encoding": "gzip"})
@@ -2853,7 +3068,7 @@ class TestResultsEncodingNegotiation:
             assert r2.content == r1.content
             assert results_store[sid]["_enc_cache"]["gzip"] is cache["gzip"], "再圧縮している"
 
-            if server._zstd is not None:
+            if risu.results._zstd is not None:
                 c.get(f"/results/{sid}", headers={"Accept-Encoding": "zstd"})
                 assert set(results_store[sid]["_enc_cache"]) == {"gzip", "zstd"}
         finally:
@@ -2861,18 +3076,36 @@ class TestResultsEncodingNegotiation:
 
     def test_zstd_payload_is_smaller_than_gzip(self):
         """zstd を選ぶ意味があること（同じ結果で実際に小さい）．"""
-        import server
-        if server._zstd is None:
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
+        if risu.results._zstd is None:
             pytest.skip("zstandard 未インストール")
-        gz = server._envelope_compressed_bytes(self.sid, "gzip")
-        zs = server._envelope_compressed_bytes(self.sid, "zstd")
+        gz = risu.results._envelope_compressed_bytes(self.sid, "gzip")
+        zs = risu.results._envelope_compressed_bytes(self.sid, "zstd")
         assert len(zs) < len(gz), f"zstd={len(zs)} >= gzip={len(gz)}"
 
     def test_gzip_wrapper_still_works(self):
         """既存の _envelope_gzip_bytes（後方互換ラッパー）が生きていること．"""
-        import server
-        assert server._envelope_gzip_bytes(self.sid) == \
-            server._envelope_compressed_bytes(self.sid, "gzip")
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
+        assert risu.results._envelope_gzip_bytes(self.sid) == \
+            risu.results._envelope_compressed_bytes(self.sid, "gzip")
 
 
 # ============================================================
@@ -2888,22 +3121,40 @@ class TestBindDefaults:
     """
 
     def test_default_host_is_loopback_only(self):
-        import server
-        assert server.RISU_HOST == "127.0.0.1", (
-            f"既定の待ち受けが {server.RISU_HOST} になっている．"
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
+        assert risu.api.RISU_HOST == "127.0.0.1", (
+            f"既定の待ち受けが {risu.api.RISU_HOST} になっている．"
             "認証が無いので既定は 127.0.0.1 でなければならない"
         )
 
     def test_default_reload_is_off(self):
         """オートリロードは開発用．既定で有効だとプロセスが 2 つ起動する．"""
-        import server
-        assert server.RISU_RELOAD is False
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
+        assert risu.api.RISU_RELOAD is False
 
     def test_host_and_port_are_overridable(self, monkeypatch):
         """別マシンから使いたい人は環境変数で明示的に開ける．"""
         import importlib
 
-        import server as _s
+        import risu.api as _s   # 待ち受け設定は risu.api が env から読む（server.py は再公開のみ）
         monkeypatch.setenv("RISU_HOST", "0.0.0.0")
         monkeypatch.setenv("RISU_PORT", "9000")
         monkeypatch.setenv("RISU_RELOAD", "1")
@@ -2920,9 +3171,18 @@ class TestBindDefaults:
 
     def test_cors_default_is_localhost_only(self):
         """CORS も既定は localhost のみ（ブラウザ経由の横取りを防ぐ）．"""
-        import server
-        assert all("localhost" in o or "127.0.0.1" in o for o in server.ALLOWED_ORIGINS), \
-            f"CORS の既定に外部オリジンが含まれている: {server.ALLOWED_ORIGINS}"
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
+        assert all("localhost" in o or "127.0.0.1" in o for o in risu.api.ALLOWED_ORIGINS), \
+            f"CORS の既定に外部オリジンが含まれている: {risu.api.ALLOWED_ORIGINS}"
 
 
 # ============================================================
@@ -2936,9 +3196,18 @@ class TestMcpParity:
     """
 
     def test_mcp_exposes_every_chat_tool_with_same_schema(self):
-        import server
-        tools = {t.name: t for t in server._mcp_tools()}
-        for t in server.CLAUDE_TOOLS:
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
+        tools = {t.name: t for t in risu.mcp_server._mcp_tools()}
+        for t in risu.prompts.CLAUDE_TOOLS:
             assert t["name"] in tools, f"MCP に {t['name']} が無い"
             assert tools[t["name"]].inputSchema == t["input_schema"]
             assert tools[t["name"]].description == t["description"]
@@ -2946,42 +3215,51 @@ class TestMcpParity:
 
     def test_mcp_roundtrip_through_shared_dispatcher(self):
         import asyncio
-        import server
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
 
         async def go():
             created = []
             try:
-                r = await server._mcp_call_tool("run_simulation", {
+                r = await risu.mcp_server._mcp_call_tool("run_simulation", {
                     "grid": {"nx": 3, "spacing": 500},
                     "auto_demands": {"strategy": "boundary", "flow_per_pair": 0.1},
                     "tmax": 600, "random_seed": 1,
                 })
                 d = json.loads(r); sid = d["sim_id"]; created.append(sid)
-                assert server.results_store[sid]["_meta"]["source"]["via"] == "mcp"
+                assert risu.results.results_store[sid]["_meta"]["source"]["via"] == "mcp"
 
-                r = await server._mcp_call_tool("get_simulation_data", {"sim_id": sid, "points": 10})
+                r = await risu.mcp_server._mcp_call_tool("get_simulation_data", {"sim_id": sid, "points": 10})
                 assert "network_avg_speed" in json.loads(r)
 
-                r = await server._mcp_call_tool("get_network_info", {"sim_id": sid, "include": "summary"})
+                r = await risu.mcp_server._mcp_call_tool("get_network_info", {"sim_id": sid, "include": "summary"})
                 assert "error" not in r.lower()[:40]
 
-                r = await server._mcp_call_tool("rerun_simulation", {
+                r = await risu.mcp_server._mcp_call_tool("rerun_simulation", {
                     "base_sim_id": sid,
                     "modifications": [{"action": "set_params", "random_seed": 2}],
                 })
                 d2 = json.loads(r); created.append(d2["sim_id"])
                 assert d2["sim_id"] != sid
-                assert server.results_store[d2["sim_id"]]["_scenario"]["random_seed"] == 2
+                assert risu.results.results_store[d2["sim_id"]]["_scenario"]["random_seed"] == 2
 
-                r = await server._mcp_call_tool("get_result", {"simulation_id": sid})
+                r = await risu.mcp_server._mcp_call_tool("get_result", {"simulation_id": sid})
                 assert "total_trips" in r
-                r = await server._mcp_call_tool("no_such_tool", {})
+                r = await risu.mcp_server._mcp_call_tool("no_such_tool", {})
                 assert "未知のツール" in r
-                r = await server._mcp_call_tool("get_result", {"simulation_id": "missing"})
+                r = await risu.mcp_server._mcp_call_tool("get_result", {"simulation_id": "missing"})
                 assert "見つかりません" in r
             finally:
                 for s in created:
-                    server.results_store.pop(s, None)
+                    risu.results.results_store.pop(s, None)
 
         asyncio.run(go())
 
@@ -2996,27 +3274,63 @@ class TestResultsPersistence:
 
     @pytest.fixture
     def store_dir(self, tmp_path, monkeypatch):
-        import server
-        monkeypatch.setattr(server, "RESULTS_DIR", str(tmp_path))
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
+        monkeypatch.setattr(risu.results, "RESULTS_DIR", str(tmp_path))
         return tmp_path
 
     def _store(self, sid):
-        import server
-        fut = server._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
+        fut = risu.results._store_sim(sid, _run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"})
         assert fut is not None
         assert fut.result(timeout=60) is not None
-        return server.results_store[sid]
+        return risu.results.results_store[sid]
 
     def test_disabled_by_default_writes_nothing(self, tmp_path, monkeypatch):
-        import server
-        monkeypatch.setattr(server, "RESULTS_DIR", "")
-        assert server._store_sim("p_off", _run_uxsim(BOTTLENECK_SCENARIO)) is None
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
+        monkeypatch.setattr(risu.results, "RESULTS_DIR", "")
+        assert risu.results._store_sim("p_off", _run_uxsim(BOTTLENECK_SCENARIO)) is None
         assert list(tmp_path.iterdir()) == []
-        server.results_store.pop("p_off", None)
+        risu.results.results_store.pop("p_off", None)
 
     def test_store_writes_file_and_reloads_after_eviction(self, store_dir):
         import numpy as np
-        import server
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
         sid = "p_reload"
         original = self._store(sid)
         files = list(store_dir.iterdir())
@@ -3024,10 +3338,10 @@ class TestResultsPersistence:
         orig_data = _get_simulation_data(sid)
 
         # メモリから消しても（再起動・MAX_RESULTS の追い出し相当）透過的に戻る
-        dict.pop(server.results_store, sid)
-        assert not dict.__contains__(server.results_store, sid)
-        assert sid in server.results_store
-        loaded = server.results_store[sid]
+        dict.pop(risu.results.results_store, sid)
+        assert not dict.__contains__(risu.results.results_store, sid)
+        assert sid in risu.results.results_store
+        loaded = risu.results.results_store[sid]
         assert loaded["_meta"]["persisted"] is True
         assert loaded["stats"] == original["stats"]
         assert loaded["_scenario"] == original["_scenario"]
@@ -3048,38 +3362,127 @@ class TestResultsPersistence:
         assert re_data["network_vehicle_count"] == orig_data["network_vehicle_count"]
         assert re_data["network_avg_speed"] == orig_data["network_avg_speed"]
         assert re_data["network_completed_count"] == orig_data["network_completed_count"]
-        server.results_store.pop(sid, None)
+        risu.results.results_store.pop(sid, None)
 
     def test_results_endpoint_serves_persisted_result(self, store_dir):
         from fastapi.testclient import TestClient
-        import server
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
         sid = "p_http"
         self._store(sid)
-        dict.pop(server.results_store, sid)
-        c = TestClient(server.app)
+        dict.pop(risu.results.results_store, sid)
+        c = TestClient(risu.api.app)
         r = c.get(f"/results/{sid}", headers={"Accept-Encoding": "gzip"})
         assert r.status_code == 200
         body = r.json()
         assert body["sim_id"] == sid and body["result"]["stats"]["total_trips"] > 0
         assert c.get(f"/results/{sid}/scenario").status_code == 200
-        server.results_store.pop(sid, None)
+        risu.results.results_store.pop(sid, None)
 
     def test_unsafe_ids_never_touch_disk(self, store_dir):
-        import server
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
         for bad in ("../x", "a/b", "", "x" * 65, "..\\x"):
-            assert bad not in server.results_store
-            assert server._persisted_path(bad) is None
+            assert bad not in risu.results.results_store
+            assert risu.results._persisted_path(bad) is None
 
     def test_downloaded_json_can_be_dropped_in(self, store_dir):
         """ダウンロードした .json+result（素の JSON）をディレクトリに置くだけで読める．"""
-        import server
+        import risu.aggregate
+        import risu.api
+        import risu.llm
+        import risu.mcp_server
+        import risu.prompts
+        import risu.results
+        import risu.runtime
+        import risu.scenario_ops
+        import risu.schema
+        import risu.simulation
         sid = "p_src"
         self._store(sid)
-        env_bytes = server._envelope_json_bytes(sid)
+        env_bytes = risu.results._envelope_json_bytes(sid)
         (store_dir / "dropped.json").write_bytes(env_bytes)
-        server.results_store.pop(sid, None)
-        assert "dropped" in server._persisted_ids()
-        assert "dropped" in server.results_store
+        risu.results.results_store.pop(sid, None)
+        assert "dropped" in risu.results._persisted_ids()
+        assert "dropped" in risu.results.results_store
         d = _get_simulation_data("dropped")
         assert d and d["stats"]["total_trips"] > 0
-        server.results_store.pop("dropped", None)
+        risu.results.results_store.pop("dropped", None)
+
+
+# ============================================================
+# パッケージ構成のガード（単一ファイルに戻さない）
+# ============================================================
+
+class TestPackageLayout:
+    """server.py は起動処理だけ，本体は risu/ の役割別モジュール（CLAUDE.md §2.1）．
+    1 ファイルに機能が集まり直すのを CI で止める．"""
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    MAX_MODULE_LINES = 1000
+
+    def test_entry_file_has_no_logic(self):
+        import ast
+        src = open(os.path.join(self.ROOT, "server.py"), encoding="utf-8").read()
+        tree = ast.parse(src)
+        defs = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+        assert defs == [], "server.py に関数/クラスを足さない．risu/ の該当モジュールへ"
+        assert src.count("\n") < 40
+
+    def test_modules_stay_focused(self):
+        pkg = os.path.join(self.ROOT, "risu")
+        expected = {"runtime", "schema", "simulation", "results", "aggregate", "scenario_ops",
+                    "importers", "prompts", "tools", "llm", "mcp_server", "api"}
+        found = {f[:-3] for f in os.listdir(pkg) if f.endswith(".py") and f != "__init__.py"}
+        assert expected <= found, expected - found
+        for name in found:
+            with open(os.path.join(pkg, name + ".py"), encoding="utf-8") as f:
+                n = sum(1 for _ in f)
+            assert n <= self.MAX_MODULE_LINES, f"risu/{name}.py が {n} 行．分割を検討（上限 {self.MAX_MODULE_LINES}）"
+
+    def test_package_import_graph_is_acyclic(self):
+        """モジュール間の import は一方向（runtime/schema → simulation/results → … → api）．"""
+        import ast
+        pkg = os.path.join(self.ROOT, "risu")
+        edges = {}
+        for f in os.listdir(pkg):
+            if not f.endswith(".py") or f == "__init__.py":
+                continue
+            tree = ast.parse(open(os.path.join(pkg, f), encoding="utf-8").read())
+            deps = set()
+            for n in ast.walk(tree):
+                if isinstance(n, ast.ImportFrom) and n.level == 1 and n.module:
+                    deps.add(n.module)
+                elif isinstance(n, ast.ImportFrom) and n.module and n.module.startswith("risu."):
+                    deps.add(n.module.split(".", 1)[1])
+            edges[f[:-3]] = deps
+        state = {}
+        def visit(m, stack):
+            if state.get(m) == 1:
+                raise AssertionError("import cycle: " + " -> ".join(stack + [m]))
+            if state.get(m) == 2:
+                return
+            state[m] = 1
+            for d in edges.get(m, ()):
+                visit(d, stack + [m])
+            state[m] = 2
+        for m in edges:
+            visit(m, [])
+        assert edges["runtime"] == set() and edges["schema"] == set()
+        assert "api" not in {d for m, ds in edges.items() if m != "api" for d in ds}
