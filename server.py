@@ -43,9 +43,9 @@ load_dotenv()
 # LLM バックエンド: "mock" / "claude" / "ollama"
 LLM_BACKEND = os.environ.get("LLM_BACKEND", "claude")
 
-# Ollama 設定
-OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_MODEL    = "qwen2.5:3b"
+# Ollama 設定（他の設定と同じく環境変数で上書きできる．README §8）
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
 
 # Claude 設定
 CLAUDE_MODEL = "claude-sonnet-5"  # 高精度・ツール呼び出し安定（claude-sonnet-4 は 2026-06 廃止）

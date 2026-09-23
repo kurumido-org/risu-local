@@ -278,7 +278,7 @@ LLM_BACKEND=mock
    ```
 
 既定のモデルは `qwen2.5:3b`，接続先は `http://localhost:11434` です．
-変更する場合は `server.py` の `OLLAMA_MODEL` / `OLLAMA_BASE_URL` を編集してください．
+変更する場合は環境変数 `OLLAMA_MODEL` / `OLLAMA_BASE_URL` を設定します（[§8](#8-環境変数)）．
 
 ---
 
@@ -817,6 +817,8 @@ curl -X POST http://localhost:8001/simulate \
 |---|---|---|
 | `LLM_BACKEND` | `claude` | `claude` / `ollama` / `mock` |
 | `ANTHROPIC_API_KEY` | — | `claude` バックエンド時に必須 |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | `ollama` バックエンドの接続先 |
+| `OLLAMA_MODEL` | `qwen2.5:3b` | `ollama` バックエンドで使うモデル名 |
 | `RISU_MAX_TOOL_ROUNDS` | `3` | LLM の tool_use ループ最大回数（暴走・コスト対策） |
 | `RISU_MAX_HISTORY_CHARS` | `24000` | LLM に送る会話履歴の文字数予算．超過時は古いターンから落とす（`0` で無制限） |
 | `RISU_CACHE_TTL` | `5m` | Prompt Caching の TTL（`5m` / `1h`）．操作の間隔が 5 分以上空くことが多ければ `1h` |

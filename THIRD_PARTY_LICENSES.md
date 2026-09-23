@@ -16,6 +16,7 @@ RISU 本体は MIT License（`LICENSE`）です．このファイルは，RISU �
 |---|---|---|---|
 | `static/vendor/marked.umd.min.js` | [marked](https://github.com/markedjs/marked) | 12.0.2 | MIT |
 | `static/vendor/purify.min.js` | [DOMPurify](https://github.com/cure53/DOMPurify) | 3.1.6 | Apache-2.0 **OR** MPL-2.0（デュアル） |
+| `static/vendor/chart.umd.min.js` | [Chart.js](https://www.chartjs.org/) | 4.5.1 | MIT |
 
 いずれも MIT と両立します．ファイル冒頭のライセンスヘッダはミニファイ済みファイル内に
 保持されているので，**ヘッダを削除しないこと**．
@@ -35,7 +36,6 @@ DOMPurify はデュアルライセンスなので，利用者は Apache-2.0 か 
 
 | リソース | ライセンス | 備考 |
 |---|---|---|
-| [Chart.js](https://www.chartjs.org/) 4.x（cdn.jsdelivr.net） | MIT | CDN 参照のみ．配布物に含まない |
 | Google Fonts: Inter / JetBrains Mono / Noto Sans JP | SIL Open Font License 1.1 | CSS 経由で読み込むだけ．フォントファイルは同梱していない |
 
 OFL はフォントファイルを再配布する場合に条件が生じますが，RISU は同梱していないため

@@ -2588,6 +2588,25 @@ class TestLicenseHygiene:
 
     GPL_MODULES = ("PyQt5", "PyQt6", "PySide2", "PySide6")
 
+    def test_vendored_scripts_keep_license_headers_and_no_cdn(self):
+        """同梱 JS（marked / DOMPurify / Chart.js）はライセンスヘッダを保持し，
+        index.html は CDN から script を読まない（オフラインで完全に動く前提）．"""
+        root = os.path.dirname(os.path.dirname(__file__))
+        vendor = os.path.join(root, "static", "vendor")
+        expected = {"marked.umd.min.js", "purify.min.js", "chart.umd.min.js"}
+        assert expected <= set(os.listdir(vendor))
+        import re
+        # 同梱ファイルは THIRD_PARTY_LICENSES.md に必ず載せる（配布物なので表示義務がある）．
+        # ヘッダの形式は配布元（jsDelivr のバナー等）に依存するので，ここでは表の記載を検証する
+        with open(os.path.join(root, "THIRD_PARTY_LICENSES.md"), encoding="utf-8") as f:
+            licenses = f.read()
+        for name in expected:
+            assert f"static/vendor/{name}" in licenses, f"{name} が THIRD_PARTY_LICENSES.md に無い"
+        with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as f:
+            html = f.read()
+        srcs = re.findall(r'<script[^>]+src="([^"]+)"', html)
+        assert srcs and all(s.startswith("/vendor/") for s in srcs), srcs
+
     def test_risu_does_not_import_qt(self):
         """server.py を読み込み，シミュレーションを流しても Qt を import しない．"""
         import subprocess

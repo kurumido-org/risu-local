@@ -53,7 +53,7 @@ risu-local/
 ├── uxsim_bridge.py       ← シナリオ → UXsim World（RISU 非依存の純粋モジュール）
 ├── static/
 │   ├── index.html        ← UI 本体（チャット + Canvas 可視化 + Chart.js）
-│   ├── vendor/           ← marked / DOMPurify（同梱．ライセンス表記を消さないこと）
+│   ├── vendor/           ← marked / DOMPurify / Chart.js（同梱．ライセンス表記を消さないこと．CDN に戻さない＝オフラインで動く前提）
 │   └── sample_risu.csv
 ├── scripts/
 │   ├── run_scenario.py   ← 素の UXsim で実行する CLI（サーバー不要）
