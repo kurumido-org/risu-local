@@ -13,7 +13,7 @@ server.py の `_run_uxsim` も同じ `build_world` を使う（ネットワー�
 シナリオの形式は RISU の SimulationInput と同じ:
 
     {
-      "name": "sim", "tmax": 3600, "deltan": 5, "reaction_time": null,
+      "name": "sim", "tmax": 3600, "deltan": 5, "reaction_time": null, "random_seed": null,
       "nodes":   [{"name","x","y","flow_capacity"?,"signal"?}, ...],
       "links":   [{"name","start","end","length",
                    "free_flow_speed"?,"jam_density"?,"number_of_lanes"?,
@@ -41,6 +41,7 @@ SCENARIO_DEFAULTS: dict[str, Any] = {
     "tmax": 3600,
     "deltan": 5,
     "reaction_time": None,
+    "random_seed": None,
 }
 NODE_DEFAULTS: dict[str, Any] = {
     "flow_capacity": None,
@@ -120,6 +121,10 @@ def build_world(scenario, *, cpp: bool = True, disable_basic_analysis: bool = Fa
     reaction_time = getattr(scenario, "reaction_time", None)
     if reaction_time:
         world_kwargs["reaction_time"] = float(reaction_time)
+    # 乱数シード（経路選択ノイズ・合流順に効く）．None なら UXsim が毎回別の乱数列を使う．
+    random_seed = getattr(scenario, "random_seed", None)
+    if random_seed is not None:
+        world_kwargs["random_seed"] = int(random_seed)
 
     try:
         W = World(**world_kwargs, cpp=cpp)

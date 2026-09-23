@@ -29,7 +29,7 @@ from fastapi.staticfiles import StaticFiles
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp.types import TextContent, Tool
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 from starlette.requests import Request
 
 from uxsim_bridge import build_world
@@ -219,6 +219,8 @@ def _build_envelope(sim_id: str, *, include_result: bool = True) -> dict:
             "signals":      raw.get("signals"),
             # 描画用フレームの車両サンプリング間隔（1 = 全車両）
             "vehicle_sample_step": raw.get("vehicle_sample_step", 1),
+            # フレームごとの走行中台数（実台数 = プラトン数 × deltan．間引き前の全点から集計）
+            "vehicle_counts": raw.get("vehicle_counts"),
         }
     return envelope
 
@@ -229,35 +231,50 @@ class NodeInput(BaseModel):
     name: str
     x: float
     y: float
-    flow_capacity: float | None = None
+    flow_capacity: float | None = Field(default=None, ge=0)
     signal: list[float] | None = None  # 信号現示の青時間リスト（秒）．例: [60,60] → 2現示各60秒
 
 class LinkInput(BaseModel):
     name: str
     start: str
     end: str
-    length: float
-    free_flow_speed: float = 20.0
-    jam_density: float = 0.2
-    number_of_lanes: int = 1
-    capacity: float | None = None  # リンク容量（台/s，リンク全体）．UXsim の capacity_out にマップ．
+    length: float = Field(gt=0)
+    free_flow_speed: float = Field(default=20.0, gt=0)
+    jam_density: float = Field(default=0.2, gt=0)
+    number_of_lanes: int = Field(default=1, ge=1)
+    capacity: float | None = Field(default=None, ge=0)  # リンク容量（台/s，リンク全体）．UXsim の capacity_out にマップ．
                                    # None なら FD（速度・密度・車線数）由来の容量のまま
     signal_group: int | None = None  # この進入リンクが青になる信号現示番号（0始まり）
 
 class DemandInput(BaseModel):
     orig: str
     dest: str
-    t_start: float
-    t_end: float
-    flow: float
+    t_start: float = Field(ge=0)
+    t_end: float = Field(ge=0)
+    flow: float = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _check_interval(self):
+        if self.t_end <= self.t_start:
+            raise ValueError(
+                f"需要 {self.orig}→{self.dest} の t_end ({self.t_end}) は "
+                f"t_start ({self.t_start}) より大きい必要があります")
+        return self
 
 class SimulationInput(BaseModel):
     name: str = "sim"
-    tmax: int = 3600
-    deltan: int = 5
+    tmax: int = Field(default=3600, gt=0)
+    # 車両集計単位（プラトンサイズ）．UXsim 内部の「1 車両」が deltan 台を表す．
+    # フレームの ids の個数はプラトン数なので，台数として扱う箇所では deltan を掛けること
+    # （_run_uxsim の vehicle_counts / _trip_stats / フロントの ACTIVE VEHICLES）．
+    deltan: int = Field(default=5, ge=1)
     # 車頭時間（反応時間）秒．UXsim 既定 1.0 → 1 車線容量 ≈ 2,770 台/時（ffs 60km/h, kjam 0.2）．
     # 高速道路の実勢（1,800〜2,000 台/時/車線）に合わせるなら 1.5〜1.7．None なら UXsim 既定．
-    reaction_time: float | None = None
+    reaction_time: float | None = Field(default=None, gt=0)
+    # UXsim World の乱数シード（経路選択のノイズ・合流の優先順位に効く）．
+    # None なら実行ごとに結果が変わる．条件比較・追試ではシナリオに持たせて全経路で維持する
+    # （保存・rerun_simulation・GUI 再実行・scripts/run_scenario.py --emit）．
+    random_seed: int | None = None
     nodes: list[NodeInput]
     links: list[LinkInput]
     demands: list[DemandInput]
@@ -623,6 +640,7 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
     frame_times = []
     link_timeline = {ln: [] for ln in link_names}
     vehicle_sample_step = 1
+    vehicle_counts: list[int] = []
 
     if kept.size:
         n_frames = kept.size
@@ -639,6 +657,11 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
         avg_cols = np.round(avg, 2).T.tolist()  # リンクごとの時系列
         for i, ln in enumerate(link_names):
             link_timeline[ln] = [{"t": t, "speed": s} for t, s in zip(t_vals, avg_cols[i])]
+
+        # ── フレームごとの走行中台数（分析用．描画用の間引きとは独立に全点から数える） ──
+        # UXsim の 1 車両（プラトン）は deltan 台を表すので，実台数に換算して保持する．
+        vehicle_counts = (np.bincount(fidx, minlength=n_frames)[:n_frames]
+                          * int(W.DELTAN)).tolist()
 
         # ── 総点数の上限: 車両 ID を等間隔サンプリング（描画用のみ） ──
         if MAX_FRAME_POINTS > 0 and fidx.size > MAX_FRAME_POINTS:
@@ -752,6 +775,9 @@ def _run_uxsim(scenario: SimulationInput) -> dict:
         "frame_format": "columnar_v2",
         # 描画用フレームの車両サンプリング間隔（1 = 全車両）．MAX_FRAME_POINTS 参照．
         "vehicle_sample_step": vehicle_sample_step,
+        # フレームごとの走行中台数（frame_times と同じ長さ．実台数 = プラトン数 × deltan）．
+        # 間引き前の全点から数えるので，vehicle_sample_step の影響を受けない．
+        "vehicle_counts": vehicle_counts,
     }
 
 
@@ -786,6 +812,8 @@ async def list_tools() -> list[Tool]:
                     "name":    {"type": "string",  "description": "シミュレーション名"},
                     "tmax":    {"type": "integer",  "description": "シミュレーション終了時刻（秒）"},
                     "deltan":  {"type": "integer",  "description": "車両集計単位（デフォルト5台）"},
+                    "reaction_time": {"type": "number", "description": "車頭時間（秒）．省略で UXsim 既定"},
+                    "random_seed":   {"type": "integer", "description": "乱数シード（省略で毎回変わる）"},
                     "nodes":   {
                         "type": "array",
                         "items": {
@@ -1242,6 +1270,13 @@ UXsim は交差点ノードに信号制御を設定できる．2 つのパラメ
   例: run_simulation({"grid":{"nx":5,"ny":5,"spacing":500},"auto_demands":{"strategy":"boundary"},"tmax":3600})
 - シナリオ比較（容量変更前後など）も rerun_simulation を複数回呼べばよい．
   各実行の sim_id が返るので，get_simulation_data でそれぞれの結果を取得して比較する
+- シミュレーションは確率的（経路選択ノイズ・合流順）で，同じ入力でも実行ごとに結果が変わる．
+  条件比較や追試では random_seed を固定する（run_simulation の random_seed，または
+  rerun_simulation の {"action":"set_params","random_seed":42}）．seed は保存シナリオに残るので，
+  同じ base から派生させる限り以降の rerun でも同じ seed が使われる．
+  差の解釈では「シード違いによる揺らぎ」の可能性も述べる
+- 台数の単位: 統計と network_vehicle_count は実台数（deltan 換算済み）．
+  「1 プラトン = deltan 台」なので，フレームの点数をそのまま台数と呼ばないこと
 - ネットワークの中身（ノード名・リンク名・構造）が必要なときは get_network_info で照会する:
   - まず include="summary" で規模・座標範囲・次数上位ノード・名前のサンプルを把握
   - 特定の名前が必要なら include="nodes"/"links" + name_contains / limit / offset で絞り込む
@@ -1522,12 +1557,20 @@ def _get_simulation_data(sim_id: str, points: int = 30, max_links: int = 20) -> 
     frame_times = data.get("frame_times") or sorted([float(k) for k in frames.keys()])
     if not frame_times:
         return None
-    # 描画用フレームが車両サンプリングされている場合，台数を元のスケールに戻す
+    # 台数の換算:
+    #  - vehicle_counts（間引き前の全点から数えた実台数）があればそれを使う
+    #  - 無い（古い結果）場合はフレームのプラトン数 × deltan × サンプリング間隔で近似する
+    #    （フレームの ids はプラトン = deltan 台の単位．掛け忘れると deltan 分の 1 に見える）
     sample_step = int(data.get("vehicle_sample_step") or 1)
+    deltan = int((data.get("_scenario") or {}).get("deltan") or 1)
+    vehicle_counts = data.get("vehicle_counts")
+    if vehicle_counts is not None and len(vehicle_counts) != len(frame_times):
+        vehicle_counts = None
 
     # 間引き（最大 points 点）
     step = max(1, -(-len(frame_times) // points))
     sampled = frame_times[::step]
+    sampled_idx = list(range(0, len(frame_times), step))
 
     # ネットワーク全体の時系列
     # frames はコンパクト列指向フォーマット: {t_key: {ids:[], xs:[], ys:[], vs:[], ...}}
@@ -1537,12 +1580,15 @@ def _get_simulation_data(sim_id: str, points: int = 30, max_links: int = 20) -> 
     net_avg_speed = []
     net_vehicle_count = []
     sampled_speeds = []
-    for t in sampled:
+    for fi, t in zip(sampled_idx, sampled):
         t_key = str(t) if str(t) in frames else str(round(t, 1))
         cols = frames.get(t_key) or {}
         speeds = np.asarray(cols.get("vs", ()), dtype=np.float64)
         time_labels.append(round(t))
-        net_vehicle_count.append(int(speeds.size) * sample_step)
+        if vehicle_counts is not None:
+            net_vehicle_count.append(int(vehicle_counts[fi]))
+        else:
+            net_vehicle_count.append(int(speeds.size) * sample_step * deltan)
         if speeds.size:
             net_avg_speed.append(round(float(speeds.mean()), 1))
             sampled_speeds.append(speeds)
@@ -1619,10 +1665,14 @@ def _get_simulation_data(sim_id: str, points: int = 30, max_links: int = 20) -> 
             f"混雑度上位 {MAX_DETAIL_LINKS} 本のみ．ネットワーク全体の傾向は"
             f" network_avg_speed / speed_histogram を参照．"
         )
+    data["vehicle_count_note"] = (
+        f"network_vehicle_count は実台数（deltan={deltan} 換算済み，間引き前の全車両から集計）．"
+        f"speed_histogram の counts はプラトン（{deltan} 台単位）のサンプル数．"
+    )
     if sample_step > 1:
         data["vehicle_sample_note"] = (
-            f"描画用フレームは {sample_step} 台に 1 台をサンプリングしている．"
-            f"network_vehicle_count は補正済み，speed_histogram の counts はサンプル数．"
+            f"描画用フレームは {sample_step} プラトンに 1 つをサンプリングしている．"
+            f"network_vehicle_count はその影響を受けない．"
         )
     return data
 
@@ -1660,6 +1710,7 @@ def _mod_match_indices(items: list[dict], mod: dict, kind: str) -> list[int]:
 _LINK_SET_FIELDS = {"capacity", "free_flow_speed", "number_of_lanes",
                     "jam_density", "signal_group", "length"}
 _NODE_SET_FIELDS = {"signal", "flow_capacity", "x", "y"}
+_SCENARIO_PARAM_FIELDS = {"tmax", "deltan", "reaction_time", "random_seed"}
 _DEMAND_SET_FIELDS = {"flow", "t_start", "t_end"}
 
 
@@ -1777,6 +1828,23 @@ def _apply_modifications(scenario: dict, mods: list[dict]) -> tuple[dict, list[s
         elif action == "set_tmax":
             sc["tmax"] = int(mod.get("tmax", sc.get("tmax", 3600)))
             applied.append(f"set_tmax: {sc['tmax']}s")
+
+        elif action == "set_params":
+            # シナリオ全体のパラメータ（tmax / deltan / reaction_time / random_seed）．
+            # 値の妥当性は後段の SimulationInput で検証される．
+            sets = {k: mod[k] for k in _SCENARIO_PARAM_FIELDS if k in mod}
+            bad = set(mod) - _SCENARIO_PARAM_FIELDS - {"action"}
+            if bad:
+                raise ValueError(f"set_params に未対応のフィールド: {sorted(bad)}"
+                                 f"（対応: {sorted(_SCENARIO_PARAM_FIELDS)}）")
+            if not sets:
+                raise ValueError(f"set_params には {sorted(_SCENARIO_PARAM_FIELDS)} のいずれかが必要です")
+            for k, v in sets.items():
+                if v is None:
+                    sc.pop(k, None)   # None = 既定に戻す（reaction_time / random_seed）
+                else:
+                    sc[k] = v
+            applied.append("set_params: " + ", ".join(f"{k}={v}" for k, v in sets.items()))
 
         elif action == "generate_demands":
             # サーバー側で OD 需要を自動生成する．LLM がノード名を列挙する
@@ -2003,6 +2071,8 @@ CLAUDE_TOOLS = [
                 "name":    {"type": "string", "description": "シミュレーション名"},
                 "tmax":    {"type": "integer", "description": "シミュレーション終了時刻（秒）．デフォルト2000"},
                 "deltan":  {"type": "integer", "description": "車両集計単位（デフォルト5）"},
+                "reaction_time": {"type": "number", "description": "車頭時間（秒）．省略で UXsim 既定 1.0（1 車線 ≈ 2,770 台/時）．実勢容量 1,800〜2,000 台/時/車線なら 1.5〜1.7"},
+                "random_seed": {"type": "integer", "description": "シミュレーション本体の乱数シード．条件比較・追試で結果を固定したいときに指定（省略で毎回変わる）"},
                 "grid": {
                     "type": "object",
                     "description": "格子ネットワークをサーバー側で生成する（nodes/links の列挙不要）",
@@ -2106,6 +2176,9 @@ CLAUDE_TOOLS = [
             '・リンク削除（通行止め）: {"action":"remove_links","names":["r2"]}\n'
             '・ノード/リンク追加: {"action":"add_node","node":{...}} / {"action":"add_link","link":{...}}\n'
             '・時間変更: {"action":"set_tmax","tmax":7200}\n'
+            '・全体パラメータ: {"action":"set_params","reaction_time":1.7,"random_seed":42}\n'
+            '  （tmax / deltan / reaction_time / random_seed．シードは保存シナリオに残るので，'
+            '同条件比較では base と同じ seed のまま差分だけ当てればよい）\n'
             '・OD 自動生成: {"action":"generate_demands","strategy":"random","n_pairs":10,'
             '"flow_per_pair":0.2,"clear_existing":true}\n'
             '  （strategy: random=ランダムなノードペア / boundary=ネットワーク周縁の全ペア．'
@@ -3183,6 +3256,8 @@ async def _chat_ollama(body: ChatInput):
                         "name":    {"type": "string"},
                         "tmax":    {"type": "integer"},
                         "deltan":  {"type": "integer"},
+                        "reaction_time": {"type": "number"},
+                        "random_seed":   {"type": "integer"},
                         "nodes":   {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "x": {"type": "number"}, "y": {"type": "number"}, "flow_capacity": {"type": "number"}}, "required": ["name", "x", "y"]}},
                         "links":   {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "start": {"type": "string"}, "end": {"type": "string"}, "length": {"type": "number"}, "free_flow_speed": {"type": "number"}}, "required": ["name", "start", "end", "length"]}},
                         "demands": {"type": "array", "items": {"type": "object", "properties": {"orig": {"type": "string"}, "dest": {"type": "string"}, "t_start": {"type": "number"}, "t_end": {"type": "number"}, "flow": {"type": "number"}}, "required": ["orig", "dest", "t_start", "t_end", "flow"]}},

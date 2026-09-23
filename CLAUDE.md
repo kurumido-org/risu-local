@@ -26,7 +26,7 @@
 .venv\Scripts\activate
 
 python server.py                     # 起動 → http://localhost:8001
-pytest tests/ -v                     # テスト（136 件）
+pytest tests/ -v                     # テスト（166 件．サーバー起動が要る 9 件は自動 skip）
 ruff check .                         # lint（CI の lint ジョブと同一設定）
 python scripts\bench.py              # 性能ベンチ（§3.5 / §3.6 の前提を確認）
 python scripts\bench.py --sizes 20 --profile   # cProfile 付き
@@ -131,8 +131,15 @@ LLM が扱うのは `sim_id`・差分命令・集計値だけです（§3.3）�
   同じコードを通らないと，片方だけ直したときに**同じシナリオで結果がずれます**．
 - **追加条件**: このモジュールは **uxsim と標準ライブラリしか import しない**．
   FastAPI / pydantic / anthropic を足さないこと（CLI が重い依存なしで動く前提）．
-- **テスト**: `TestStandalonePipeline`（7 件）．import の純粋性と，
-  サーバー経路との統計一致を検証．CI の `standalone` ジョブも uxsim だけの環境で実行．
+- **シナリオ全体のパラメータ**（`tmax` / `deltan` / `reaction_time` / `random_seed`）は
+  `SimulationInput` → `build_world` → `World(...)` と素通しする．**新しく足したら 3 経路
+  すべてに通すこと**: `_apply_modifications` の `set_params`（`_SCENARIO_PARAM_FIELDS`），
+  GUI エディタの送信（index.html の `et-run`），`scripts/run_scenario.py` の `EMIT_TEMPLATE`．
+  GUI 送信から `reaction_time` が抜けて，編集のたびに容量の前提が UXsim 既定へ戻る
+  不具合があった．`random_seed` を省くと結果は実行ごとに変わる（経路選択ノイズ・合流順）．
+- **テスト**: `TestStandalonePipeline`（11 件）・`TestGuiRerunCarriesScenarioParams`（3 件）．
+  import の純粋性，サーバー経路との統計一致，seed の再現性と全経路での維持を検証．
+  CI の `standalone` ジョブも uxsim だけの環境で実行．
 
 ### 3.2 LLM ツールの実行は `_dispatch_tool_blocks` に一本化する
 
@@ -169,11 +176,17 @@ LLM が扱うのは `sim_id`・差分命令・集計値だけです（§3.3）�
   `limit` ≤200 + `offset`）の順で使う．全件取得はできない設計．
 - **集計データ**: `_get_simulation_data` は `points`（既定 30）・`max_links`（既定 20）で
   量を制御し，速度は 0.1 m/s に丸める．1 回あたり数 KB に収めること．
+- **台数の単位**: フレームの `ids` は UXsim の**プラトン**（1 個 = `deltan` 台）で，
+  描画用にさらに `vehicle_sample_step` 個に 1 個へ間引かれることがある．台数として
+  LLM や画面に出す値は `_run_uxsim` が**間引き前の全点**から数えた `vehicle_counts`
+  （`deltan` 換算済み）を使い，フレームの点数をそのまま台数と呼ばない
+  （`network_vehicle_count` が 1/5 になっていた）．古い結果向けの近似は
+  `点数 × deltan × vehicle_sample_step`（サーバー・フロントとも同じフォールバック）．
 - **チャート**: `{"$data": "network_avg_speed"}` 形式の参照を `_extract_charts` →
   `_resolve_chart_refs` がこのターンの集計データ（`sim_data_cache`）で置換する．
   **LLM に配列を書き写させない**（出力トークンは入力の 5 倍単価）．
-- **テスト**: `TestScenarioModifications`（12 件）・`TestNetworkInfo`（4 件）・
-  `TestSimulationDataAggregation`（7 件）・`TestChartExtraction`（4 件）．
+- **テスト**: `TestScenarioModifications`（15 件）・`TestNetworkInfo`（4 件）・
+  `TestSimulationDataAggregation`（9 件）・`TestChartExtraction`（4 件）．
 
 ### 3.4 プロンプトキャッシュを壊さない
 
@@ -261,6 +274,17 @@ LLM が扱うのは `sim_id`・差分命令・集計値だけです（§3.3）�
 - **統計**: `computeStatsSeries` は各リンク timeline を 1 回だけ走査する
   （O(フレーム数 × リンク数)）．`drawSparkline` はその `avgRatio` を使うので，
   **先に `computeStatsSeries` を呼ぶこと**．
+- **信号**: `_drawSignals` が毎フレーム描く（現示はフレーム間でも変わるので静的レイヤーに
+  入れない）．流入リンクごとに停止線バー 1 本だけ．
+  最短の流入リンクの画面長が `SIGNAL_LOD_PX` 未満なら描かない．
+  以前の「流入リンクごとに固定サイズの信号機筐体」は 4 枝交差点で必ず重なった．
+  交差点ノードの現示リングと現在位置の印も試したが，回って見える・情報が重複する
+  と不評だったので置かない．色は青・赤の 2 色のみ．**現示は必ず `phase_log`（UXsim の
+  実測）から取り，`t % cycle` の公称計算と混ぜないこと**．UXsim は deltat 刻みで
+  切り替えるため公称サイクルから遅れが累積し，混ぜると境界で誤表示になる
+  （旧「残り 3 秒で黄」は 1,200 秒中 320 秒が誤表示だった）．
+  流入リンクの終端・接線は `_approachGeom` が `linkDrawInfo` から取る（直線 / 双方向円弧 /
+  多点の 3 形式を吸収）．
 
 ### 3.8 認証が無い前提を崩さない
 
@@ -286,6 +310,9 @@ LLM が扱うのは `sim_id`・差分命令・集計値だけです（§3.3）�
 | **SYSTEM_PROMPT を変える** | system に動的な文字列を入れない（§3.4）．トークン量は `[RISU usage]` で確認 |
 | **依存を追加する** | `requirements.txt`（上限付き）+ `requirements.lock.txt` + `pyproject.toml`．ライセンスは THIRD_PARTY_LICENSES.md に追記．CI の `licenses` ジョブが GPL 系を弾く |
 | **`uxsim_bridge.py` を触る** | FastAPI / pydantic / anthropic を import しないこと（§3.1） |
+| **シナリオ全体のパラメータを足す** | `SimulationInput` / `SCENARIO_DEFAULTS` / `build_world` / `set_params` / GUI `et-run` / `EMIT_TEMPLATE` の 6 箇所（§3.1） |
+| **台数を扱う集計を足す** | `vehicle_counts` を使うか `deltan` を掛ける（§3.3）．フレームの点数はプラトン数 |
+| **入力の値域を変える** | `SimulationInput` の `Field(gt=/ge=)`．`TestScenarioValidation` に 1 件足す（deltan=0・負のリンク長・負の需要・時刻逆転を受理していた） |
 | **ファイルを追加する** | §6 の公開対象かどうか |
 
 ---
@@ -301,6 +328,9 @@ LLM が扱うのは `sim_id`・差分命令・集計値だけです（§3.3）�
 | フレームのキーが見つからない | `str(round(25.0, 1))` は `"25.0"` になる．キーの文字列化ルールを変えない（`TestFrameKeyCompatibility`） |
 | CSV 取込で `float("")` エラー | 空セルの扱い．`_get_float` の既定値経由で読む（`TestCSVParser`） |
 | 重複ノード名で UXsim の生エラーが出る | `SimulationInput` の検証で名前つきのメッセージに変換済み（`TestScenarioValidation`） |
+| 台数が想定の 1/5 に見える | フレームの `ids` はプラトン（`deltan` 台）．`vehicle_counts` を使う（§3.3） |
+| 同じ入力で結果が毎回変わる | `random_seed` 未指定．比較・追試ではシナリオに持たせる（§3.1） |
+| GUI で再実行すると容量の前提が変わる | 送信データから `reaction_time` が落ちていた．`et-run` は全体パラメータを引き継ぐ（`TestGuiRerunCarriesScenarioParams`） |
 | `pip install` が `No such file or directory` で止まる | Windows の 260 文字パス長制限（`anthropic` の長いファイル名）．浅い場所に clone するか長いパスを有効化 |
 
 `ruff format` は**意図的に CI へ入れていません**．`server.py` の数値処理は桁を揃えて

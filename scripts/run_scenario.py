@@ -103,7 +103,9 @@ def print_stats(W, scenario, elapsed: float, *, analysis: bool) -> None:
     print(f"  {getattr(scenario, 'name', 'sim')}")
     print(f"{'=' * 56}")
     print(f"  ネットワーク : {n_nodes} ノード / {n_links} リンク / {n_dem} 需要")
-    print(f"  tmax         : {getattr(scenario, 'tmax', '?')} s   deltan: {getattr(scenario, 'deltan', '?')}")
+    print(f"  tmax         : {getattr(scenario, 'tmax', '?')} s   deltan: {getattr(scenario, 'deltan', '?')}"
+          f"   reaction_time: {getattr(scenario, 'reaction_time', None) or 'uxsim default'}"
+          f"   random_seed: {getattr(scenario, 'random_seed', None)}")
     print(f"  計算時間     : {elapsed:.2f} s")
 
     if analysis:
@@ -163,6 +165,7 @@ NAME = {name!r}
 TMAX = {tmax!r}
 DELTAN = {deltan!r}
 REACTION_TIME = {reaction_time!r}
+RANDOM_SEED = {random_seed!r}      # None なら実行ごとに結果が変わる
 
 # {{"name", "x", "y", "flow_capacity", "signal"}}
 NODES = {nodes}
@@ -180,6 +183,8 @@ def build():
                   print_mode=1, save_mode=1, show_mode=0)
     if REACTION_TIME:
         kwargs["reaction_time"] = float(REACTION_TIME)
+    if RANDOM_SEED is not None:
+        kwargs["random_seed"] = int(RANDOM_SEED)
     try:
         W = World(**kwargs, cpp=True)   # uxsim >= 1.14 の C++ バックエンド
     except TypeError:
@@ -256,6 +261,7 @@ def emit_python(raw_scenario: dict, out_path: str, source: str) -> None:
         tmax=sc.get("tmax", 3600),
         deltan=sc.get("deltan", 5),
         reaction_time=sc.get("reaction_time"),
+        random_seed=sc.get("random_seed"),
         nodes=_fmt_list(sc["nodes"]),
         links=_fmt_list(sc["links"]),
         demands=_fmt_list(sc["demands"]),

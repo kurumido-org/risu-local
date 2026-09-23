@@ -978,6 +978,8 @@
   .sim-id-btn.copied { background: var(--accent); color: var(--paper); border-color: var(--accent); }
   .ph-label { color: var(--accent); font-weight: 700; margin-right: 4px; }
   #link-count-label { font-family: var(--mono); font-size: 10px; color: var(--sub); letter-spacing: .05em; }
+  #scn-params-label { font-family: var(--mono); font-size: 10px; color: var(--sub); letter-spacing: .03em;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 34ch; cursor: help; }
 
   /* ── canvas controls ── */
   #canvas-controls {
@@ -1422,6 +1424,7 @@
     <span class="ph-label">NETWORK</span>
     <button id="sim-id-label" class="sim-id-btn" title="クリックで ID をコピー" aria-label="Simulation ID (click to copy)">—</button>
     <span id="link-count-label"></span>
+    <span id="scn-params-label" title="シミュレーションの前提"></span>
     <div id="mode-toggle" role="tablist" aria-label="Render mode">
       <button data-mode="link" onclick="setDrawMode('link')" title="道路を混雑度で色分け" aria-label="Link mode">LINK</button>
       <button data-mode="vehicle" class="active" onclick="setDrawMode('vehicle')" title="個車をドットで表示（標準）" aria-label="Vehicle mode">VEHICLE</button>
@@ -1497,6 +1500,8 @@
       <span class="et-sep"></span>
       <button id="et-demand-btn" title="OD 需要を編集">需要</button>
       <label class="et-check">tmax<input type="number" id="et-tmax" value="3600" min="60" step="300"></label>
+      <label class="et-check" title="車頭時間（秒）．空欄で UXsim 既定 1.0．元シナリオの値を引き継ぐ">反応時間<input type="number" id="et-rt" min="0.1" step="0.1" placeholder="1.0"></label>
+      <label class="et-check" title="乱数シード．空欄で実行ごとに変わる．元シナリオの値を引き継ぐ">seed<input type="number" id="et-seed" step="1" placeholder="—"></label>
       <button id="et-run" title="このネットワークでシミュレーション実行">▶ 実行</button>
     </div>
     <div id="edit-props" hidden></div>
@@ -1549,6 +1554,12 @@ let linkFfsByIdx = null; // Float32Array: li → ffs
 let signalsData = [];    // [{node,x,y,phases[],groups:{link_name:phase_idx}}]
 let scenarioData = null; // {nodes:[{name,x,y,signal,...}], links:[...], demands:[...]}
 let nodeByCoord = {};    // "x,y" → node name (高速ルックアップ)
+// 台数の単位換算．フレームの 1 点は UXsim のプラトン（deltan 台）で，さらに描画用に
+// vehicle_sample_step 個に 1 個へ間引かれていることがある．
+//  - vehicleCounts: サーバーが間引き前の全点から数えた実台数（frameTimes と同じ長さ）
+//  - vehScale: 古い結果（vehicle_counts なし）用の近似係数 = deltan × vehicle_sample_step
+let vehicleCounts = null;
+let vehScale = 1;
 let simTmax    = 3600;
 let lastSimId  = null;
 // lastResult は廃止（メモリ節約）— ダウンロードはサーバーから直接取得
@@ -1709,6 +1720,9 @@ function toggleEditMode() {
     demands: src && src.demands ? JSON.parse(JSON.stringify(src.demands)) : [],
   };
   document.getElementById('et-tmax').value = (src && src.tmax) || 3600;
+  // 元シナリオの全体パラメータを引き継ぐ（落とすと UXsim 既定に戻り，容量など比較条件が変わる）
+  document.getElementById('et-rt').value   = (src && src.reaction_time != null) ? src.reaction_time : '';
+  document.getElementById('et-seed').value = (src && src.random_seed != null) ? src.random_seed : '';
   editSel = null; editLinkStart = null; editTool = 'select';
   _etToolbar.querySelectorAll('.et-tool').forEach(b => b.classList.toggle('active', b.dataset.tool === 'select'));
   // ワールド bbox を固定（ノードがなければ 0..2000）
@@ -2171,6 +2185,8 @@ document.getElementById('et-run').addEventListener('click', async () => {
   if (!editNet.links.length) { showToast('リンクがありません', 'warn'); return; }
   if (!editNet.demands.length) { showToast('需要がありません（「需要」から追加してください）', 'warn'); renderEditDemands(true); return; }
   const tmax = Math.max(60, parseInt(document.getElementById('et-tmax').value) || 3600);
+  const rtRaw   = document.getElementById('et-rt').value.trim();
+  const seedRaw = document.getElementById('et-seed').value.trim();
   const scenario = {
     name: 'edited',
     tmax,
@@ -2179,6 +2195,9 @@ document.getElementById('et-run').addEventListener('click', async () => {
     links: editNet.links,
     demands: editNet.demands,
   };
+  // 空欄 = 既定（キー自体を送らない）．値があれば元シナリオ由来でも編集値でもそのまま送る
+  if (rtRaw !== '' && Number.isFinite(parseFloat(rtRaw)))  scenario.reaction_time = parseFloat(rtRaw);
+  if (seedRaw !== '' && Number.isFinite(parseInt(seedRaw))) scenario.random_seed = parseInt(seedRaw);
   const btn = document.getElementById('et-run');
   btn.disabled = true; btn.textContent = '実行中…';
   try {
@@ -2199,7 +2218,8 @@ document.getElementById('et-run').addEventListener('click', async () => {
     exitEditMode();
     await loadResult(d.id);
     addMsg('system', `エディタで作成したネットワークを実行しました（sim_id: ${d.id}，` +
-      `${scenario.nodes.length} ノード / ${scenario.links.length} リンク / ${scenario.demands.length} 需要）`);
+      `${scenario.nodes.length} ノード / ${scenario.links.length} リンク / ${scenario.demands.length} 需要，` +
+      `deltan ${scenario.deltan}，反応時間 ${scenario.reaction_time ?? '既定'}，seed ${scenario.random_seed ?? 'なし'}）`);
   } catch (e) {
     showToast(`実行エラー: ${e.message}`, 'error', 5000);
   } finally {
@@ -2661,6 +2681,9 @@ async function loadResult(simId) {
     geoData    = r.geojson;
     signalsData = r.signals || [];
     scenarioData = data.scenario || null;
+    // 台数換算（vehicle_counts が無い古い JSON は プラトン数 × deltan × 間引き で近似）
+    vehicleCounts = Array.isArray(r.vehicle_counts) ? r.vehicle_counts : null;
+    vehScale = ((scenarioData && scenarioData.deltan) || 1) * (r.vehicle_sample_step || 1);
     // 座標→ノード名のルックアップを構築
     nodeByCoord = {};
     if (scenarioData && scenarioData.nodes) {
@@ -2756,6 +2779,18 @@ async function loadResult(simId) {
     document.getElementById('sim-id-label').textContent = simId;
     const nFeatures = r.geojson?.features?.length || 0;
     document.getElementById('link-count-label').textContent = `(${nFeatures} links)`;
+    // 結果の前提（集計単位・車頭時間・乱数シード・需要の出所）を画面で確認できるようにする
+    {
+      const sc = scenarioData || {};
+      const src = data.source || {};
+      const parts = [`deltan ${sc.deltan ?? '?'}`,
+                     `反応時間 ${sc.reaction_time ?? '既定 1.0'} s`,
+                     `seed ${sc.random_seed ?? 'なし（実行ごとに変動）'}`];
+      if (src.type === 'osm') parts.push('需要: OSM 取込時の自動生成（周縁ノード間の仮定値）');
+      else if (src.type) parts.push(`出所: ${src.type}`);
+      const el = document.getElementById('scn-params-label');
+      if (el) { el.textContent = parts.slice(0, 3).join(' · '); el.title = parts.join('\n'); }
+    }
     document.getElementById('dl-btn').style.display = 'inline-block';
     document.getElementById('dl-scn-btn').style.display = 'inline-block';
 
@@ -2785,6 +2820,8 @@ function releasePrevResult() {
   linkFfsByIdx = null;
   signalsData = [];
   scenarioData = null;
+  vehicleCounts = null;
+  vehScale = 1;
   nodeByCoord = {};
   hitTargets = { nodes: [], links: [] };
   statsSeries = null;
@@ -3390,112 +3427,95 @@ function drawFrame() {
   }
 
   // ── 信号現示の可視化 ──
-  if (signalsData && signalsData.length) {
-    for (const sig of signalsData) {
-      const activePhase = currentPhaseIdx(sig, tCurrent);
-      if (activePhase < 0) continue;
-      const cycle = sig.phases.reduce((a, b) => a + b, 0);
-      const tInCycle = tCurrent % cycle;
-      // 現在のフェーズの残り時間（黄色警告用）
-      let phaseStart = 0;
-      for (let i = 0; i < activePhase; i++) phaseStart += sig.phases[i];
-      const phaseElapsed = tInCycle - phaseStart;
-      const phaseLen = sig.phases[activePhase];
-      const remaining = phaseLen - phaseElapsed;
-      const isYellow = remaining < Math.min(3, phaseLen * 0.15);  // 残り 3s or 15% で黄
+  // 旧実装は流入リンクごとに固定サイズの信号機筐体（約 30×12 px）を停止線から 10 px
+  // 手前に描いていたため，4 枝交差点や双方向円弧の末端で必ず重なっていた．
+  // 現在は
+  //  (a) 停止線バー: 各流入リンクの停止位置に道路を横切る短い線（赤/緑）．
+  //      自分のリンク上にしか置かれないので枝数に関係なく重ならない
+  //  (b) LOD: 流入リンクの画面長が SIGNAL_LOD_PX 未満（ズームアウト時）なら描かない
+  //      （OSM の密な網で破綻しない．信号の有無はノードのツールチップで分かる）
+  //  交差点ノードのリングや現在位置の印は試したが，回って見える・情報が重複するので置かない
+  if (signalsData && signalsData.length) _drawSignals(ctx, tCurrent, linkDrawInfo, px, py, denseNetwork);
+}
 
-      // 各流入リンクの停止位置（= 終端ノード）に信号機を描画
-      // 進行方向に対して垂直にハウジングを配置（2 灯横並びが道路を横切る形）
-      for (const [linkName, groupIdx] of Object.entries(sig.groups || {})) {
-        const info = linkDrawInfo[linkName];
-        if (!info) continue;
-        const isActive = groupIdx === activePhase;
+const SIGNAL_LOD_PX = 44;   // 最短の流入リンクがこの画面長未満なら停止線バーを省く
+// 青と赤の 2 色だけ．UXsim に黄現示は無く，車両は青か赤かでしか動かない．
+// 以前あった「青の残り 3 秒を黄にする」演出は，残り時間を公称サイクル（t=0 起点の設定値）
+// から計算していたため，UXsim の実際の切り替え（deltat 刻みで遅れが累積する）と食い違い，
+// 現示ログ上はまだ青なのに黄になる誤表示が大半だった（1,200 秒中 320 秒）．
+const SIGNAL_COLORS = { red: '#dc3545', green: '#2d9a4a' };
 
-        // リンク末端（停止位置）と進行方向ベクトル
-        let endX, endY, dx, dy;
-        if (info.multipoint && info.screenCoords) {
-          const sc = info.screenCoords;
-          const p1 = sc[sc.length - 2];
-          const p2 = sc[sc.length - 1];
-          endX = p2[0]; endY = p2[1];
-          dx = p2[0] - p1[0];
-          dy = p2[1] - p1[1];
-        } else if (info.bidir && info.cpx !== undefined) {
-          endX = info.bx; endY = info.by;
-          // 終点での接線ベクトル（t=1）
-          dx = 2 * (info.bx - info.cpx);
-          dy = 2 * (info.by - info.cpy);
-        } else {
-          endX = info.bx; endY = info.by;
-          dx = info.bx - info.ax;
-          dy = info.by - info.ay;
-        }
-        const dlen = Math.hypot(dx, dy) || 1;
-        const tx = dx / dlen, ty = dy / dlen;       // 進行方向
-        // 停止位置から少し手前にオフセット（交差点円と重ならないように）
-        const backOff = 10;
-        const cx = endX - tx * backOff;
-        const cy = endY - ty * backOff;
+// 流入リンクの停止位置（終端）と進行方向の単位ベクトル，画面上の長さを返す
+function _approachGeom(info) {
+  let endX, endY, dx, dy, len;
+  if (info.multipoint && info.screenCoords) {
+    const sc = info.screenCoords;
+    const p1 = sc[sc.length - 2], p2 = sc[sc.length - 1];
+    endX = p2[0]; endY = p2[1]; dx = p2[0] - p1[0]; dy = p2[1] - p1[1];
+    len = info.totalLen || Math.hypot(info.bx - info.ax, info.by - info.ay);
+  } else if (info.bidir && info.cpx !== undefined) {
+    endX = info.bx; endY = info.by;
+    dx = 2 * (info.bx - info.cpx); dy = 2 * (info.by - info.cpy);   // 終点での接線
+    len = Math.hypot(info.bx - info.ax, info.by - info.ay);
+  } else {
+    endX = info.bx; endY = info.by;
+    dx = info.bx - info.ax; dy = info.by - info.ay;
+    len = Math.hypot(dx, dy);
+  }
+  const d = Math.hypot(dx, dy) || 1;
+  return { endX, endY, tx: dx / d, ty: dy / d, len };
+}
 
-        // 信号機ハウジング（進行方向に垂直に配置）
-        const lampR  = 3.6;
-        const gap    = 4;
-        const hw     = lampR * 2 + gap * 2 + lampR * 2 + 5;  // 横幅（道路を横切る側）
-        const hh     = lampR * 2 + 5;                         // 高さ（進行方向側）
-        const housingColor = '#1a1a1a';
-        const lampOff = '#3a3a3a';
-        const redOn   = '#dc3545';
-        const grnOn   = '#2d9a4a';
-        const ylwOn   = '#e8a31c';
+function _drawSignals(ctx, tCurrent, linkDrawInfo, px, py, denseNetwork) {
+  const C = SIGNAL_COLORS;
+  for (const sig of signalsData) {
+    const phases = sig.phases || [];
+    const cycle = phases.reduce((a, b) => a + b, 0);
+    if (!phases.length || cycle <= 0) continue;
+    // どの流入が青かは UXsim の実際の現示ログ（phase_log）から取る（currentPhaseIdx）
+    const activePhase = currentPhaseIdx(sig, tCurrent);
+    if (activePhase < 0) continue;
 
-        ctx.save();
-        ctx.translate(cx, cy);
-        // ハウジングを進行方向に垂直にするため，進行方向 + 90° で回転
-        ctx.rotate(Math.atan2(ty, tx) + Math.PI / 2);
-        // ハウジング（角丸長方形）
-        ctx.fillStyle = housingColor;
-        ctx.strokeStyle = '#000';
-        ctx.lineWidth = 0.8;
-        const r = 2;
+    // 流入リンクの幾何を集め，最短の画面長で LOD を決める
+    const approaches = [];
+    let minLen = Infinity;
+    for (const [linkName, groupIdx] of Object.entries(sig.groups || {})) {
+      const info = linkDrawInfo[linkName];
+      if (!info) continue;
+      const g = _approachGeom(info);
+      approaches.push({ g, isActive: groupIdx === activePhase });
+      if (g.len < minLen) minLen = g.len;
+    }
+    if (!approaches.length || minLen < SIGNAL_LOD_PX) continue;
+
+    // ── 停止線バー（流入リンクごと） ──
+    const backOff = denseNetwork ? 7 : 11;  // ノード円（半径 6）の外側に置く
+    const halfLen = denseNetwork ? 4.5 : 6; // 道路幅（4〜5 px）より少し長く
+    for (const { g, isActive } of approaches) {
+      if (g.len < backOff * 2) continue;   // 短すぎてリンクからはみ出すなら省く
+      const cx = g.endX - g.tx * backOff, cy = g.endY - g.ty * backOff;
+      const nxv = -g.ty, nyv = g.tx;       // 進行方向に垂直
+      const color = isActive ? C.green : C.red;
+      ctx.save();
+      ctx.lineCap = 'round';
+      // 縁取り（明るい道路色の上でも読めるように）
+      ctx.beginPath();
+      ctx.moveTo(cx - nxv * halfLen, cy - nyv * halfLen);
+      ctx.lineTo(cx + nxv * halfLen, cy + nyv * halfLen);
+      ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.lineWidth = 5;
+      ctx.stroke();
+      ctx.strokeStyle = color; ctx.lineWidth = 3;
+      ctx.stroke();
+      // 赤のときは停止位置側に小さな三角（進入不可の向きが分かる）
+      if (!isActive) {
         ctx.beginPath();
-        ctx.moveTo(-hw/2 + r, -hh/2);
-        ctx.lineTo( hw/2 - r, -hh/2);
-        ctx.arcTo( hw/2, -hh/2,  hw/2, -hh/2 + r, r);
-        ctx.lineTo( hw/2,  hh/2 - r);
-        ctx.arcTo( hw/2,  hh/2,  hw/2 - r,  hh/2, r);
-        ctx.lineTo(-hw/2 + r,  hh/2);
-        ctx.arcTo(-hw/2,  hh/2, -hw/2,  hh/2 - r, r);
-        ctx.lineTo(-hw/2, -hh/2 + r);
-        ctx.arcTo(-hw/2, -hh/2, -hw/2 + r, -hh/2, r);
+        ctx.moveTo(cx + g.tx * 2.5, cy + g.ty * 2.5);
+        ctx.lineTo(cx - g.tx * 2 + nxv * 2.5, cy - g.ty * 2 + nyv * 2.5);
+        ctx.lineTo(cx - g.tx * 2 - nxv * 2.5, cy - g.ty * 2 - nyv * 2.5);
         ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-
-        // ランプ: 赤 (左) / 緑 (右) の 2 灯
-        const lampPositions = [
-          { dx: -lampR - gap/2, color: !isActive ? redOn : (isYellow ? ylwOn : lampOff), glow: !isActive || isYellow },
-          { dx:  lampR + gap/2, color: isActive && !isYellow ? grnOn : lampOff,          glow: isActive && !isYellow },
-        ];
-        for (const lp of lampPositions) {
-          if (lp.glow) {
-            const grad = ctx.createRadialGradient(lp.dx, 0, 0, lp.dx, 0, lampR * 2.5);
-            grad.addColorStop(0, lp.color);
-            grad.addColorStop(1, 'rgba(0,0,0,0)');
-            ctx.fillStyle = grad;
-            ctx.beginPath();
-            ctx.arc(lp.dx, 0, lampR * 2.5, 0, Math.PI * 2);
-            ctx.fill();
-          }
-          ctx.fillStyle = lp.color;
-          ctx.beginPath();
-          ctx.arc(lp.dx, 0, lampR, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.strokeStyle = '#000';
-          ctx.lineWidth = 0.5;
-          ctx.stroke();
-        }
-        ctx.restore();
+        ctx.fillStyle = color; ctx.fill();
       }
+      ctx.restore();
     }
   }
 }
@@ -4108,10 +4128,14 @@ function computeStatsSeries() {
   const avgRatio = new Array(N);  // 平均 (速度 / 自由流速度)，sparkline 用
 
   // 1 パス目: 各車両の最初・最後に見えたフレーム index
+  // frame.n はプラトン数（× deltan 台）で，描画用に間引かれていることもある．
+  // ACTIVE VEHICLES はサーバーが間引き前に数えた vehicleCounts を優先し，
+  // 無ければ vehScale（deltan × 間引き間隔）で実台数に換算する．
+  const useCounts = vehicleCounts && vehicleCounts.length === N;
   const firstSeen = new Map(), lastSeen = new Map();
   for (let i = 0; i < N; i++) {
     const frame = framesData[String(frameTimes[i])] || EMPTY_FRAME;
-    active[i] = frame.n;
+    active[i] = useCounts ? vehicleCounts[i] : frame.n * vehScale;
     const ids = frame.ids;
     for (let j = 0; j < frame.n; j++) {
       const id = ids[j];
@@ -4125,8 +4149,8 @@ function computeStatsSeries() {
   for (const i of firstSeen.values()) firstCnt[i]++;
   for (const i of lastSeen.values()) lastCnt[i]++;
   for (let i = 0, s = 0, c = 0; i < N; i++) {
-    s += firstCnt[i]; started[i] = s;
-    completed[i] = c; c += lastCnt[i];
+    s += firstCnt[i]; started[i] = s * vehScale;
+    completed[i] = c * vehScale; c += lastCnt[i];
   }
 
   // 平均速度: 各リンクの timeline を先頭から 1 回だけ走査（フレーム時刻も timeline も昇順）
@@ -4152,7 +4176,7 @@ function computeStatsSeries() {
     avgRatio[i] = rcnt[i] ? rsum[i] / rcnt[i] : 0;
   }
 
-  const totalTrips = lastSeen.size;
+  const totalTrips = lastSeen.size * vehScale;
   statsSeries = { active, avgSpeed, avgRatio, completed, started, totalTrips,
     maxActive: Math.max(1, ...active),
     maxSpeed: Math.max(1, ...avgSpeed),

@@ -319,6 +319,71 @@ class TestScenarioValidation:
                 demands=[{"orig": "A", "dest": "Z", "t_start": 0, "t_end": 100, "flow": 0.1}],
             )
 
+    # ── 値域の検証（deltan=0 / 負のリンク長 / 負の需要 / 時刻逆転 を受理していた） ──
+    def _valid(self, **over):
+        base = dict(
+            name="t", tmax=600, deltan=5,
+            nodes=self._nodes(),
+            links=[{"name": "r", "start": "A", "end": "B", "length": 1000}],
+            demands=[{"orig": "A", "dest": "B", "t_start": 0, "t_end": 100, "flow": 0.1}],
+        )
+        base.update(over)
+        return base
+
+    def test_valid_baseline_accepted(self):
+        si = SimulationInput(**self._valid())
+        assert si.random_seed is None and si.reaction_time is None
+
+    @pytest.mark.parametrize("over", [
+        {"deltan": 0},
+        {"deltan": -1},
+        {"tmax": 0},
+        {"reaction_time": 0},
+        {"reaction_time": -1.0},
+    ])
+    def test_bad_scenario_params_rejected(self, over):
+        with pytest.raises(ValueError):
+            SimulationInput(**self._valid(**over))
+
+    @pytest.mark.parametrize("link_over", [
+        {"length": -100}, {"length": 0},
+        {"free_flow_speed": 0}, {"jam_density": -0.1},
+        {"number_of_lanes": 0}, {"capacity": -1},
+    ])
+    def test_bad_link_values_rejected(self, link_over):
+        lk = {"name": "r", "start": "A", "end": "B", "length": 1000}
+        lk.update(link_over)
+        with pytest.raises(ValueError):
+            SimulationInput(**self._valid(links=[lk]))
+
+    @pytest.mark.parametrize("d_over", [
+        {"flow": -0.1},
+        {"t_start": -10},
+        {"t_start": 100, "t_end": 50},   # 逆転
+        {"t_start": 100, "t_end": 100},  # 長さゼロ
+    ])
+    def test_bad_demand_values_rejected(self, d_over):
+        d = {"orig": "A", "dest": "B", "t_start": 0, "t_end": 100, "flow": 0.1}
+        d.update(d_over)
+        with pytest.raises(ValueError):
+            SimulationInput(**self._valid(demands=[d]))
+
+    def test_node_negative_capacity_rejected(self):
+        nodes = self._nodes()
+        nodes[1]["flow_capacity"] = -0.5
+        with pytest.raises(ValueError):
+            SimulationInput(**self._valid(nodes=nodes))
+
+    def test_validation_error_reaches_client_as_422(self):
+        """/simulate 経由でも 500 ではなく，どの項目かが分かる 422 になる．"""
+        from fastapi.testclient import TestClient
+        from server import app
+        client = TestClient(app)
+        r = client.post("/simulate", json=self._valid(deltan=0))
+        assert r.status_code == 422
+        # /simulate は FastAPI 標準の 422（loc 付きリスト）．フロントは msg を連結して表示する
+        assert "deltan" in json.dumps(r.json()["detail"])
+
 
 # ============================================================
 # 2z. シナリオパッチエンジン（rerun_simulation）
@@ -478,6 +543,36 @@ class TestScenarioModifications:
             {"action": "generate_demands", "strategy": "boundary", "clear_existing": True},
         ])
         assert len(sc["demands"]) >= 2  # 周縁ノード全ペア
+
+    def test_set_params_sets_seed_and_reaction_time(self):
+        from server import _apply_modifications
+        sc, applied = _apply_modifications(self._base(), [
+            {"action": "set_params", "random_seed": 42, "reaction_time": 1.7},
+        ])
+        assert sc["random_seed"] == 42 and sc["reaction_time"] == 1.7
+        assert sc["tmax"] == 1000  # 触っていない値はそのまま
+        assert "set_params" in applied[0]
+        # None で既定に戻す
+        sc2, _ = _apply_modifications(sc, [{"action": "set_params", "random_seed": None}])
+        assert "random_seed" not in sc2 and sc2["reaction_time"] == 1.7
+
+    def test_set_params_rejects_unknown_field(self):
+        from server import _apply_modifications
+        with pytest.raises(ValueError, match="set_params"):
+            _apply_modifications(self._base(), [{"action": "set_params", "foo": 1}])
+        with pytest.raises(ValueError, match="set_params"):
+            _apply_modifications(self._base(), [{"action": "set_params"}])
+
+    def test_seed_survives_rerun_derivation(self):
+        """base に seed があれば，別の差分だけ当てた派生シナリオにも同じ seed が残る．"""
+        from server import _apply_modifications
+        base = self._base(); base["random_seed"] = 7; base["reaction_time"] = 1.5
+        sc, _ = _apply_modifications(base, [
+            {"action": "update_links", "names": ["r1"], "set": {"capacity": 0.3}},
+        ])
+        assert sc["random_seed"] == 7 and sc["reaction_time"] == 1.5
+        si = SimulationInput(**sc)
+        assert si.random_seed == 7
 
 
 class TestNetworkInfo:
@@ -859,6 +954,42 @@ class TestSimulationDataAggregation:
         json_str = json.dumps(sim_data)
         # 100KB 以下であること（LLM に渡せるサイズ）
         assert len(json_str) < 100_000, f"データが大きすぎる: {len(json_str)} bytes"
+
+    def test_vehicle_count_is_real_vehicles_not_platoons(self, sim_data):
+        """[修正履歴] network_vehicle_count がプラトン数のままで deltan 分の 1 に見えていた．
+
+        フレームの ids は UXsim のプラトン（deltan 台）なので，実台数 = プラトン数 × deltan．
+        vehicle_counts は間引き前の全点から数えた値で，frames と一致する（この規模は間引きなし）．
+        """
+        res = results_store["test_aggregation"]
+        deltan = res["_scenario"]["deltan"]
+        assert deltan == 5
+        assert res["vehicle_sample_step"] == 1
+        counts = res["vehicle_counts"]
+        assert len(counts) == len(res["frame_times"])
+        # 全フレームでプラトン数 × deltan と一致
+        for t, c in zip(res["frame_times"], counts):
+            assert c == len(res["frames"][str(t)]["ids"]) * deltan
+        # LLM に渡る系列も同じスケール（先頭 = 最初のサンプル時刻）
+        assert sim_data["network_vehicle_count"][0] == counts[0]
+        assert max(sim_data["network_vehicle_count"]) == max(counts[::max(1, -(-len(counts) // 30))])
+        assert max(counts) > 0
+        assert "deltan=5" in sim_data["vehicle_count_note"]
+
+    def test_vehicle_count_fallback_for_old_results(self):
+        """vehicle_counts の無い古い結果でも deltan × 間引き で換算される．"""
+        import copy
+        old = copy.copy(results_store["test_aggregation"])
+        old.pop("vehicle_counts", None)
+        old["vehicle_sample_step"] = 2
+        results_store["test_aggregation_old"] = old
+        try:
+            d = _get_simulation_data("test_aggregation_old")
+            t0 = d["time_labels"][0]
+            f0 = old["frames"][str(float(t0))]
+            assert d["network_vehicle_count"][0] == len(f0["ids"]) * 5 * 2
+        finally:
+            results_store.pop("test_aggregation_old", None)
 
 
 # ============================================================
@@ -1285,11 +1416,12 @@ class TestPostProcessingPipeline:
             json.dumps(sd)  # 標準 json で直列化できる（numpy 型が漏れていない）
             results_store["test_sampling_base"] = base
             sd_base = _get_simulation_data("test_sampling_base")
-            # 補正後の台数は step の倍数で，系列全体では元の台数と同程度
-            # （個々の時刻はサンプリング誤差が大きいので合計で比較）
-            assert all(a % step == 0 for a in sd["network_vehicle_count"])
-            n = len(sd["network_vehicle_count"])
-            assert abs(sum(sd["network_vehicle_count"]) - sum(sd_base["network_vehicle_count"])) <= step * n
+            # 台数は描画用の間引き前に数えるので，間引きの有無で系列が一致する
+            # （旧実装は「サンプル数 × step」の近似で，時刻ごとに誤差が出ていた）
+            assert sampled["vehicle_counts"] == base["vehicle_counts"]
+            assert sd["network_vehicle_count"] == sd_base["network_vehicle_count"]
+            deltan = base["_scenario"]["deltan"]
+            assert all(a % deltan == 0 for a in sd["network_vehicle_count"])
         finally:
             results_store.pop(sid, None)
             results_store.pop("test_sampling_base", None)
@@ -1764,6 +1896,105 @@ class TestStandalonePipeline:
         text = out.read_text(encoding="utf-8")
         assert '"flow_capacity": 0.4' in text
         assert '"free_flow_speed": 10' in text
+
+    # ── 乱数シード: シナリオに持たせ，全経路で維持する ──
+    SEEDED = {**SCENARIO_DICT, "random_seed": 42, "reaction_time": 1.5,
+              "demands": [{"orig": "A", "dest": "C", "t_start": 0, "t_end": 400, "flow": 0.6},
+                          {"orig": "A", "dest": "B", "t_start": 0, "t_end": 400, "flow": 0.3}]}
+
+    def test_bridge_passes_seed_and_reaction_time_to_world(self):
+        from uxsim_bridge import build_world, scenario_from_dict
+        W = build_world(scenario_from_dict(self.SEEDED))
+        assert W.random_seed == 42
+        assert abs(W.REACTION_TIME - 1.5) < 1e-9
+        W0 = build_world(scenario_from_dict(self.SCENARIO_DICT))
+        assert W0.random_seed is None
+
+    def test_seeded_server_runs_are_reproducible(self):
+        """同じ seed の 2 回の _run_uxsim は統計もフレームも一致し，別 seed では乱数列が変わる．"""
+        import numpy as np
+        a = _run_uxsim(SimulationInput(**self.SEEDED))
+        b = _run_uxsim(SimulationInput(**self.SEEDED))
+        assert a["stats"]["completed_trips"] == b["stats"]["completed_trips"]
+        assert a["stats"]["average_travel_time_s"] == b["stats"]["average_travel_time_s"]
+        assert a["vehicle_counts"] == b["vehicle_counts"]
+        for k in a["frames"]:
+            assert np.array_equal(a["frames"][k]["xs"], b["frames"][k]["xs"])
+        assert a["_scenario"]["random_seed"] == 42  # 保存シナリオに残る
+        # 別 seed では World の乱数列が変わる（結果が同じでも rng 状態は別）
+        from uxsim_bridge import build_world, scenario_from_dict
+        Wa = build_world(scenario_from_dict(self.SEEDED))
+        Wb = build_world(scenario_from_dict({**self.SEEDED, "random_seed": 43}))
+        assert Wa.rng.random() != Wb.rng.random()
+
+    def test_emitted_script_carries_seed(self, tmp_path):
+        import importlib.util
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts"))
+        import run_scenario
+
+        out = tmp_path / "emitted_seed.py"
+        run_scenario.emit_python({"scenario": self.SEEDED}, str(out), source="test")
+        text = out.read_text(encoding="utf-8")
+        assert "RANDOM_SEED = 42" in text
+        spec = importlib.util.spec_from_file_location("emitted_seed_mod", out)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        W = mod.build()
+        assert W.random_seed == 42
+        assert abs(W.REACTION_TIME - 1.5) < 1e-9
+
+    def test_scenario_envelope_keeps_seed(self):
+        """/results/{id}/scenario（再現用 DL）に random_seed / reaction_time が残る．"""
+        from server import _build_envelope, _store_sim
+        res = _run_uxsim(SimulationInput(**self.SEEDED))
+        _store_sim("seed_env_test", res)
+        try:
+            env = _build_envelope("seed_env_test", include_result=False)
+            assert env["scenario"]["random_seed"] == 42
+            assert env["scenario"]["reaction_time"] == 1.5
+            full = _build_envelope("seed_env_test", include_result=True)
+            assert full["result"]["vehicle_counts"] == res["vehicle_counts"]
+        finally:
+            results_store.pop("seed_env_test", None)
+
+
+class TestGuiRerunCarriesScenarioParams:
+    """GUI エディタからの再実行が reaction_time / random_seed を落とさないことを，
+    index.html のソース上で固定する（ブラウザなしで検証できる範囲）．
+
+    [修正履歴] 編集後の POST /simulate に reaction_time が無く，元シナリオで 1.7 を
+    指定していても UXsim 既定 1.0 に戻り，1 車線容量が約 1,846 → 2,880 台/時に変わっていた．
+    """
+
+    @pytest.fixture(scope="class")
+    def html(self):
+        p = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "index.html")
+        with open(p, encoding="utf-8") as f:
+            return f.read()
+
+    def _run_handler(self, html):
+        i = html.index("document.getElementById('et-run').addEventListener")
+        j = html.index("// ── 再生制御 ──", i)
+        return html[i:j]
+
+    def test_submit_includes_reaction_time_and_seed(self, html):
+        h = self._run_handler(html)
+        assert "scenario.reaction_time = " in h
+        assert "scenario.random_seed = " in h
+        assert "deltan:" in h
+
+    def test_edit_mode_initializes_from_scenario(self, html):
+        i = html.index("function toggleEditMode()")
+        block = html[i:i + 2000]
+        assert "src.reaction_time" in block and "src.random_seed" in block
+        assert 'id="et-rt"' in html and 'id="et-seed"' in html
+
+    def test_active_vehicles_uses_real_counts(self, html):
+        i = html.index("function computeStatsSeries()")
+        block = html[i:html.index("function currentFrameIdx()", i)]
+        assert "vehicleCounts[i]" in block
+        assert "frame.n * vehScale" in block
+        assert "vehicle_counts" in html and "vehicle_sample_step" in html
 
 
 # ============================================================
