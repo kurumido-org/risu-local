@@ -459,8 +459,9 @@ class TestResultsPersistence:
         import risu.simulation
         sid = "p_reload"
         original = self._store(sid)
-        files = list(store_dir.iterdir())
+        files = [f for f in store_dir.iterdir() if not f.name.endswith(".meta.json")]
         assert len(files) == 1 and files[0].name.startswith(sid + ".json.")
+        assert (store_dir / f"{sid}.meta.json").exists()      # 一覧用のサイドカー
         orig_data = get_simulation_data(sid)
 
         # メモリから消しても（再起動・MAX_RESULTS の追い出し相当）透過的に戻る
@@ -616,3 +617,36 @@ class TestResultsStoreConcurrency:
             assert set(risu.results.results_store[sid]["_enc_cache"]) == {"gzip"}
         finally:
             risu.results.results_store.pop(sid, None)
+
+
+class TestResultsList:
+    """GET /results と list_results: メモリ + ディスク（サイドカー）を本体を読まずに一覧にする．"""
+
+    def test_list_merges_memory_and_persisted(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+        import risu.api
+        import risu.results
+        monkeypatch.setattr(risu.results, "RESULTS_DIR", str(tmp_path))
+        base = run_uxsim(BOTTLENECK_SCENARIO)
+        fut = risu.results.store_sim("lst_a", base, {"type": "manual"})
+        fut.result(timeout=60)
+        assert (tmp_path / "lst_a.meta.json").exists()
+        dict.pop(risu.results.results_store, "lst_a")          # ディスクだけにある状態
+        risu.results.store_sim("lst_b", run_uxsim(BOTTLENECK_SCENARIO), {"type": "llm", "via": "mcp",
+                                                                          "llm_user_message": "secret"})
+        (tmp_path / "dropped.json").write_bytes(risu.results.envelope_json_bytes("lst_b"))  # サイドカー無し
+        try:
+            rows = {r["sim_id"]: r for r in risu.results.list_results()}
+            assert {"lst_a", "lst_b", "dropped"} <= set(rows)
+            assert rows["lst_a"]["persisted"] and not rows["lst_a"]["in_memory"]
+            assert rows["lst_a"]["stats"]["total_trips"] == base["stats"]["total_trips"]
+            assert rows["lst_b"]["in_memory"] and rows["lst_b"]["source"]["via"] == "mcp"
+            assert "llm_user_message" not in rows["lst_b"]["source"]      # 発話文は載せない
+            assert rows["dropped"]["source"]["type"] == "file" and rows["dropped"]["stats"] == {}
+            # 本体はロードされていない（一覧は軽い）
+            assert not dict.__contains__(risu.results.results_store, "lst_a")
+            r = TestClient(risu.api.app).get("/results?limit=2")
+            assert r.status_code == 200 and len(r.json()["results"]) == 2
+        finally:
+            for s in ("lst_a", "lst_b", "dropped"):
+                risu.results.results_store.pop(s, None)

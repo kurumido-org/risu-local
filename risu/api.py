@@ -26,6 +26,7 @@ from .results import (
     build_envelope,
     envelope_compressed_bytes,
     envelope_json_bytes,
+    list_results,
     negotiate_encoding,
     persisted_ids,
     results_store,
@@ -166,6 +167,12 @@ async def simulate(scenario: SimulationInput):
     sim_id = str(uuid.uuid4())[:8]
     store_sim(sim_id, result, {"type": "manual"})
     return {"id": sim_id, "stats": result["stats"]}
+
+
+@app.get("/results")
+async def get_results_list(limit: int = 50):
+    """結果の一覧（メモリ + RISU_RESULTS_DIR）．本体は含まない．"""
+    return {"results": list_results(limit)}
 
 
 @app.get("/results/{sim_id}")

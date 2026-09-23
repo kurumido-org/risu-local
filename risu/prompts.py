@@ -94,6 +94,7 @@ UXsim は交差点ノードに信号制御を設定できる．2 つのパラメ
   例: run_simulation({"grid":{"nx":5,"ny":5,"spacing":500},"auto_demands":{"strategy":"boundary"},"tmax":3600})
 - シナリオ比較（容量変更前後など）も rerun_simulation を複数回呼べばよい．
   各実行の sim_id が返るので，get_simulation_data でそれぞれの結果を取得して比較する
+- 過去の結果（「前回の」「保存してある」）を参照するときは list_simulations で一覧を取り，sim_id を確かめる
 - シミュレーションは確率的（経路選択ノイズ・合流順）で，同じ入力でも実行ごとに結果が変わる．
   条件比較や追試では random_seed を固定する（run_simulation の random_seed，または
   rerun_simulation の {"action":"set_params","random_seed":42}）．seed は保存シナリオに残るので，
@@ -498,6 +499,20 @@ CLAUDE_TOOLS = [
                 "max_links": {"type": "integer", "description": "link_speeds に含めるリンク数（デフォルト 20，上限 50）．リンク別の分析が不要なら 0"},
             },
             "required": ["sim_id"],
+        },
+    },
+    {
+        "name": "list_simulations",
+        "description": (
+            "サーバーにあるシミュレーション結果の一覧（sim_id・名前・作成日時・出所・規模・統計）を新しい順に返す．"
+            "「前回の結果」「さっきのシミュレーション」「保存してある結果」など過去の結果を参照するとき，"
+            "compare_simulations や rerun_simulation に渡す sim_id を探すときに使う．"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "件数（デフォルト 20，上限 100）"},
+            },
         },
     },
     {

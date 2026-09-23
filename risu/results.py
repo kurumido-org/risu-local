@@ -20,6 +20,7 @@ __all__ = [
     "envelope_compressed_bytes",
     "envelope_gzip_bytes",
     "envelope_json_bytes",
+    "list_results",
     "negotiate_encoding",
     "persisted_ids",
     "persisted_path",
@@ -156,6 +157,8 @@ def persisted_ids() -> list[str]:
         return []
     found = []
     for name in os.listdir(RESULTS_DIR):
+        if name.endswith(".meta.json"):     # 一覧用のサイドカー（result_summary）
+            continue
         for ext in (".json.zst", ".json.gz", ".json"):
             if name.endswith(ext):
                 sid = name[: -len(ext)]
@@ -182,11 +185,72 @@ def _persist_sim(sim_id: str) -> str | None:
         with open(tmp, "wb") as f:
             f.write(blob)
         os.replace(tmp, path)
+        # 一覧用のサイドカー（本体を読まずに GET /results で出せるように）
+        meta_path = os.path.join(RESULTS_DIR, f"{sim_id}.meta.json")
+        with open(meta_path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(result_summary(sim_id, results_store[sim_id]), f, ensure_ascii=False)
+        os.replace(meta_path + ".tmp", meta_path)
         log.info(f"persisted {sim_id} -> {path} ({len(blob)/1e6:.1f}MB)")
         return path
     except Exception as e:   # 永続化の失敗でシミュレーション自体は失敗させない
         log.warning(f"persist {sim_id} failed: {e.__class__.__name__}: {e}")
         return None
+
+
+def result_summary(sim_id: str, raw: dict) -> dict:
+    """一覧・サイドカー用の要約（本体のフレームは含めない．数百バイト）．"""
+    sc = raw.get("_scenario") or {}
+    meta = raw.get("_meta") or {}
+    src = meta.get("source") or {}
+    return {
+        "sim_id": sim_id,
+        "name": sc.get("name"),
+        "created_at": meta.get("created_at"),
+        # 出所は識別に要るものだけ（ユーザーの発話文は載せない）
+        "source": {k: v for k, v in src.items()
+                   if k in ("type", "via", "tool", "place", "distance_m", "road_types", "base_sim_id", "demand")},
+        "tmax": sc.get("tmax"),
+        "random_seed": sc.get("random_seed"),
+        "nodes": len(sc.get("nodes") or []),
+        "links": len(sc.get("links") or []),
+        "demands": len(sc.get("demands") or []),
+        "stats": raw.get("stats") or {},
+        "in_memory": dict.__contains__(results_store, sim_id),
+        "persisted": persisted_path(sim_id) is not None,
+    }
+
+
+def list_results(limit: int = 50) -> list[dict]:
+    """メモリ上とディスク上（RESULTS_DIR）の結果一覧を新しい順に返す．
+
+    ディスクだけにあるものはサイドカー（<sim_id>.meta.json）を読む．サイドカーの無い
+    ファイル（ダウンロード JSON を置いただけ等）は sim_id と更新時刻だけの行になる．
+    本体は読まないので，件数が多くても軽い．
+    """
+    limit = max(1, min(int(limit or 50), 500))
+    with results_store.lock:
+        items = list(dict.items(results_store))
+    rows = {sid: result_summary(sid, raw) for sid, raw in items}
+    for sid in persisted_ids():
+        if sid in rows:
+            continue
+        meta_path = os.path.join(RESULTS_DIR, f"{sid}.meta.json")
+        row = None
+        if os.path.isfile(meta_path):
+            try:
+                with open(meta_path, encoding="utf-8") as f:
+                    row = json.load(f)
+            except (OSError, ValueError) as e:
+                log.warning(f"sidecar {meta_path} unreadable: {e}")
+        if row is None:
+            path = persisted_path(sid)
+            mtime = datetime.fromtimestamp(os.path.getmtime(path), tz=timezone.utc).isoformat() if path else None
+            row = {"sim_id": sid, "name": None, "created_at": mtime, "source": {"type": "file"},
+                   "stats": {}, "nodes": None, "links": None, "demands": None}
+        row["in_memory"] = False
+        row["persisted"] = True
+        rows[sid] = row
+    return sorted(rows.values(), key=lambda r: r.get("created_at") or "", reverse=True)[:limit]
 
 
 def _decode_frames_v3(frames: dict) -> dict:

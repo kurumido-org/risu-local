@@ -132,7 +132,7 @@ LLM が扱うのは `sim_id`・差分命令・集計値だけです（§3.3）�
 （`from risu.x import Y` で束縛した先を差し替えても効かない）．
 
 **LLM ツール**: `run_simulation` / `rerun_simulation` / `get_network_info` /
-`get_simulation_data` / `import_osm_network`．
+`get_simulation_data` / `import_osm_network` / `list_simulations`．
 チャートは LLM が ````chart```` ブロックで Chart.js 設定を出力し，フロントが描画します．
 
 **結果ストア**は `results_store`（`_ResultsStore`，dict 派生）です．既定では in-memory で

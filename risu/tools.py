@@ -11,7 +11,7 @@ from fastapi import HTTPException
 
 from .aggregate import get_simulation_data
 from .importers import run_osm_import
-from .results import results_store, store_sim
+from .results import list_results, results_store, store_sim
 from .runtime import executor, log
 from .scenario_ops import apply_modifications, expand_run_simulation_args, generate_osm_demands, osm_demand_summary
 from .schema import ChatInput, SimulationInput
@@ -393,6 +393,10 @@ async def dispatch_tool_blocks(tool_blocks, state: ToolTurnState, *, follow_up: 
             except Exception as e:
                 log.exception("unexpected error")
                 results.append(_tool_result(tb.id, f"OSMインポートエラー: {e!s}", True))
+
+        elif name == "list_simulations":
+            rows = list_results(min(int(args.get("limit") or 20), 100))
+            results.append(_tool_result(tb.id, json.dumps(rows, ensure_ascii=False)))
 
         elif name == "get_simulation_data":
             yield ("progress", "チャートデータを取得中..." if follow_up else "データを集計中...")

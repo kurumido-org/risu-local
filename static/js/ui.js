@@ -190,11 +190,10 @@ function saveHistoryEntry() {
 function renderHistoryList() {
   const list = document.getElementById('history-list');
   const items = loadHistoryIndex();
-  if (!items.length) {
-    list.innerHTML = '<div class="hist-empty">履歴はまだありません</div>';
-    return;
-  }
   list.innerHTML = '';
+  if (!items.length) {
+    list.innerHTML = '<div class="hist-empty">会話の履歴はまだありません</div>';
+  }
   for (const it of items) {
     const el = document.createElement('div');
     el.className = 'hist-item';
@@ -203,6 +202,37 @@ function renderHistoryList() {
     el.innerHTML = `<div class="t">${dateStr}${it.simId ? ' · ' + it.simId : ''}</div><div class="q"></div>`;
     el.querySelector('.q').textContent = it.title;
     el.addEventListener('click', () => restoreHistory(it));
+    list.appendChild(el);
+  }
+  renderServerResults(list);
+}
+
+// サーバー側の結果一覧（メモリ + RISU_RESULTS_DIR）．会話履歴とは別に，結果だけを開き直せる
+async function renderServerResults(list) {
+  let rows = [];
+  try {
+    const r = await fetch(`${API}/results?limit=30`);
+    if (r.ok) rows = (await r.json()).results || [];
+  } catch (_) { return; }
+  if (!rows.length) return;
+  const head = document.createElement('div');
+  head.className = 'hist-section';
+  head.textContent = 'サーバーの結果';
+  list.appendChild(head);
+  for (const s of rows) {
+    const el = document.createElement('div');
+    el.className = 'hist-item';
+    const d = s.created_at ? new Date(s.created_at) : null;
+    const dateStr = d ? `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}` : '';
+    const size = (s.nodes != null) ? ` · ${s.nodes}n/${s.links}l` : '';
+    const src = s.source || {};
+    const where = src.place ? ` · ${src.place}` : (src.type ? ` · ${src.type}` : '');
+    const st = s.stats || {};
+    const stat = st.completed_trips != null ? ` · 到着 ${st.completed_trips}/${st.total_trips}` : '';
+    el.innerHTML = `<div class="t"></div><div class="q"></div>`;
+    el.querySelector('.t').textContent = `${dateStr} · ${s.sim_id}${s.persisted ? ' · 保存済' : ''}`;
+    el.querySelector('.q').textContent = `${s.name || ''}${where}${size}${stat}`;
+    el.addEventListener('click', () => { loadResult(s.sim_id); toggleHistory(); });
     list.appendChild(el);
   }
 }

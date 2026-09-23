@@ -755,7 +755,7 @@ Claude Code の場合:
 claude mcp add --transport sse risu http://localhost:8001/mcp
 ```
 
-提供されるツールはチャットの LLM と同じ 5 つ（定義も同一）に，互換用の `get_result` を加えたものです:
+提供されるツールはチャットの LLM と同じもの（定義も同一）に，互換用の `get_result` を加えたものです:
 
 | ツール | 説明 |
 |---|---|
@@ -764,6 +764,7 @@ claude mcp add --transport sse risu http://localhost:8001/mcp
 | `get_network_info` | ノード・リンクの要約と絞り込み照会 |
 | `get_simulation_data` | チャート用の集計データ（時系列・リンク別速度・速度分布） |
 | `import_osm_network` | OpenStreetMap から道路網を取り込んで実行 |
+| `list_simulations` | 結果の一覧（sim_id・作成日時・出所・統計） |
 | `get_result` | 統計 3 値だけを `simulation_id` で取得（互換用） |
 
 結果はブラウザ側にも反映されるので，MCP で実行して UI で眺める，という使い方もできます．
@@ -777,6 +778,7 @@ claude mcp add --transport sse risu http://localhost:8001/mcp
 | Method | Path | 説明 |
 |---|---|---|
 | `POST` | `/simulate` | シミュレーションを直接実行．`{"id": "...", "stats": {...}}` を返す |
+| `GET` | `/results` | 結果の一覧（メモリ + 永続化分．`limit` で件数）．本体は含まない |
 | `GET` | `/results/{id}` | 完全な結果（GeoJSON + 個車フレーム + 統計）．zstd / gzip を Accept-Encoding で交渉 |
 | `GET` | `/results/{id}/scenario` | 再現用のシナリオのみ（軽量） |
 | `POST` | `/chat` | LLM チャット（ツール自動呼び出し，SSE ストリーミング） |
