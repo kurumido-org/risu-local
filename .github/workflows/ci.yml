@@ -60,10 +60,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13"]
-        # macOS は実機での確認はしていないが，サーバー側はここで検証する（1 組だけ．コスト対策）
-        include:
-          - os: macos-latest
-            python-version: "3.12"
+        # macOS はサポート対象外（README §1）．CI でも検証しない
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
