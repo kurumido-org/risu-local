@@ -8,9 +8,12 @@
 #
 # 更新のしかた（依存を足した / 上げたとき）:
 #   python -m venv .lockenv && .lockenv\Scripts\pip install -r requirements.txt
-#   .lockenv\Scripts\pip freeze > requirements.lock.txt   （この見出しは残す）
-#   → pytest が通ることを確認してコミット．Windows 専用のパッケージ（pywin32 等）は
-#     Linux / macOS では単に使われないので，そのままで構わない．
+#   .lockenv\Scripts\pip freeze | findstr /v /i "pyqt pywin32" > requirements.lock.txt   （この見出しは残す）
+#   → pytest が通ることを確認してコミット．
+#
+# 適用範囲: 生成環境と同じ Python 3.12 のジョブだけ（CI の test 3.12 と単発ジョブ）．
+#   3.10 / 3.11 は osmnx 2.1 等に配布物が無く同じ pin では解決できないので範囲指定で最新を入れる．
+#   PyQt5 系（uxsim の必須依存だが RISU は import しない）と pywin32 は OS ごとに版が違うので pin しない．
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anthropic==0.125.0
@@ -57,13 +60,9 @@ PyJWT==2.14.0
 pyogrio==0.13.0
 pyparsing==3.3.3
 pyproj==3.8.0
-PyQt5==5.15.11
-PyQt5-Qt5==5.15.2
-PyQt5_sip==12.19.0
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.3
 python-multipart==0.0.32
-pywin32==312
 PyYAML==6.0.3
 referencing==0.37.0
 requests==2.34.2

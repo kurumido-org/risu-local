@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # push / pull_request は requirements.lock.txt に固定して走る（再現性）．
+  # push / pull_request は requirements.lock.txt に固定して走る（再現性．Python 3.12 のジョブのみ）．
   # 週次の schedule と手動実行は制約なしで最新版を入れ，新しい uxsim / starlette で壊れないかを見る．
   # 2 段構えにすると「自分の変更で壊れた」と「依存が動いて壊れた」を切り分けられる．
   LOCK_ARGS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--upgrade' || '-c requirements.lock.txt' }}
@@ -70,8 +70,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - name: install (${{ env.LOCK_ARGS }})
-        run: pip install ${{ env.LOCK_ARGS }} -r requirements-dev.txt
+      # lock は生成環境（Python 3.12）にだけ適用する．3.10 / 3.11 は同じ pin では解決できない
+      # （osmnx 2.1 等に配布物が無い）ので範囲指定で最新を入れ，互換性の確認を兼ねる．
+      - name: install (${{ matrix.python-version == '3.12' && env.LOCK_ARGS || '--upgrade' }})
+        run: pip install ${{ matrix.python-version == '3.12' && env.LOCK_ARGS || '--upgrade' }} -r requirements-dev.txt
       - name: pytest
         run: pytest -ra -q
 

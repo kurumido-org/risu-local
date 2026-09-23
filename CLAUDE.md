@@ -84,7 +84,7 @@ risu-local/
 │   └── e2e/              ← headless Chromium のスモークテスト（playwright が無ければ skip）
 ├── pyproject.toml        ← ruff / pytest 設定 + パッケージメタデータ
 ├── requirements.txt      ← 範囲指定（上限付き）
-├── requirements.lock.txt ← 検証済みの完全な pip freeze．CI の push/PR はこれに固定，週次は最新で走る
+├── requirements.lock.txt ← 検証済みの完全な pip freeze（Python 3.12 用）．CI の 3.12 ジョブはこれに固定，他の Python と週次は最新で走る
 └── .env                  ← LLM_BACKEND / ANTHROPIC_API_KEY（.env.example をコピー）
 ```
 
@@ -364,7 +364,7 @@ MCP（`mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
 | **型が絡む変更** | `pyright` を通す（CI の typecheck ジョブ）．外部ライブラリの動的属性は `# type: ignore[attr-defined]` を最小限に |
 | **ログを出す** | `from .runtime import log` で logger `risu` を使う（`print` は `TestLogging` が弾く）．info = 通常の進行，warning = 劣化して続行，error = 失敗．`RISU_LOG_LEVEL` で制御 |
 | **依存を追加する** | `requirements.txt`（上限付き）+ `pyproject.toml`．`requirements.lock.txt` は clean な venv の `pip freeze` で作り直す（手順はファイル冒頭）．ライセンスは THIRD_PARTY_LICENSES.md に追記．CI の `licenses` ジョブが GPL 系を弾く |
-| **CI が依存の更新で落ちた** | 週次 / 手動実行は最新版で走る（`LOCK_ARGS=--upgrade`）．push/PR は lock 固定なので，落ちたら「依存が動いた」と分かる．直したら lock を作り直す |
+| **CI が依存の更新で落ちた** | 週次 / 手動実行と 3.10 / 3.11 のジョブは最新版で走る（`--upgrade`）．3.12 のジョブは lock 固定なので，そこが落ちたら自分の変更．直したら lock を作り直す（手順は lock 冒頭．PyQt5 系と pywin32 は入れない） |
 | **`uxsim_bridge.py` を触る** | FastAPI / pydantic / anthropic を import しないこと（§3.1） |
 | **シナリオ全体のパラメータを足す** | `SimulationInput` / `SCENARIO_DEFAULTS` / `build_world` / `set_params` / GUI `et-run` / `EMIT_TEMPLATE` の 6 箇所（§3.1） |
 | **台数を扱う集計を足す** | `vehicle_counts` を使うか `deltan` を掛ける（§3.3）．フレームの点数はプラトン数 |
