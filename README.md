@@ -811,7 +811,7 @@ claude mcp add --transport sse risu http://localhost:8001/mcp
 | ツール | 説明 |
 |---|---|
 | `run_simulation` | ノード・リンク・需要（または `grid` / `auto_demands`）でシミュレーションを実行 |
-| `rerun_simulation` | 保存済みシナリオに差分命令を当てて再実行（[§9](#9-llm-にネットワークを渡さない設計)） |
+| `rerun_simulation` | 保存済みシナリオに差分命令を当てて再実行（[§12](#12-アーキテクチャ-大規模ネットワークと-llm-の分離)） |
 | `get_network_info` | ノード・リンクの要約と絞り込み照会 |
 | `get_simulation_data` | チャート用の集計データ（時系列・リンク別速度・速度分布） |
 | `import_osm_network` | OpenStreetMap から道路網を取り込んで実行 |
@@ -839,6 +839,8 @@ claude mcp add --transport sse risu http://localhost:8001/mcp
 | `GET` | `/gmns/datasets` | GMNS データセット一覧 |
 | `POST` | `/gmns/import` | GMNS 取込 |
 | `GET` | `/mcp` | MCP SSE エンドポイント |
+| `POST` | `/mcp/messages/` | MCP の受信側（クライアントが使う．手で叩く必要はない） |
+| `GET` | `/js/risu.bundle.js` | UI の JS を 1 本に連結したもの（`index.html` が読む．内部用） |
 | `GET` | `/healthz` | ヘルスチェック |
 | `GET` | `/docs` | Swagger UI |
 
@@ -912,6 +914,7 @@ curl -X POST http://localhost:8001/simulate \
 | `RISU_MAX_RESULTS` | `30` | メモリに保持する結果の件数．超えると古い順に破棄（永続化していればディスクから戻る） |
 | `RISU_RESULTS_DIR` | — | 設定すると結果をこのディレクトリに保存し，再起動後も読める（[§3.6](#36-結果の保存)） |
 | `RISU_LOG_LEVEL` | `INFO` | サーバーログの詳細度（`DEBUG` / `INFO` / `WARNING`）．ログは `risu:` の接頭辞で stderr に出る |
+| `RISU_STARTUP_SELFCHECK` | `1` | 起動時に最小シナリオを 1 回流し，uxsim のバックエンドと高速経路の可否をログに出す（`0` で無効） |
 
 ### 可視化・転送
 
@@ -1094,21 +1097,27 @@ Chart.js を CDN から読み込んでいるため，**オフラインだとグ�
 ```bash
 pip install -r requirements-dev.txt
 
-pytest tests/ -v        # テスト
-ruff check .            # lint（CI と同じ設定）
-python scripts/bench.py # 性能ベンチ
+pytest tests/ -v                 # サーバー側のテスト（playwright が入っていれば tests/e2e も走る）
+ruff check .                     # lint（CI と同じ設定）
+pyright                          # 型チェック（basic．対象は pyproject の [tool.pyright]）
+node --test tests/js/*.test.js   # フロントの純粋ロジック（依存なし）
+python scripts/bench.py          # 性能ベンチ
 ```
 
-CI（GitHub Actions）は次の 4 ジョブを定義しています:
+CI（GitHub Actions）は次の 7 ジョブを定義しています:
 
 | ジョブ | 内容 |
 |---|---|
 | `lint` | `ruff check` |
-| `test` | `pytest`（Ubuntu / Windows × Python 3.10〜3.13 の 8 通り） |
+| `typecheck` | `pyright`（basic） |
+| `test` | `pytest`（Ubuntu / Windows × Python 3.10〜3.13 の 8 通り．3.12 は `requirements.lock.txt` に固定，他は最新版） |
+| `frontend` | `node --test tests/js`（`static/js/risu-core.js` の単体テスト） |
+| `e2e` | headless Chromium（Playwright）で読み込み・描画・統計・エディタの結線を確認 |
 | `licenses` | 新しいコピーレフト依存が入っていないかの検査 |
 | `standalone` | uxsim だけの環境で `scripts/run_scenario.py` が動くかの検証 |
 
-`schedule` で毎週も走ります．RISU は uxsim の内部 API に依存した高速化を持つため
+`schedule` で毎週も走り，そのときは依存を固定せず最新版を入れます．RISU は uxsim の
+内部 API に依存した高速化を持つため
 （[CLAUDE.md §3.6](CLAUDE.md#36-後処理に車両ごとの-python-ループを持たない)），
 新しい uxsim が出たときに push が無くても気づけるようにしてあります．
 

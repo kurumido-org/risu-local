@@ -40,7 +40,7 @@ ruff check .            # lint（pyproject.toml の設定）
 python scripts\bench.py # 性能に関わる変更をしたとき
 ```
 
-`ruff format` は**意図的に使っていません**．`server.py` の数値処理は桁を揃えて
+`ruff format` は**意図的に使っていません**．`risu/simulation.py` などの数値処理は桁を揃えて
 書いてあり，自動整形すると数千行の差分が出て履歴が読めなくなるためです．
 
 ## コードを変更する場合

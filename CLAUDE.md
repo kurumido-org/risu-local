@@ -178,7 +178,7 @@ LLM が扱うのは `sim_id`・差分命令・集計値だけです（§3.3）�
   GUI エディタの送信（index.html の `et-run`），`scripts/run_scenario.py` の `EMIT_TEMPLATE`．
   GUI 送信から `reaction_time` が抜けて，編集のたびに容量の前提が UXsim 既定へ戻る
   不具合があった．`random_seed` を省くと結果は実行ごとに変わる（経路選択ノイズ・合流順）．
-- **テスト**: `TestStandalonePipeline`（11 件）・`TestGuiRerunCarriesScenarioParams`（3 件）．
+- **テスト**: `TestStandalonePipeline`・`TestGuiRerunCarriesScenarioParams`．
   import の純粋性，サーバー経路との統計一致，seed の再現性と全経路での維持を検証．
   CI の `standalone` ジョブも uxsim だけの環境で実行．
 
@@ -196,7 +196,7 @@ LLM が扱うのは `sim_id`・差分命令・集計値だけです（§3.3）�
   欠けると 400）．未知のツール名でも結果を積むこと．
 - **ツールを追加するとき**: `dispatch_tool_blocks` に分岐を 1 つ足すだけでよい．
   `follow_up` は 2 ラウンド目以降で，進捗の文言と保存メタの `round` が変わる．
-- **テスト**: `TestToolDispatch`（8 件）・`TestChatStreamingPath`（4 件）．
+- **テスト**: `TestToolDispatch`・`TestChatStreamingPath`．
 
 MCP（`mcp_call_tool`）も同じ dispatcher を通します．会話コンテキストが無いので
 `ToolTurnState(body=None, via="mcp")` で呼び，進捗イベントは捨てます．
@@ -234,8 +234,8 @@ MCP（`mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
 - **チャート**: `{"$data": "network_avg_speed"}` 形式の参照を `extract_charts` →
   `_resolve_chart_refs` がこのターンの集計データ（`sim_data_cache`）で置換する．
   **LLM に配列を書き写させない**（出力トークンは入力の 5 倍単価）．
-- **テスト**: `TestScenarioModifications`（15 件）・`TestNetworkInfo`（4 件）・
-  `TestSimulationDataAggregation`（9 件）・`TestChartExtraction`（4 件）．
+- **テスト**: `TestScenarioModifications`・`TestNetworkInfo`・
+  `TestSimulationDataAggregation`・`TestChartExtraction`．
 
 ### 3.4 プロンプトキャッシュを壊さない
 
@@ -253,7 +253,7 @@ MCP（`mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
   残さない（最終テキストのみ）．
 - **計測**: 1 ターンの使用量は `UsageTally` が集計し，done イベントの `usage` で
   フロントへ（吹き出し下の `.usage-meta`）．サーバーログにも `usage ...` が出る（logger `risu`）．
-- **テスト**: `TestLLMTokenSaving`（8 件）・`TestConversationContext`（4 件）．
+- **テスト**: `TestLLMTokenSaving`・`TestConversationContext`．
 
 ### 3.5 結果データの表現 — 保存は v2，送出は v3
 
@@ -280,8 +280,8 @@ MCP（`mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
 - **間引き**: 総点数が `MAX_FRAME_POINTS`（既定 300 万，`0` で無効）を超えると
   車両 ID を `vehicle_sample_step` 間隔でサンプリングし，**描画用 frames だけ**を減らす．
   timeline と統計は全点から計算．`get_simulation_data` は台数を step 倍に補正する．
-- **テスト**: `TestFrameWireEncodingV3`（5 件）・`TestPostProcessingPipeline`（8 件）・
-  `TestFrameKeyCompatibility`（3 件）．
+- **テスト**: `TestFrameWireEncodingV3`・`TestPostProcessingPipeline`・
+  `TestFrameKeyCompatibility`．
 
 ### 3.6 後処理に車両ごとの Python ループを持たない
 
@@ -311,7 +311,7 @@ MCP（`mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
   zstd は gzip lv1 比で grid20 相当 16.3MB→5.6MB，ブラウザの fetch+解凍 767ms→120ms．
   `zstandard` 未インストールなら自動で gzip に落ちる（機能差なし）．
   キャッシュは**要求された方式のみ**作る（1 件数十 MB になり得るので先回りしない）．
-- **テスト**: `TestPostProcessingPipeline`（8 件）・`TestResultsEncodingNegotiation`（9 件）．
+- **テスト**: `TestPostProcessingPipeline`・`TestResultsEncodingNegotiation`．
   数値の確認は `python scripts\bench.py`．
 
 ### 3.7 描画は 60fps の予算（16.7ms）を守る
@@ -353,7 +353,7 @@ MCP（`mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
   戻すと同一 LAN の誰でも結果を閲覧でき，`/chat` 経由で**サーバー所有者の API キーに
   課金**できてしまいます．ループバック以外を指定した場合は起動時に警告を出します．
 - **CORS の既定も localhost のみ**（`RISU_ALLOWED_ORIGINS`）．
-- **テスト**: `TestBindDefaults`（4 件）が既定値を固定．
+- **テスト**: `TestBindDefaults`が既定値を固定．
 
 ---
 

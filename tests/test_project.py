@@ -255,3 +255,94 @@ class TestLogging:
             monkeypatch.delenv("RISU_LOG_LEVEL", raising=False)
             risu.runtime.configure_logging()
             assert risu.runtime.log.level == logging.INFO
+
+
+class TestDocsConsistency:
+    """コードと文書・設定の食い違いを CI で止める（環境変数 / API / ツール / 構成図 / リンク / 依存 / CI）．
+    ここが落ちたら，コードを直したときに文書側を更新し忘れている．"""
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _read(self, *parts):
+        with open(os.path.join(self.ROOT, *parts), encoding="utf-8") as f:
+            return f.read()
+
+    def _code(self):
+        import glob
+        files = glob.glob(os.path.join(self.ROOT, "risu", "*.py")) + \
+                glob.glob(os.path.join(self.ROOT, "scripts", "*.py")) + \
+                [os.path.join(self.ROOT, "server.py"), os.path.join(self.ROOT, "uxsim_bridge.py")]
+        return "\n".join(open(f, encoding="utf-8").read() for f in files)
+
+    def test_env_vars_documented(self):
+        code = self._code(); readme = self._read("README.md"); example = self._read(".env.example")
+        used = set(re.findall(r'os\.(?:getenv|environ\.get)\(\s*"([A-Z_]+)"', code))
+        assert used, "環境変数が検出できない"
+        in_readme = set(re.findall(r"^\| `([A-Z_]+)` \|", readme, re.M))
+        in_example = set(re.findall(r"^#?\s*([A-Z_]+)=", example, re.M))
+        assert used - in_readme == set(), f"README §8 に無い環境変数: {sorted(used - in_readme)}"
+        assert used - in_example == set(), f".env.example に無い環境変数: {sorted(used - in_example)}"
+        risu_rows = {v for v in in_readme if v.startswith(("RISU_", "OLLAMA_", "LLM_", "ANTHROPIC_"))}
+        assert risu_rows - used == set(), f"README §8 にあるがコードが読まない: {sorted(risu_rows - used)}"
+
+    def test_api_routes_documented(self):
+        code = self._code(); readme = self._read("README.md")
+        routes = set(re.findall(r'@(?:app|router)\.(?:get|post|put|delete)\("([^"]+)"', code))
+        rows = set(re.findall(r"^\| `(?:GET|POST)` \| `([^`]+)` \|", readme, re.M))
+        def norm(s):
+            return re.sub(r"\{[^}]+\}", "{id}", s)
+        assert {norm(r) for r in routes} - {norm(r) for r in rows} == set(), \
+            f"README §7 に無いルート: {sorted({norm(r) for r in routes} - {norm(r) for r in rows})}"
+        extra = {norm(r) for r in rows} - {norm(r) for r in routes} - {"/docs"}   # /docs は FastAPI 自動
+        assert extra == set(), f"README §7 にあるが存在しないルート: {sorted(extra)}"
+
+    def test_llm_tools_documented_and_dispatched(self):
+        from risu.prompts import CLAUDE_TOOLS, SYSTEM_PROMPT
+        readme = self._read("README.md"); claude_md = self._read("CLAUDE.md")
+        tools_src = self._read("risu", "tools.py")
+        names = [t["name"] for t in CLAUDE_TOOLS]
+        mcp = readme[readme.index("## 6. MCP"):readme.index("## 7.")]
+        for n in names:
+            assert f"`{n}`" in mcp, f"README §6 の表に {n} が無い"
+            assert n in claude_md, f"CLAUDE.md に {n} が無い"
+            assert n in SYSTEM_PROMPT, f"SYSTEM_PROMPT が {n} に触れていない"
+            assert f'name == "{n}"' in tools_src, f"dispatch_tool_blocks に {n} の分岐が無い"
+
+    def test_claude_md_file_tree_matches_repo(self):
+        claude_md = self._read("CLAUDE.md")
+        tree = claude_md[claude_md.index("### 2.1"):claude_md.index("### 2.2")]
+        for f in sorted(os.listdir(os.path.join(self.ROOT, "risu"))):
+            if f.endswith(".py") and f != "__init__.py":
+                assert f in tree, f"CLAUDE.md §2.1 に risu/{f} が無い"
+        for name in set(re.findall(r"([a-z_]+\.py)", tree)) - {"test_<module>.py"}:
+            hits = [p for p in (os.path.join(self.ROOT, d, name) for d in (".", "risu", "scripts", "tests"))
+                    if os.path.exists(p)]
+            assert hits, f"CLAUDE.md §2.1 の {name} が存在しない"
+        assert "test_stability.py" not in claude_md
+        assert not re.search(r"`Test[A-Za-z0-9]+`（\d+ 件）", claude_md), "テスト件数は書かない（ずれる）"
+
+    def test_readme_anchors_resolve(self):
+        import unicodedata
+        readme = self._read("README.md")
+        def slug(h):
+            h = re.sub(r"[`*]", "", h).strip().lower()
+            h = "".join(c for c in h if not unicodedata.category(c).startswith("P") or c in "-_")
+            return h.replace(" ", "-")
+        headings = {slug(h) for h in re.findall(r"^#{1,4} (.+)$", readme, re.M)}
+        missing = sorted(a for a in set(re.findall(r"\]\(#([^)]+)\)", readme)) if a not in headings)
+        assert missing == [], f"README 内リンク先の見出しが無い: {missing}"
+
+    def test_dev_dependencies_and_ci_jobs_agree(self):
+        pyproject = self._read("pyproject.toml"); dev = self._read("requirements-dev.txt")
+        ci = self._read(".github", "workflows", "ci.yml"); readme = self._read("README.md")
+        pp_dev = {x.split(">")[0] for x in re.findall(r'dev = \[([^\]]*)\]', pyproject)[0].replace('"', "").replace(" ", "").split(",")}
+        dev_txt = set(re.findall(r"^([a-zA-Z0-9_\-]+)[>=<~]", dev, re.M))
+        assert pp_dev == dev_txt, f"pyproject の dev と requirements-dev.txt が違う: {pp_dev ^ dev_txt}"
+        jobs = set(re.findall(r"^  ([a-z0-9_]+):\s*$", ci[ci.index("\njobs:"):], re.M))   # e2e は数字入り
+        dev_section = readme[readme.index("## 11. 開発"):readme.index("## 12.")]
+        documented = set(re.findall(r"^\| `([a-z0-9_]+)` \|", dev_section, re.M))
+        assert jobs == documented, f"CI のジョブと README §11 の表が違う: {jobs ^ documented}"
+        assert f"次の {len(jobs)} ジョブ" in dev_section
+
+    def test_gitignore_covers_results_dir(self):
+        assert re.search(r"^results/?$", self._read(".gitignore"), re.M)

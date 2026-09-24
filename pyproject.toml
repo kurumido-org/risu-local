@@ -26,7 +26,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+dev = ["pytest>=8.0", "ruff>=0.6", "pyright>=1.1.380"]
 
 [project.scripts]
 # RISU を介さず素の UXsim でシナリオを実行する CLI

@@ -66,3 +66,6 @@ slides/
 *_memo.md
 *.pptx
 *.key
+
+# 結果の永続化先（README §3.6 の RISU_RESULTS_DIR=./results）
+results/
