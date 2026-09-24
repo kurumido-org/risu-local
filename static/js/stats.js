@@ -138,7 +138,7 @@ function updateStatValues() {
   const fmt = (v) => Number.isFinite(v) ? (v >= 100 ? Math.round(v) : v.toFixed(1)) : '—';
   const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
   // 表示値は現在時刻で引く（フレームは走行車両がいる時刻にしか無い）．RisuCore.statValuesAt
-  const v = RisuCore.statValuesAt(statsSeries, frameTimes, tripSeries, currentTimeSec());
+  const v = RisuCore.statValuesAt(statsSeries, frameTimes, tripSeries, currentTimeSec(), frameIntervalS);
   setText('sv-active', fmt(v.active));
   setText('sv-speed', fmt(v.avgSpeed));
   setText('sv-completed', fmt(v.completed));

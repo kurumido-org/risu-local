@@ -134,7 +134,7 @@ test('statValuesAt: 最後のフレームより後は 流入 − 到着 で走�
   const stats = { active: [10, 10, 5], started: [10, 15, 15], completed: [0, 5, 10], avgSpeed: [15, 5, 1] };
   const trips = { t: [0, 10, 20, 30, 100], entered: [0, 10, 15, 15, 15], completed: [0, 0, 5, 10, 15] };
   assert.deepEqual(core.statValuesAt(stats, frameTimes, trips, 25),
-                   { idx: 1, active: 10, entered: 15, completed: 5, avgSpeed: 5 });
+                   { idx: 1, active: 10, entered: 15, completed: 5, avgSpeed: 5, mode: 'interp' });
   // t=100: 全車両到着後．フレームは 30 秒で終わっているが 到着 15 / 走行中 0 になる
   const end = core.statValuesAt(stats, frameTimes, trips, 100);
   assert.equal(end.completed, 15);
@@ -160,4 +160,35 @@ test('statValuesAt: 需要の空白時間（フレームが無い区間）は �
   assert.equal(mid.avgSpeed, 0);
   // 走行中の区間は従来どおりフレームの値
   assert.equal(core.statValuesAt(stats, frameTimes, trips, 55).active, 5);
+});
+
+
+test('frameWindow: サーバーの間隔があれば，フレームが 2 個でも空白時間と終了後を判定できる', () => {
+  // 100 m の道路に需要を 0〜10 秒と 700〜710 秒．フレームは 10 秒と 710 秒だけ（deltat 5 秒）
+  const frameTimes = [10, 710];
+  const interval = 5;
+  assert.equal(core.frameWindow(frameTimes, 10, interval).mode, 'exact');
+  assert.equal(core.frameWindow(frameTimes, 13, interval).mode, 'hold');
+  assert.equal(core.frameWindow(frameTimes, 500, interval).mode, 'none');
+  assert.equal(core.frameWindow(frameTimes, 1000, interval).mode, 'none');
+  assert.equal(core.frameWindow(frameTimes, 5, interval).mode, 'none');     // 開始前
+  // 間隔が無い古い JSON は並びから推定するので，この形は判定できない（既知の限界）
+  assert.equal(core.frameWindow(frameTimes, 500, null).mode, 'interp');
+  // 通常の連続フレームは補間
+  const reg = core.frameWindow([10, 15, 20, 25], 17, interval);
+  assert.equal(reg.mode, 'interp'); assert.equal(reg.i, 1); assert.equal(reg.j, 2);
+  assert.ok(Math.abs(reg.frac - 0.4) < 1e-9);
+  // 最後のフレームの直後は据え置き，その後は none
+  assert.equal(core.frameWindow([10, 15, 20, 25], 29, interval).mode, 'hold');
+  assert.equal(core.frameWindow([10, 15, 20, 25], 31, interval).mode, 'none');
+});
+
+test('statValuesAt: フレーム 2 個のケースで 500 秒・1000 秒の走行中が 0 になる', () => {
+  const frameTimes = [10, 710];
+  const stats = { active: [5, 5], started: [5, 10], completed: [0, 5], avgSpeed: [10, 10] };
+  const trips = { t: [0, 10, 15, 700, 710, 715, 1000], entered: [0, 5, 5, 5, 10, 10, 10], completed: [0, 0, 5, 5, 5, 10, 10] };
+  assert.equal(core.statValuesAt(stats, frameTimes, trips, 500, 5).active, 0);
+  assert.equal(core.statValuesAt(stats, frameTimes, trips, 1000, 5).active, 0);
+  assert.equal(core.statValuesAt(stats, frameTimes, trips, 12, 5).active, 5);   // 直後は据え置き
+  assert.equal(core.statValuesAt(stats, frameTimes, trips, 710, 5).active, 5);
 });

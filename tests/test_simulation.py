@@ -440,7 +440,7 @@ class TestPostProcessingPipeline:
         import numpy as np
         from risu.simulation import select_frames
         tk = np.array([0, 50, 50, 100, 150, 150, 150], dtype=np.int64)
-        kept, fidx = select_frames(tk, max_frames=200)
+        kept, fidx, _stride = select_frames(tk, max_frames=200)
         assert kept.tolist() == [0, 50, 100, 150]
         assert fidx.tolist() == [0, 1, 1, 2, 3, 3, 3]
 
@@ -449,7 +449,7 @@ class TestPostProcessingPipeline:
         from risu.simulation import select_frames
         # 0.1 秒精度キーで 1000 ユニーク時刻 → max 200 なら 5 個おき
         tk = np.repeat(np.arange(1000, dtype=np.int64) * 50, 3)
-        kept, fidx = select_frames(tk, max_frames=200)
+        kept, fidx, _stride = select_frames(tk, max_frames=200)
         assert kept.size == 200
         assert kept.tolist() == (np.arange(0, 1000, 5) * 50).tolist()
         # 落ちた点は -1，残った点は kept への index
@@ -471,10 +471,10 @@ class TestPostProcessingPipeline:
         import risu.simulation
         rng = np.random.default_rng(0)
         tk = rng.integers(0, 3000, size=5000, dtype=np.int64) * 10
-        kept_a, fidx_a = risu.simulation.select_frames(tk, 100)
+        kept_a, fidx_a, _sa = risu.simulation.select_frames(tk, 100)
         # 巨大な値を足して汎用経路を強制し，同じオフセットを引いて比較
         off = 60_000_000
-        kept_b, fidx_b = risu.simulation.select_frames(tk + off, 100)
+        kept_b, fidx_b, _sb = risu.simulation.select_frames(tk + off, 100)
         assert (kept_b - off).tolist() == kept_a.tolist()
         assert fidx_b.tolist() == fidx_a.tolist()
 
@@ -873,3 +873,48 @@ class TestDemandGap:
         assert ts["entered"][i] == 50 and ts["completed"][i] == 50
         # フレームは走行中の時刻にしか無い（空白時間にフレームが無いことが前提）
         assert not any(200 < t < 700 for t in res["frame_times"])
+
+
+class TestFrameInterval:
+    """連続フレームの間隔（frame_interval_s = DELTAT × 間引き幅）を結果に載せる．
+    [修正履歴] 画面がフレームの並びから間隔を推定していたため，100 m の道路に需要を 0〜10 秒と
+    700〜710 秒だけ与えるとフレームが 2 個になり，700 秒の空白を「通常の間隔」と誤認して
+    500 秒・1000 秒時点でも走行中 5 台が残った．"""
+
+    def test_interval_equals_deltat_without_thinning(self):
+        res = run_uxsim(BOTTLENECK_SCENARIO)
+        assert res["frame_interval_s"] == 5.0          # deltan 5 × reaction_time 1.0
+        d = [b - a for a, b in zip(res["frame_times"], res["frame_times"][1:])]
+        assert min(d) == 5.0
+
+    def test_interval_follows_thinning_stride(self, monkeypatch):
+        import risu.simulation
+        monkeypatch.setattr(risu.simulation, "MAX_FRAMES", 40)
+        res = run_uxsim(GRID_BIDIRECTIONAL_SCENARIO)
+        assert len(res["frame_times"]) <= 80
+        stride = res["frame_interval_s"] / 5.0
+        assert stride >= 2 and stride == int(stride)
+        d = {round(b - a, 1) for a, b in zip(res["frame_times"], res["frame_times"][1:])}
+        assert min(d) == res["frame_interval_s"]
+
+    def test_two_frame_case_reported_by_review(self):
+        sc = SimulationInput.model_validate({
+            "name": "two_frames", "tmax": 1000, "deltan": 5,
+            "nodes": [{"name": "A", "x": 0, "y": 0}, {"name": "B", "x": 100, "y": 0}],
+            "links": [{"name": "AB", "start": "A", "end": "B", "length": 100}],
+            "demands": [{"orig": "A", "dest": "B", "t_start": 0, "t_end": 10, "flow": 0.5},
+                        {"orig": "A", "dest": "B", "t_start": 700, "t_end": 710, "flow": 0.5}],
+        })
+        res = run_uxsim(sc)
+        assert len(res["frame_times"]) == 2 and res["frame_interval_s"] == 5.0
+        env = build_envelope_for(res)
+        assert env["result"]["frame_interval_s"] == 5.0
+
+
+def build_envelope_for(res):
+    from risu.results import build_envelope, results_store
+    results_store["_tmp_env"] = res
+    try:
+        return build_envelope("_tmp_env")
+    finally:
+        results_store.pop("_tmp_env", None)

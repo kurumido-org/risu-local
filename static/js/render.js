@@ -20,6 +20,7 @@ async function loadResult(simId) {
     vehScale = ((scenarioData && scenarioData.deltan) || 1) * (r.vehicle_sample_step || 1);
     tripSeries = (r.trip_series && Array.isArray(r.trip_series.t)) ? r.trip_series : null;
     frameAvgSpeed = Array.isArray(r.frame_avg_speed) ? r.frame_avg_speed : null;
+    frameIntervalS = (r.frame_interval_s > 0) ? r.frame_interval_s : null;
     simStats = r.stats || null;
     // 座標→ノード名のルックアップを構築
     nodeByCoord = {};
@@ -106,6 +107,7 @@ function releasePrevResult() {
   vehScale = 1;
   tripSeries = null;
   frameAvgSpeed = null;
+  frameIntervalS = null;
   simStats = null;
   nodeByCoord = {};
   hitTargets = { nodes: [], links: [] };
@@ -438,8 +440,11 @@ function _frameIdIndex(frame) {
 
 // 時刻 tNow の車両位置をフレーム間線形補間して _vbuf に書き込み，台数を返す．
 function _interpolateVehicles(tNow, linkDrawInfo, px, py) {
-  const idxA = findNearestFrameIdx(tNow);
-  if (idxA < 0) return 0;
+  // どのフレームで描くかは統計と同じ判定（RisuCore.frameWindow）．
+  // 旧実装は最寄りのフレームを補間し続け，需要の空白時間や全車両到着後にも点が残っていた．
+  const w = RisuCore.frameWindow(frameTimes, tNow, frameIntervalS);
+  if (w.mode === 'none') return 0;
+  const idxA = w.i;
   const tA = frameTimes[idxA];
   const frameA = framesData[String(tA)] || EMPTY_FRAME;
   const out = _posScratch;
@@ -454,8 +459,8 @@ function _interpolateVehicles(tNow, linkDrawInfo, px, py) {
     _posOnLink(linkDrawInfo[linkNames[li]] || null, frame.alphas[i], frame.xs[i], frame.ys[i], px, py, out);
   };
 
-  // フレーム末尾 or 厳密一致 → 補間不要
-  if (tA >= tNow || idxA >= frameTimes.length - 1) {
+  // 厳密一致 / 直後の据え置き → 補間不要
+  if (w.mode !== 'interp') {
     _ensureVbuf(frameA.n);
     for (let i = 0; i < frameA.n; i++) {
       posOf(frameA, i);
@@ -464,9 +469,9 @@ function _interpolateVehicles(tNow, linkDrawInfo, px, py) {
     return frameA.n;
   }
 
-  const tB = frameTimes[idxA + 1];
+  const tB = frameTimes[w.j];
   const frameB = framesData[String(tB)] || EMPTY_FRAME;
-  const frac = (tNow - tA) / (tB - tA);
+  const frac = w.frac;
   const emitBOnly = frac > 0.5;  // B にだけいる車両（新規流入）は後半だけ描く
   _ensureVbuf(frameA.n + frameB.n);
   let n = 0;

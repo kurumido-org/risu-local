@@ -183,3 +183,34 @@ def test_editor_carries_scenario_params(page, sim):
     assert int(vals["tmax"]) == SCENARIO["tmax"]
     assert vals["nodes"] == len(SCENARIO["nodes"]) and vals["links"] == len(SCENARIO["links"])
     assert page._risu_errors == [], page._risu_errors
+
+
+GAP_SCENARIO = {
+    "name": "e2e_gap", "tmax": 1000, "deltan": 5,
+    "nodes": [{"name": "A", "x": 0, "y": 0}, {"name": "B", "x": 100, "y": 0}],
+    "links": [{"name": "AB", "start": "A", "end": "B", "length": 100}],
+    "demands": [{"orig": "A", "dest": "B", "t_start": 0, "t_end": 10, "flow": 0.5},
+                {"orig": "A", "dest": "B", "t_start": 700, "t_end": 710, "flow": 0.5}],
+}
+
+
+def test_demand_gap_shows_no_vehicles(page, base_url):
+    """需要の空白時間と全車両到着後は，統計も描画も車両 0（フレームが 2 個しか無いケース）．"""
+    sid = _post_json(f"{base_url}/simulate", GAP_SCENARIO)["id"]
+    page.evaluate("async (id) => { await loadResult(id); stopPlay(); }", sid)
+    page.wait_for_function("frameTimes.length > 0")
+    r = page.evaluate(
+        """() => {
+            const probe = (t) => {
+              timeSlider.value = Math.round(t / simTmax * 1000); drawFrame(); updateStatValues();
+              return { active: parseFloat(document.getElementById('sv-active').textContent),
+                       mode: RisuCore.frameWindow(frameTimes, t, frameIntervalS).mode };
+            };
+            return { frames: frameTimes.length, interval: frameIntervalS,
+                     t12: probe(12), t500: probe(500), t1000: probe(1000) };
+        }""")
+    assert r["frames"] == 2 and r["interval"] == 5
+    assert r["t12"]["mode"] == "hold" and r["t12"]["active"] == 5
+    assert r["t500"] == {"active": 0, "mode": "none"}
+    assert r["t1000"] == {"active": 0, "mode": "none"}
+    assert page._risu_errors == [], page._risu_errors

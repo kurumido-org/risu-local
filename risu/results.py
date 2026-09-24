@@ -313,6 +313,7 @@ def _result_from_envelope(env: dict) -> dict:
         "link_names":  res.get("link_names"),
         "frame_format": "columnar_v2",
         "vehicle_sample_step": res.get("vehicle_sample_step", 1),
+        "frame_interval_s": res.get("frame_interval_s"),
         "vehicle_counts":  res.get("vehicle_counts"),
         "frame_avg_speed": res.get("frame_avg_speed"),
         "speed_histogram": res.get("speed_histogram"),
@@ -382,6 +383,8 @@ def build_envelope(sim_id: str, *, include_result: bool = True, raw: dict | None
             "signals":      raw.get("signals"),
             # 描画用フレームの車両サンプリング間隔（1 = 全車両）
             "vehicle_sample_step": raw.get("vehicle_sample_step", 1),
+            # 連続フレームの間隔（秒）．空白時間の判定用（無い古い JSON は画面側が推定する）
+            "frame_interval_s": raw.get("frame_interval_s"),
             # フレームごとの走行中台数（実台数 = プラトン数 × deltan．間引き前の全点から集計）
             "vehicle_counts": raw.get("vehicle_counts"),
             # フレームごとの車両平均速度（台数重み，間引き前）

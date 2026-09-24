@@ -225,24 +225,39 @@
     return d[(n - 1) >> 1] || 1;
   }
 
-  // 時刻 t がフレームで覆われていない（最寄りのフレームが通常間隔より離れている）か
-  function isFrameGap(frameTimes, t) {
+  // 時刻 t をどのフレームで表すか．フレームは走行車両がいる時刻にしか無いので，
+  // 連続フレームの間隔（interval = サーバーの frame_interval_s = DELTAT × 間引き幅）より
+  // 離れた区間は「車両がいない」と判定する．interval が無い古い JSON は並びから推定する
+  // （フレームが 2 個しか無いと推定は誤るので，新しい結果は必ず interval を渡すこと）．
+  //   exact  : t がフレーム時刻そのもの（i）
+  //   interp : 隣接フレーム i, j の間（frac で補間）
+  //   hold   : フレーム i の直後（次のログ刻みまで）．車両は i の位置に据え置く
+  //   none   : 車両がいない（開始前・需要の空白時間・全車両到着後）
+  function frameWindow(frameTimes, t, interval) {
     const n = frameTimes.length;
-    if (!n) return true;
+    if (!n) return { mode: 'none', i: -1, j: -1, frac: 0 };
+    const step = (interval > 0) ? interval : typicalFrameStep(frameTimes);
     const i = lowerBoundIndex(frameTimes, t);
-    const prev = frameTimes[i] <= t ? frameTimes[i] : null;
-    const next = frameTimes[i] > t ? frameTimes[i] : (i + 1 < n ? frameTimes[i + 1] : null);
-    const dPrev = prev == null ? Infinity : t - prev;
-    const dNext = next == null ? Infinity : next - t;
-    return Math.min(dPrev, dNext) > typicalFrameStep(frameTimes) * 1.5;
+    const tA = frameTimes[i];
+    if (t < tA) return { mode: 'none', i, j: -1, frac: 0 };
+    if (t === tA) return { mode: 'exact', i, j: -1, frac: 0 };
+    if (i + 1 < n) {
+      const tB = frameTimes[i + 1];
+      if (tB - tA <= step * 1.5) return { mode: 'interp', i, j: i + 1, frac: (t - tA) / (tB - tA) };
+    }
+    if (t - tA <= step) return { mode: 'hold', i, j: -1, frac: 0 };
+    return { mode: 'none', i, j: -1, frac: 0 };
   }
 
-  // 現在時刻 t で表示する値．フレームは走行車両がいる時刻にしか無いので，
-  // フレームが無い時間帯（終了後・需要の空白時間・開始前）は 流入 − 到着 で走行中台数を出す．
-  // 旧実装は最寄りのフレームを参照し続け，空白時間に「走行中 5 台」が残っていた．
-  function statValuesAt(stats, frameTimes, tripSeries, t) {
-    const idx = lowerBoundIndex(frameTimes, t);
-    const i = Math.max(0, idx);
+  function isFrameGap(frameTimes, t, interval) {
+    return frameWindow(frameTimes, t, interval).mode === 'none';
+  }
+
+  // 現在時刻 t で表示する値．フレームが無い区間（none）は 流入 − 到着 で走行中台数を出す．
+  // 旧実装は最寄りのフレームを参照し続け，空白時間や終了後に「走行中 5 台」が残っていた．
+  function statValuesAt(stats, frameTimes, tripSeries, t, interval) {
+    const w = frameWindow(frameTimes, t, interval);
+    const i = Math.max(0, w.i);
     let active = stats.active[i] || 0;
     let entered = stats.started[i] || 0;
     let completed = stats.completed[i] || 0;
@@ -250,14 +265,14 @@
     if (tripSeries && tripSeries.t && tripSeries.t.length) {
       const tr = tripAt(tripSeries, t);
       entered = tr.entered; completed = tr.completed;
-      if (isFrameGap(frameTimes, t)) {
+      if (w.mode === 'none') {
         active = Math.max(0, entered - completed);
         avgSpeed = 0;   // 走行車両がいない
       }
     }
-    return { idx: i, active, entered, completed, avgSpeed };
+    return { idx: i, active, entered, completed, avgSpeed, mode: w.mode };
   }
 
   return { EMPTY_FRAME, decodeFrame, decodeFrames, lowerBoundIndex, tripAt, phaseIndexAt,
-           computeStats, statValuesAt, isFrameGap, typicalFrameStep };
+           computeStats, statValuesAt, frameWindow, isFrameGap, typicalFrameStep };
 });

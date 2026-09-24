@@ -327,6 +327,10 @@ MCP（`mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
 - **統計**: `computeStatsSeries` は各リンク timeline を 1 回だけ走査する
   （O(フレーム数 × リンク数)）．`drawSparkline` はその `avgRatio` を使うので，
   **先に `computeStatsSeries` を呼ぶこと**．
+- **フレームが無い時刻の扱い**: フレームは走行車両がいる時刻にしか無い．描画（`_interpolateVehicles`）
+  と統計（`statValuesAt`）は同じ `RisuCore.frameWindow` で判定し，連続フレームの間隔は
+  サーバーの `frame_interval_s`（DELTAT × 間引き幅）を使う．フレームの並びから推定すると
+  フレームが 2 個のケースで空白を通常間隔と誤認する．判定は exact / interp / hold / none．
 - **ロジックとグローバルの分離**: DOM・Canvas・グローバル状態に依存しない処理
   （フレーム復号・統計系列・現示の判定・時刻検索）は `static/js/risu-core.js` に置き，
   index.html はグローバルを渡す薄いラッパーにする．**フロントにロジックを足すときは

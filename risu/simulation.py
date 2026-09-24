@@ -151,31 +151,35 @@ def _speed_histogram(v) -> dict:
 def select_frames(tk, max_frames: int):
     """時刻キー配列から可視化フレームを選ぶ．
 
-    戻り値: (kept, fidx) — kept は昇順のフレーム時刻キー，fidx は各点のフレーム index
-    （間引きで落ちた点は -1）．ユニーク時刻キーが max_frames を超える場合のみ
-    len // max_frames 間隔で間引く（len // max_frames が 1 のときは間引かない）．
+    戻り値: (kept, fidx, stride) — kept は昇順のフレーム時刻キー，fidx は各点のフレーム index
+    （間引きで落ちた点は -1），stride は間引き幅（1 = 間引きなし）．ユニーク時刻キーが
+    max_frames を超える場合のみ len // max_frames 間隔で間引く．
+    連続するフレームの間隔は stride × DELTAT（走行車両がいる時刻にしかフレームは無い）．
 
     tk は 0.1 秒精度の整数（≤ tmax×10）なので，ソートベースの np.unique / isin ではなく
     bincount + ルックアップテーブルで O(N) に処理する（5,000 万点で約 5 倍速）．
     """
     import numpy as np
     if tk.size == 0:
-        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64), 1
     tk_max = int(tk.max())
+    stride = 1
     if tk_max < 0 or tk_max > 50_000_000:  # 想定外の時刻（LUT が巨大になる）→ 汎用経路
         kept = np.unique(tk)
         if kept.size > max_frames:
-            kept = kept[::max(1, kept.size // max_frames)]
+            stride = max(1, kept.size // max_frames)
+            kept = kept[::stride]
         fidx = np.searchsorted(kept, tk)
         fidx[(fidx >= kept.size) | (kept[np.minimum(fidx, kept.size - 1)] != tk)] = -1
-        return kept, fidx
+        return kept, fidx, stride
     present = np.bincount(tk, minlength=tk_max + 1) > 0
     kept = np.flatnonzero(present).astype(np.int64)
     if kept.size > max_frames:
-        kept = kept[::max(1, kept.size // max_frames)]
+        stride = max(1, kept.size // max_frames)
+        kept = kept[::stride]
     lut = np.full(tk_max + 1, -1, dtype=np.int64)
     lut[kept] = np.arange(kept.size, dtype=np.int64)
-    return kept, lut[tk]
+    return kept, lut[tk], stride
 
 
 class _RunPoints(NamedTuple):
@@ -187,6 +191,7 @@ class _RunPoints(NamedTuple):
     x: Any
     v: Any
     entry_t: Any
+    stride: int          # フレームの間引き幅（フレーム間隔 = stride × DELTAT）
     fast_path: bool
 
 
@@ -225,7 +230,7 @@ def _collect_run_points(W, n_links: int, max_frames: int) -> _RunPoints:
             idx = np.flatnonzero((state == run_code) & (link >= 0) & (link < n_links))
             log_t_all = np.asarray(flat["log_t"], dtype=np.float64)   # 1 回だけ変換して使い回す
             tk = np.rint(log_t_all[idx] * 10.0).astype(np.int64)
-            kept, fidx = select_frames(tk, max_frames)
+            kept, fidx, stride = select_frames(tk, max_frames)
             if kept.size and fidx.size and (fidx < 0).any():
                 m = fidx >= 0
                 idx, fidx = idx[m], fidx[m]
@@ -251,6 +256,7 @@ def _collect_run_points(W, n_links: int, max_frames: int) -> _RunPoints:
                 np.asarray(flat["log_x"], dtype=np.float64)[idx],
                 np.asarray(flat["log_v"], dtype=np.float64)[idx],
                 entry_t,
+                stride,
                 True,
             )
         except Exception as e:  # 内部 API 変更時は遅い経路にフォールバック
@@ -296,13 +302,13 @@ def _collect_run_points(W, n_links: int, max_frames: int) -> _RunPoints:
         v_parts.append(np.asarray(veh.log_v, dtype=np.float64)[sel])
     if not tk_parts:
         e = np.empty(0, dtype=np.int64)
-        return _RunPoints(e, e, e, e, np.empty(0), np.empty(0), entry_t, False)
+        return _RunPoints(e, e, e, e, np.empty(0), np.empty(0), entry_t, 1, False)
     tk = np.concatenate(tk_parts)
     li, vid = np.concatenate(li_parts), np.concatenate(vid_parts)
     x, v = np.concatenate(x_parts), np.concatenate(v_parts)
-    kept, fidx = select_frames(tk, max_frames)
+    kept, fidx, stride = select_frames(tk, max_frames)
     m = fidx >= 0
-    return _RunPoints(kept, fidx[m], li[m], vid[m], x[m], v[m], entry_t, False)
+    return _RunPoints(kept, fidx[m], li[m], vid[m], x[m], v[m], entry_t, stride, False)
 
 
 def run_uxsim(scenario: SimulationInput) -> dict:
@@ -410,6 +416,10 @@ def run_uxsim(scenario: SimulationInput) -> dict:
     kept, fidx, li_all, vid_all, x_all, v_all, entry_t = (
         rp.kept, rp.fidx, rp.li, rp.vid, rp.x, rp.v, rp.entry_t)
     backend = "cpp" if getattr(W, "_cpp_world", None) is not None else "python"
+    # 連続するフレームの間隔（秒）．フレームは走行車両がいる時刻にしか無いので，画面はこれより
+    # 大きく離れた時刻を「車両がいない区間」と判定する（フレームの並びから推定すると，
+    # フレームが 2 個しか無いケースで空白を通常間隔と誤認する）．
+    frame_interval_s = round(float(W.DELTAT) * int(rp.stride), 3)
     RUNTIME_STATUS.update({"backend": backend, "fast_path": rp.fast_path})
 
     frames = {}
@@ -582,6 +592,8 @@ def run_uxsim(scenario: SimulationInput) -> dict:
         "frame_format": "columnar_v2",
         # 描画用フレームの車両サンプリング間隔（1 = 全車両）．MAX_FRAME_POINTS 参照．
         "vehicle_sample_step": vehicle_sample_step,
+        # 連続フレームの間隔（DELTAT × 間引き幅）．空白時間・終了後の判定に使う
+        "frame_interval_s": frame_interval_s,
         # フレームごとの走行中台数（frame_times と同じ長さ．実台数 = プラトン数 × deltan）．
         # 間引き前の全点から数えるので，vehicle_sample_step の影響を受けない．
         "vehicle_counts": vehicle_counts,

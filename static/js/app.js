@@ -26,6 +26,7 @@ let vehScale = 1;
 let tripSeries = null;
 let frameAvgSpeed = null;
 let simStats = null;
+let frameIntervalS = null;   // 連続フレームの間隔（秒）．空白時間・終了後の判定（RisuCore.frameWindow）
 let simTmax    = 3600;
 let lastSimId  = null;
 // lastResult は廃止（メモリ節約）— ダウンロードはサーバーから直接取得
