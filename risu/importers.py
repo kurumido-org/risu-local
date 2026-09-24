@@ -8,11 +8,15 @@ import io
 import math
 import os
 
+from .runtime import log
+
 # モジュール外から使う名前（他モジュール・server.py・scripts・tests）．これ以外は内部実装．
 __all__ = [
     "GMNS_API",
     "GMNS_RAW",
+    "MIN_LINK_LENGTH_M",
     "OSM_ROAD_PRESETS",
+    "clamp_link_lengths",
     "gmns_to_scenario",
     "parse_csv_scenario",
     "run_osm_import",
@@ -59,6 +63,30 @@ def _get_int(row: dict, col: str | None, default: int = 1) -> int:
         return int(float(val))
     except ValueError:
         return default
+
+
+# 取込データに含まれる長さ 0（または負）のリンクを補正する下限（m）．
+# OSM では同一座標のノード間の辺，GMNS / CSV では欠損や 0 が入ることがある．
+# SimulationInput は length > 0 を要求するので，取込側でここに切り上げて通す
+# （落とすとネットワークが分断されるので長さだけ補正し，補正したリンク名を返す）．
+MIN_LINK_LENGTH_M = 1.0
+
+
+def clamp_link_lengths(links: list[dict], min_length: float = MIN_LINK_LENGTH_M) -> list[str]:
+    """length が min_length 未満（欠損・0・負）のリンクを min_length にする．戻り値は補正したリンク名．"""
+    fixed = []
+    for lk in links:
+        try:
+            length = float(lk.get("length", 0) or 0)
+        except (TypeError, ValueError):
+            length = 0.0
+        if not length > 0 or length < min_length:
+            lk["length"] = min_length
+            fixed.append(str(lk.get("name", "?")))
+    if fixed:
+        log.warning(f"length が {min_length} m 未満のリンク {len(fixed)} 本を {min_length} m に補正: "
+                    f"{fixed[:5]}{' …' if len(fixed) > 5 else ''}")
+    return fixed
 
 
 def parse_csv_scenario(content: str) -> dict:
@@ -123,6 +151,7 @@ def parse_csv_scenario(content: str) -> dict:
                     "t_end": _get_float(row, col_tend, 3600),
                     "flow": _get_float(row, col_flow, 0.5),
                 })
+        clamp_link_lengths(links)
         return {"format": "risu_csv", "nodes": nodes, "links": links, "demands": demands}
 
     # ============ ノード CSV 判定 ============
@@ -192,6 +221,7 @@ def parse_csv_scenario(content: str) -> dict:
             if lcap > 0:
                 link["capacity"] = lcap
             links.append(link)
+        clamp_link_lengths(links)
         return {"format": "link_csv", "links": links}
 
     # ============ 需要 CSV 判定 ============
@@ -324,6 +354,7 @@ def gmns_to_scenario(
                         "flow": round(flow, 6),
                     })
 
+    clamp_link_lengths(links)   # 単位換算後に（0 や欠損を最小長へ）
     return {
         "name": "gmns_import",
         "tmax": tmax,
@@ -460,6 +491,7 @@ def run_osm_import(place: str, distance_m: int = 1000, road_types: str = "drive"
         "drive": "一般車道",
         "all": "全車道",
     }
+    fixed = clamp_link_lengths(scenario_links)   # 同一座標のノード間などで length 0 の辺が来る
     return {
         "name": f"osm_{place[:30]}",
         "tmax": 3600,
@@ -474,6 +506,7 @@ def run_osm_import(place: str, distance_m: int = 1000, road_types: str = "drive"
             f"OSM から「{place}」周辺（半径{distance_m}m，{_road_labels[road_types]}）の"
             f"道路ネットワークを取得しました．"
             f"{len(scenario_nodes)} ノード，{len(scenario_links)} リンク．"
+            + (f"長さ 0 のリンク {len(fixed)} 本を {MIN_LINK_LENGTH_M:g} m に補正しました．" if fixed else "")
         ),
     }
 

@@ -147,9 +147,25 @@ def scenario_to_input(scenario: dict) -> SimulationInput:
             m = str(err.get("msg", ""))
             if m.startswith("Value error, "):
                 m = m[len("Value error, "):]
-            loc = ".".join(str(x) for x in err.get("loc", ()))
-            msgs.append(f"{m}" + (f"（{loc}）" if loc else ""))
+            msgs.append(f"{m}（{_describe_loc(scenario, err.get('loc', ()))}）")
         raise HTTPException(422, detail="シナリオが不正です: " + " / ".join(msgs[:3]))
+
+
+_LOC_LABEL = {"nodes": "ノード", "links": "リンク", "demands": "需要"}
+
+
+def _describe_loc(scenario: dict, loc: tuple) -> str:
+    """pydantic の loc（例: ("links", 9, "length")）を「リンク 'r10' の length」のように読める形にする．
+    要素の名前が分かれば index ではなく名前を出す（取込データでは index は追いにくい）．"""
+    if len(loc) >= 3 and loc[0] in _LOC_LABEL and isinstance(loc[1], int):
+        items = scenario.get(loc[0]) or []
+        item = items[loc[1]] if loc[1] < len(items) and isinstance(items[loc[1]], dict) else {}
+        if loc[0] == "demands":
+            ident = f"{item.get('orig', '?')}→{item.get('dest', '?')}"
+        else:
+            ident = item.get("name") or f"#{loc[1]}"
+        return f"{_LOC_LABEL[loc[0]]} '{ident}' の {'.'.join(str(x) for x in loc[2:])}"
+    return ".".join(str(x) for x in loc)
 
 
 class ChatMessage(BaseModel):

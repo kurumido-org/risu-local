@@ -394,6 +394,7 @@ MCP（`mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
 | フレームのキーが見つからない | `str(round(25.0, 1))` は `"25.0"` になる．キーの文字列化ルールを変えない（`TestFrameKeyCompatibility`） |
 | CSV 取込で `float("")` エラー | 空セルの扱い．`_get_float` の既定値経由で読む（`TestCSVParser`） |
 | 重複ノード名で UXsim の生エラーが出る | `SimulationInput` の検証で名前つきのメッセージに変換済み（`TestScenarioValidation`） |
+| 取込で「Input should be greater than 0（links.N.length）」 | OSM / GMNS / CSV に長さ 0 のリンクがある．取込関数の末尾で `clamp_link_lengths`（最小 1 m）を通す．検証エラーは `_describe_loc` がリンク名で出す |
 | 台数が想定の 1/5 に見える | フレームの `ids` はプラトン（`deltan` 台）．`vehicle_counts` を使う（§3.3） |
 | 全車両到着後も画面が「到着 45 / 走行中 5」のまま | フレームは走行車両がいる時刻にしか無い．累積台数はフレームから推定せず，実イベントの `trip_series`（時間軸 0〜tmax）を使う |
 | 画面と LLM で平均速度が違う / 間引きで変わる | 定義は「走行中全車両の台数重み平均」の 1 つ（`frame_avg_speed`，間引き前）．リンク timeline の単純平均を「平均速度」と呼ばない．分析用の値は `vehicle_sample_step` の前で計算する |

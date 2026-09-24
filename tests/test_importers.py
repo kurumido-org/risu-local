@@ -123,3 +123,46 @@ class TestCSVParser:
         csv = "col_a,col_b\n1,2\n"
         with pytest.raises(ValueError, match="CSV 形式を認識できません"):
             parse_csv_scenario(csv)
+
+
+class TestZeroLengthLinks:
+    """[修正履歴] 取込データの長さ 0 のリンクが SimulationInput の検証（length > 0）で弾かれ，
+    「Input should be greater than 0（links.9.length）」で取込全体が失敗した．
+    取込側で最小長（1 m）に補正して通し，補正したことをログと OSM の要約に残す．"""
+
+    def test_clamp_helper(self):
+        from risu.importers import MIN_LINK_LENGTH_M, clamp_link_lengths
+        links = [{"name": "a", "length": 0}, {"name": "b", "length": -3}, {"name": "c"},
+                 {"name": "d", "length": "x"}, {"name": "e", "length": 250.5}]
+        fixed = clamp_link_lengths(links)
+        assert fixed == ["a", "b", "c", "d"]
+        assert all(lk["length"] == MIN_LINK_LENGTH_M for lk in links[:4])
+        assert links[4]["length"] == 250.5
+        assert clamp_link_lengths([]) == []
+
+    def test_csv_with_zero_length_link_is_accepted(self):
+        from risu.importers import parse_csv_scenario
+        from risu.schema import SimulationInput
+        csv = (
+            "type,name,x,y,start,end,length,free_flow_speed,number_of_lanes,orig,dest,t_start,t_end,flow\n"
+            "node,A,0,0,,,,,,,,,,\nnode,B,0,0,,,,,,,,,,\nnode,C,1000,0,,,,,,,,,,\n"
+            "link,AB,,,A,B,0,20,1,,,,,\nlink,BC,,,B,C,1000,20,1,,,,,\n"
+            "demand,,,,,,,,,A,C,0,100,0.3\n"
+        )
+        sc = parse_csv_scenario(csv)
+        assert {lk["name"]: lk["length"] for lk in sc["links"]} == {"AB": 1.0, "BC": 1000.0}
+        SimulationInput(**{k: v for k, v in sc.items() if k != "format"})   # 検証を通る
+
+    def test_validation_error_names_the_link(self):
+        from fastapi import HTTPException
+        from risu.schema import scenario_to_input
+        sc = {"nodes": [{"name": "A", "x": 0, "y": 0}, {"name": "B", "x": 1, "y": 0}],
+              "links": [{"name": "ok", "start": "A", "end": "B", "length": 5},
+                        {"name": "bad_link", "start": "A", "end": "B", "length": 0}],
+              "demands": [{"orig": "A", "dest": "B", "t_start": 0, "t_end": 10, "flow": -1}]}
+        with pytest.raises(HTTPException) as ei:
+            scenario_to_input(sc)
+        detail = ei.value.detail
+        assert "リンク 'bad_link' の length" in detail
+        assert "需要 'A→B' の flow" in detail
+        assert "links.1.length" not in detail
