@@ -204,7 +204,7 @@ MCP（`mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
 （`TestMcpParity` が同一性を検証）．
 
 フロントも同様に，SSE 経路と JSON 経路の応答反映を `renderAssistantResponse` に
-一本化しています（sim バッジ・チャート・トークン使用量の付け方）．
+一本化しています（sim バッジ・チャートの付け方）．
 
 ### 3.3 LLM にデータ実体を渡さない
 
@@ -251,8 +251,9 @@ MCP（`mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
   超過時は予算の半分まで落とす**ヒステリシス**（毎ターン 1 件ずつ落とすと prefix が
   毎回変わってキャッシュが当たらない）．フロントは tool_use / tool_result を履歴に
   残さない（最終テキストのみ）．
-- **計測**: 1 ターンの使用量は `UsageTally` が集計し，done イベントの `usage` で
-  フロントへ（吹き出し下の `.usage-meta`）．サーバーログにも `usage ...` が出る（logger `risu`）．
+- **計測**: 1 ターンの使用量は `UsageTally` が集計し，サーバーログに `usage ...` として出る
+  （logger `risu`）．done イベントの `usage` にも載せているが，**画面には表示しない**
+  （内部事情．以前は吹き出し下に出していたが不要と判断して外した）．
 - **テスト**: `TestLLMTokenSaving`・`TestConversationContext`．
 
 ### 3.5 結果データの表現 — 保存は v2，送出は v3

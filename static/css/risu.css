@@ -389,14 +389,6 @@
     border-radius: 999px;
   }
   .sim-badge:hover { transform: translateY(-1px); }
-  .usage-meta {
-    margin-top: 6px;
-    font-family: var(--mono);
-    font-size: 9px;
-    letter-spacing: .04em;
-    color: var(--muted, #8a8a86);
-    opacity: .8;
-  }
   .sim-badge::before { content: "SIM: "; color: var(--accent); }
   .sim-badge:hover { background: var(--accent); border-color: var(--accent); }
 

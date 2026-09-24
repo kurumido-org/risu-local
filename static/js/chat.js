@@ -276,22 +276,7 @@ async function sendMessage() {
   btn.disabled = false;
 }
 
-// このターンの LLM トークン使用量を吹き出しの下に小さく表示（サーバーの done イベント usage）
-function appendUsageMeta(msgEl, usage) {
-  if (!usage || !msgEl) return;
-  const body = msgEl.querySelector('.body');
-  if (!body) return;
-  const k = n => (n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n));
-  const el = document.createElement('div');
-  el.className = 'usage-meta';
-  const cached = (usage.cache_read_tokens || 0);
-  const fresh = (usage.input_tokens || 0) + (usage.cache_creation_tokens || 0);
-  el.textContent = `tokens in ${k(fresh)} + cached ${k(cached)} (${usage.cache_hit_pct ?? 0}%) · out ${k(usage.output_tokens || 0)}` +
-    ` · ${usage.calls || 1} call${(usage.calls || 1) > 1 ? 's' : ''}` +
-    (usage.cost_jpy != null ? ` · ≈¥${usage.cost_jpy}` : '');
-  el.title = 'in: 今回課金された入力トークン / cached: キャッシュから読んだ入力トークン / out: 出力トークン';
-  body.parentNode.appendChild(el);
-}
+// LLM のトークン使用量は画面に出さない（内部事情なので）．サーバーログの usage 行で確認する．
 
 // ── Markdown レンダリング（assistant の吹き出しのみ） ──
 // marked でパースし DOMPurify でサニタイズしてから innerHTML に渡す．
@@ -388,7 +373,6 @@ function renderAssistantResponse(data) {
   } else if (data.chart) {
     renderChart(msgEl, data.chart);
   }
-  appendUsageMeta(msgEl, data.usage);
   chatHistory.push({ role: 'assistant', content: data.content });
   return msgEl;
 }
