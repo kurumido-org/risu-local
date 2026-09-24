@@ -437,9 +437,12 @@ async def chat_claude_stream(body: ChatInput):
                     yield _sse_event({"type": "progress", "message": "Step 1/3: シナリオを再設計中..."})
                     messages.append({"role": "assistant", "content": text})
                     messages.append({"role": "user", "content": "run_simulation ツールを使って今すぐシミュレーションを実行してください．"})
+                    # 非ストリーミングの create は，SDK が max_tokens から見積もった所要時間が
+                    # 10 分を超える（約 21,000 トークン超）と ValueError で拒否する．
+                    # ここはツール呼び出し（run_simulation の引数）だけなので 16,000 で足りる．
                     response = client.messages.create(
                         model=CLAUDE_MODEL,
-                        max_tokens=32000,
+                        max_tokens=16000,
                         system=_cached_system(system),
                         messages=api_messages(mark_cache_tail(messages)),
                         tools=_cached_tools(),

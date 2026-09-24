@@ -610,3 +610,21 @@ class TestChatStreamingPath:
         events = self._collect_sse(self._body("x"), [])
         assert events and events[-1]["type"] == "error"
         assert "message" in events[-1]
+
+
+class TestNonStreamingTokenBudget:
+    """[修正履歴] ツール強制の再試行が非ストリーミングの messages.create を max_tokens=32000 で呼び，
+    anthropic SDK の「10 分を超え得る処理はストリーミング必須」（約 21,000 トークン超で
+    ValueError）に当たってチャットがエラーになった．非ストリーミング呼び出しの上限を固定する．"""
+
+    SDK_LIMIT = 21_333   # 60*60*max_tokens/128000 > 600 秒 で拒否される
+
+    def test_every_nonstreaming_create_fits_the_sdk_limit(self):
+        src = open(os.path.join(os.path.dirname(os.path.dirname(__file__)), "risu", "llm.py"), encoding="utf-8").read()
+        creates = [m.end() for m in re.finditer(r"messages\.create\(", src)]
+        assert creates, "messages.create が見つからない"
+        for pos in creates:
+            window = src[pos:pos + 400]
+            m = re.search(r"max_tokens=(\d+)", window)
+            assert m, "messages.create に max_tokens が無い"
+            assert int(m.group(1)) <= self.SDK_LIMIT, f"非ストリーミングの max_tokens={m.group(1)} は SDK 上限を超える"
