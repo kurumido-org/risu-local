@@ -142,3 +142,22 @@ test('statValuesAt: 最後のフレームより後は 流入 − 到着 で走�
   // trip_series が無い古い結果は最寄りフレームの値
   assert.equal(core.statValuesAt(stats, frameTimes, null, 100).active, 5);
 });
+
+
+test('statValuesAt: 需要の空白時間（フレームが無い区間）は 流入 − 到着 = 0 になる', () => {
+  // 0〜100 秒と 700〜800 秒に需要．フレームは走行中の時刻にしか無い
+  const frameTimes = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 700, 710, 720, 730, 740, 750, 760, 770, 780, 790, 800, 810];
+  const N = frameTimes.length;
+  const stats = { active: new Array(N).fill(5), started: new Array(N).fill(50), completed: new Array(N).fill(45), avgSpeed: new Array(N).fill(10) };
+  const trips = { t: [0, 100, 110, 700, 810, 1000], entered: [0, 50, 50, 50, 100, 100], completed: [0, 45, 50, 50, 95, 100] };
+  assert.equal(core.typicalFrameStep(frameTimes), 10);
+  assert.equal(core.isFrameGap(frameTimes, 500), true);
+  assert.equal(core.isFrameGap(frameTimes, 55), false);
+  const mid = core.statValuesAt(stats, frameTimes, trips, 500);
+  assert.equal(mid.active, 0);
+  assert.equal(mid.entered, 50);
+  assert.equal(mid.completed, 50);
+  assert.equal(mid.avgSpeed, 0);
+  // 走行中の区間は従来どおりフレームの値
+  assert.equal(core.statValuesAt(stats, frameTimes, trips, 55).active, 5);
+});

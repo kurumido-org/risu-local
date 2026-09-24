@@ -142,7 +142,11 @@ LLM が扱うのは `sim_id`・差分命令・集計値だけです（§3.3）�
 （1 件数十 MB になり得るため）．`RISU_RESULTS_DIR` を設定すると `store_sim` が executor で
 `_persist_sim` を走らせ，メモリに無い sim_id は `__missing__` でディスクから遅延ロードします
 （呼び出し側は普通の dict として扱う）．複数手順になる操作（追加＋追い出し = `put`，
-遅延ロード，圧縮キャッシュの生成）は `results_store.lock` で囲む．**保存形式はダウンロードの `.json+result`
+遅延ロード，圧縮キャッシュの生成）は `results_store.lock` で囲む．遅延ロードも `put` を
+通す（読み戻しで上限を超えない）．永続化スレッドには結果 dict を直接渡す（id で
+引き直すと，上限で先に追い出された結果が保存されない）．エンベロープの
+`uxsim_version` / `risu_version` は `_meta` に記録した**実行当時**の版で，現在の環境は
+`exported_with`．**保存形式はダウンロードの `.json+result`
 （`build_envelope`）と同一**で，別形式を増やさないこと．読み戻しは `_result_from_envelope`
 （frames は `_decode_frames_v3` で v2 に戻す．risu-core.js の decodeFrame と同じ規則）．
 

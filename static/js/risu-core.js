@@ -214,26 +214,50 @@
     };
   }
 
+  // フレーム間隔の代表値（中央値）．フレームは走行車両がいる時刻にしか無いので，
+  // 需要の空白時間や終了後は間隔が大きく開く．その検出に使う．
+  function typicalFrameStep(frameTimes) {
+    const n = frameTimes.length;
+    if (n < 2) return 1;
+    const d = new Array(n - 1);
+    for (let i = 1; i < n; i++) d[i - 1] = frameTimes[i] - frameTimes[i - 1];
+    d.sort((a, b) => a - b);
+    return d[(n - 1) >> 1] || 1;
+  }
+
+  // 時刻 t がフレームで覆われていない（最寄りのフレームが通常間隔より離れている）か
+  function isFrameGap(frameTimes, t) {
+    const n = frameTimes.length;
+    if (!n) return true;
+    const i = lowerBoundIndex(frameTimes, t);
+    const prev = frameTimes[i] <= t ? frameTimes[i] : null;
+    const next = frameTimes[i] > t ? frameTimes[i] : (i + 1 < n ? frameTimes[i + 1] : null);
+    const dPrev = prev == null ? Infinity : t - prev;
+    const dNext = next == null ? Infinity : next - t;
+    return Math.min(dPrev, dNext) > typicalFrameStep(frameTimes) * 1.5;
+  }
+
   // 現在時刻 t で表示する値．フレームは走行車両がいる時刻にしか無いので，
-  // 最後のフレームより後（または最初より前）は 流入 − 到着 で走行中台数を出す．
+  // フレームが無い時間帯（終了後・需要の空白時間・開始前）は 流入 − 到着 で走行中台数を出す．
+  // 旧実装は最寄りのフレームを参照し続け，空白時間に「走行中 5 台」が残っていた．
   function statValuesAt(stats, frameTimes, tripSeries, t) {
     const idx = lowerBoundIndex(frameTimes, t);
     const i = Math.max(0, idx);
     let active = stats.active[i] || 0;
     let entered = stats.started[i] || 0;
     let completed = stats.completed[i] || 0;
+    let avgSpeed = stats.avgSpeed[i] || 0;
     if (tripSeries && tripSeries.t && tripSeries.t.length) {
       const tr = tripAt(tripSeries, t);
       entered = tr.entered; completed = tr.completed;
-      const n = frameTimes.length;
-      const spacing = n > 1 ? (frameTimes[n - 1] - frameTimes[0]) / (n - 1) : 1;
-      if (t > frameTimes[n - 1] + spacing || t < frameTimes[0] - spacing) {
+      if (isFrameGap(frameTimes, t)) {
         active = Math.max(0, entered - completed);
+        avgSpeed = 0;   // 走行車両がいない
       }
     }
-    return { idx: i, active, entered, completed, avgSpeed: stats.avgSpeed[i] || 0 };
+    return { idx: i, active, entered, completed, avgSpeed };
   }
 
   return { EMPTY_FRAME, decodeFrame, decodeFrames, lowerBoundIndex, tripAt, phaseIndexAt,
-           computeStats, statValuesAt };
+           computeStats, statValuesAt, isFrameGap, typicalFrameStep };
 });

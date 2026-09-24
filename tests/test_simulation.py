@@ -853,3 +853,23 @@ class TestStandalonePipeline:
             assert full["result"]["vehicle_counts"] == res["vehicle_counts"]
         finally:
             results_store.pop("seed_env_test", None)
+
+
+class TestDemandGap:
+    """需要の空白時間: 実イベントの累積（trip_series）では 流入 − 到着 = 0 になる．
+    画面側はフレームが無い区間を isFrameGap で検出してこの値を使う（tests/js）．"""
+
+    def test_trip_series_zero_between_bursts(self):
+        sc = SimulationInput.model_validate({
+            "name": "gap", "tmax": 1000, "deltan": 5,
+            "nodes": [{"name": "A", "x": 0, "y": 0}, {"name": "B", "x": 2000, "y": 0}],
+            "links": [{"name": "AB", "start": "A", "end": "B", "length": 2000}],
+            "demands": [{"orig": "A", "dest": "B", "t_start": 0, "t_end": 100, "flow": 0.5},
+                        {"orig": "A", "dest": "B", "t_start": 700, "t_end": 800, "flow": 0.5}],
+        })
+        res = run_uxsim(sc)
+        ts = res["trip_series"]
+        i = max(k for k, t in enumerate(ts["t"]) if t <= 500)
+        assert ts["entered"][i] == 50 and ts["completed"][i] == 50
+        # フレームは走行中の時刻にしか無い（空白時間にフレームが無いことが前提）
+        assert not any(200 < t < 700 for t in res["frame_times"])

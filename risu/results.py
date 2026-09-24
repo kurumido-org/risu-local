@@ -72,7 +72,9 @@ class _ResultsStore(dict):
             if path is None:
                 raise KeyError(key)
             result = _load_persisted(path)
-            dict.__setitem__(self, key, result)
+            # 新規登録と同じ上限処理を通す（読み戻すほどメモリが増えないように）
+            for old_id in self.put(key, result, MAX_RESULTS):
+                log.info(f"results_store evicted {old_id} (limit {MAX_RESULTS}, on lazy load)")
             return result
 
     def get(self, key, default=None):   # dict.get は __missing__ を呼ばない
@@ -122,15 +124,19 @@ def store_sim(sim_id: str, result: dict, source: dict | None = None) -> Future |
     result["_meta"] = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "source": src,
+        # 実行時の環境．エンベロープの uxsim_version / risu_version はこれを使う
+        # （読み戻した結果を再出力しても，現在の環境の版で上書きしない）
+        "uxsim_version": (result.get("_runtime") or {}).get("uxsim_version") or UXSIM_VERSION,
+        "risu_version": RISU_VERSION,
     }
+    # 永続化は executor で（圧縮に数百 ms かかることがあり，イベントループを塞がない）．
+    # 結果 dict を直接渡す: 上限で先にメモリから追い出されても保存される（id で引き直さない）．
+    # 戻り値の Future はテストが完了を待つために使う．
+    fut = executor.submit(_persist_sim, sim_id, result) if RESULTS_DIR else None
     # 追加と追い出し（古い順．永続化していればディスクから戻る）は 1 つのロック区間で
     for old_id in results_store.put(sim_id, result, MAX_RESULTS):
         log.info(f"results_store evicted {old_id} (limit {MAX_RESULTS})")
-    # 永続化は executor で（圧縮に数百 ms かかることがあり，イベントループを塞がない）．
-    # 戻り値の Future はテストが完了を待つために使う．
-    if RESULTS_DIR:
-        return executor.submit(_persist_sim, sim_id)
-    return None
+    return fut
 
 
 # ──────────────────────────────────────────────
@@ -168,18 +174,20 @@ def persisted_ids() -> list[str]:
     return [sid for _, sid in sorted(found, reverse=True)]
 
 
-def _persist_sim(sim_id: str) -> str | None:
-    """results_store[sim_id] を RESULTS_DIR に書く．戻り値は書いたパス．
+def _persist_sim(sim_id: str, raw: dict) -> str | None:
+    """結果 raw を RESULTS_DIR に書く．戻り値は書いたパス．
 
-    envelope_compressed_bytes を使うので，あとで /results が同じ方式を要求したときは
-    キャッシュがそのまま使われる．一時ファイルに書いてから rename する（途中で落ちても壊れない）．
+    raw を直接受け取る（results_store から id で引き直さない）ので，上限で先に
+    メモリから追い出されていても保存される．envelope_compressed_bytes の圧縮結果は
+    raw の _enc_cache に残るので，あとで /results が同じ方式を要求すればそのまま使われる．
+    一時ファイルに書いてから rename する（途中で落ちても壊れない）．
     """
-    if not RESULTS_DIR or sim_id not in results_store:
+    if not RESULTS_DIR:
         return None
     try:
         os.makedirs(RESULTS_DIR, exist_ok=True)
         encoding = "zstd" if _zstd is not None else "gzip"
-        blob = envelope_compressed_bytes(sim_id, encoding)
+        blob = envelope_compressed_bytes(sim_id, encoding, raw)
         path = os.path.join(RESULTS_DIR, f"{sim_id}.json.{'zst' if encoding == 'zstd' else 'gz'}")
         tmp = path + ".tmp"
         with open(tmp, "wb") as f:
@@ -188,7 +196,7 @@ def _persist_sim(sim_id: str) -> str | None:
         # 一覧用のサイドカー（本体を読まずに GET /results で出せるように）
         meta_path = os.path.join(RESULTS_DIR, f"{sim_id}.meta.json")
         with open(meta_path + ".tmp", "w", encoding="utf-8") as f:
-            json.dump(result_summary(sim_id, results_store[sim_id]), f, ensure_ascii=False)
+            json.dump(result_summary(sim_id, raw), f, ensure_ascii=False)
         os.replace(meta_path + ".tmp", meta_path)
         log.info(f"persisted {sim_id} -> {path} ({len(blob)/1e6:.1f}MB)")
         return path
@@ -211,6 +219,7 @@ def result_summary(sim_id: str, raw: dict) -> dict:
                    if k in ("type", "via", "tool", "place", "distance_m", "road_types", "base_sim_id", "demand")},
         "tmax": sc.get("tmax"),
         "random_seed": sc.get("random_seed"),
+        "uxsim_version": meta.get("uxsim_version"),
         "nodes": len(sc.get("nodes") or []),
         "links": len(sc.get("links") or []),
         "demands": len(sc.get("demands") or []),
@@ -291,6 +300,9 @@ def _result_from_envelope(env: dict) -> dict:
             "created_at": env.get("created_at"),
             "source": env.get("source") or {"type": "unknown"},
             "persisted": True,
+            # 実行当時の版（ファイルの値をそのまま保持する．現在の環境の版とは別）
+            "uxsim_version": env.get("uxsim_version"),
+            "risu_version": env.get("risu_version"),
         },
         "geojson":     res.get("geojson"),
         "frames":      frames,
@@ -330,20 +342,29 @@ def _load_persisted(path: str) -> dict:
     return result
 
 
-def build_envelope(sim_id: str, *, include_result: bool = True) -> dict:
+def _resolve_raw(sim_id: str, raw: dict | None) -> dict:
+    """raw が渡されていればそれ，無ければ results_store から引く（永続化スレッド用）．"""
+    return raw if raw is not None else results_store[sim_id]
+
+
+def build_envelope(sim_id: str, *, include_result: bool = True, raw: dict | None = None) -> dict:
     """results_store の内部表現を DL/取得用の正規エンベロープに変換する．
 
     include_result=False の場合は再現に必要な scenario と meta のみを返す
-    （Scenario DL ボタン用）．
+    （Scenario DL ボタン用）．raw を渡せば results_store を引かない（永続化スレッド用）．
+
+    uxsim_version / risu_version は**実行当時**の版（_meta）．読み戻した結果を再出力しても
+    変わらない．現在の環境の版は exported_with に別で載せる（再現性のため区別する）．
     """
-    raw = results_store[sim_id]
+    raw = _resolve_raw(sim_id, raw)
     meta = raw.get("_meta", {})
     envelope = {
         "risu_schema_version": RISU_SCHEMA_VERSION,
         "sim_id": sim_id,
         "created_at": meta.get("created_at"),
-        "uxsim_version": UXSIM_VERSION,
-        "risu_version": RISU_VERSION,
+        "uxsim_version": meta.get("uxsim_version") or (raw.get("_runtime") or {}).get("uxsim_version") or UXSIM_VERSION,
+        "risu_version": meta.get("risu_version") or RISU_VERSION,
+        "exported_with": {"uxsim_version": UXSIM_VERSION, "risu_version": RISU_VERSION},
         "scenario": raw.get("_scenario", {}),
         "source": meta.get("source", {"type": "unknown"}),
     }
@@ -372,9 +393,9 @@ def build_envelope(sim_id: str, *, include_result: bool = True) -> dict:
         }
     return envelope
 
-def envelope_json_bytes(sim_id: str) -> bytes:
+def envelope_json_bytes(sim_id: str, raw: dict | None = None) -> bytes:
     """完全エンベロープを JSON バイト列に直列化する（frames の numpy 列も直接）．"""
-    env = build_envelope(sim_id, include_result=True)
+    env = build_envelope(sim_id, include_result=True, raw=raw)
     _res = env.get("result")
     if _res is not None and _res.get("frame_format") == "columnar_v2" and _res.get("frames"):
         # 送出時だけ columnar_v3（量子化＋差分符号化）に変換する．
@@ -453,14 +474,15 @@ def negotiate_encoding(accept_encoding: str) -> str:
     return "identity"
 
 
-def envelope_compressed_bytes(sim_id: str, encoding: str) -> bytes:
+def envelope_compressed_bytes(sim_id: str, encoding: str, raw: dict | None = None) -> bytes:
     """圧縮済みエンベロープ．結果は不変なので sim × 方式ごとに 1 回だけ作ってキャッシュする．
 
     キャッシュは `_enc_cache` に方式名をキーにして持つ．実際に要求された方式しか
     作らないので，1 種類しか使われない通常運用ではメモリは従来と変わらない
     （1 件数十 MB になり得るため，両方を先回りして作らない）．
+    raw を渡せば results_store を引かない（永続化スレッドが追い出し後にも使えるように）．
     """
-    raw = results_store[sim_id]
+    raw = _resolve_raw(sim_id, raw)
     with results_store.lock:
         cache = raw.get("_enc_cache")
         if cache is None:
@@ -471,7 +493,7 @@ def envelope_compressed_bytes(sim_id: str, encoding: str) -> bytes:
 
     # 圧縮はロックの外で（数百 ms かかる．同時要求が重なっても同じ内容を作るだけ）
     t0 = time.perf_counter()
-    data = envelope_json_bytes(sim_id)
+    data = envelope_json_bytes(sim_id, raw)
     t1 = time.perf_counter()
     if encoding == "zstd":
         assert _zstd is not None, "zstd が要求されたが zstandard が無い（negotiate_encoding が選ばない）"

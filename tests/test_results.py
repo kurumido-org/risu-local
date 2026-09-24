@@ -650,3 +650,72 @@ class TestResultsList:
         finally:
             for s in ("lst_a", "lst_b", "dropped"):
                 risu.results.results_store.pop(s, None)
+
+
+class TestPersistenceRobustness:
+    """[修正履歴] 保存待ちの結果が上限で先に追い出されると保存されなかった / 読み戻しは上限を無視した /
+    再出力すると uxsim_version が現在の版に変わった．"""
+
+    @pytest.fixture
+    def store_dir(self, tmp_path, monkeypatch):
+        import risu.results
+        monkeypatch.setattr(risu.results, "RESULTS_DIR", str(tmp_path))
+        return tmp_path
+
+    def test_eviction_before_persist_does_not_lose_the_result(self, store_dir, monkeypatch):
+        import risu.results
+        monkeypatch.setattr(risu.results, "MAX_RESULTS", 1)
+        base = run_uxsim(BOTTLENECK_SCENARIO)
+        f1 = risu.results.store_sim("evict_a", dict(base), {"type": "manual"})
+        f2 = risu.results.store_sim("evict_b", dict(base), {"type": "manual"})   # a は即座に追い出される
+        try:
+            assert f1.result(timeout=60) is not None and f2.result(timeout=60) is not None
+            assert not dict.__contains__(risu.results.results_store, "evict_a")
+            assert risu.results.persisted_path("evict_a") is not None      # それでも保存されている
+            assert risu.results.results_store["evict_a"]["stats"] == base["stats"]
+        finally:
+            for s in ("evict_a", "evict_b"):
+                risu.results.results_store.pop(s, None)
+
+    def test_lazy_load_respects_memory_limit(self, store_dir, monkeypatch):
+        import risu.results
+        base = run_uxsim(BOTTLENECK_SCENARIO)
+        ids = [f"lazy_{i}" for i in range(4)]
+        for s in ids:
+            risu.results.store_sim(s, dict(base), {"type": "manual"}).result(timeout=60)
+        for s in ids:
+            dict.pop(risu.results.results_store, s, None)
+        monkeypatch.setattr(risu.results, "MAX_RESULTS", 2)
+        try:
+            for s in ids:
+                assert risu.results.results_store[s]["stats"] == base["stats"]
+            in_mem = [s for s in ids if dict.__contains__(risu.results.results_store, s)]
+            assert len(in_mem) <= 2, in_mem
+        finally:
+            for s in ids:
+                risu.results.results_store.pop(s, None)
+
+    def test_reexport_keeps_original_versions(self, store_dir):
+        import risu.results
+        import risu.runtime
+        sid = "ver_keep"
+        risu.results.store_sim(sid, run_uxsim(BOTTLENECK_SCENARIO), {"type": "manual"}).result(timeout=60)
+        env = risu.results.build_envelope(sid)
+        assert env["uxsim_version"] == risu.runtime.UXSIM_VERSION            # 新規は現在の版
+        assert env["exported_with"]["uxsim_version"] == risu.runtime.UXSIM_VERSION
+        # 古い版で実行された保存ファイルを読み戻して再出力する
+        old = json.loads(risu.results.envelope_json_bytes(sid))
+        old["uxsim_version"] = "1.11.0"
+        old["risu_version"] = "0.0.9"
+        (store_dir / "ver_old.json").write_text(json.dumps(old), encoding="utf-8")
+        risu.results.results_store.pop(sid, None)
+        try:
+            re_env = risu.results.build_envelope("ver_old")
+            assert re_env["uxsim_version"] == "1.11.0"
+            assert re_env["risu_version"] == "0.0.9"
+            assert re_env["exported_with"]["uxsim_version"] == risu.runtime.UXSIM_VERSION
+            assert json.loads(risu.results.envelope_json_bytes("ver_old"))["uxsim_version"] == "1.11.0"
+            rows = {r["sim_id"]: r for r in risu.results.list_results()}
+            assert rows["ver_old"]["uxsim_version"] == "1.11.0"
+        finally:
+            risu.results.results_store.pop("ver_old", None)
