@@ -20,6 +20,7 @@ __all__ = [
     "envelope_compressed_bytes",
     "envelope_gzip_bytes",
     "envelope_json_bytes",
+    "link_geometries_of",
     "list_results",
     "negotiate_encoding",
     "persisted_ids",
@@ -294,8 +295,10 @@ def _result_from_envelope(env: dict) -> dict:
         frames = {k: {c: np.asarray(v.get(c, ()), dtype=(np.int32 if c in ("ids", "li") else np.float64))
                       for c in ("ids", "xs", "ys", "vs", "alphas", "li")}
                   for k, v in frames.items() if isinstance(v, dict)}
+    scenario = dict(env.get("scenario") or {})
+    scenario.pop("link_geometries", None)   # 描画用の同梱物．正規化シナリオ（SimulationInput）の一部ではない
     return {
-        "_scenario":  env.get("scenario") or {},
+        "_scenario":  scenario,
         "_meta": {
             "created_at": env.get("created_at"),
             "source": env.get("source") or {"type": "unknown"},
@@ -359,6 +362,12 @@ def build_envelope(sim_id: str, *, include_result: bool = True, raw: dict | None
     """
     raw = _resolve_raw(sim_id, raw)
     meta = raw.get("_meta", {})
+    scenario = dict(raw.get("_scenario") or {})
+    # OSM 取込などの多点の道路形状は結果の GeoJSON にしか無い．再現用シナリオに link_geometries として
+    # 同梱しておくと，/upload（.json / .json+result のどちらでも）が描画に使い，再アップロードで直線に戻らない
+    geoms = link_geometries_of(raw)
+    if geoms:
+        scenario["link_geometries"] = geoms
     envelope = {
         "risu_schema_version": RISU_SCHEMA_VERSION,
         "sim_id": sim_id,
@@ -366,7 +375,7 @@ def build_envelope(sim_id: str, *, include_result: bool = True, raw: dict | None
         "uxsim_version": meta.get("uxsim_version") or (raw.get("_runtime") or {}).get("uxsim_version") or UXSIM_VERSION,
         "risu_version": meta.get("risu_version") or RISU_VERSION,
         "exported_with": {"uxsim_version": UXSIM_VERSION, "risu_version": RISU_VERSION},
-        "scenario": raw.get("_scenario", {}),
+        "scenario": scenario,
         "source": meta.get("source", {"type": "unknown"}),
     }
     if include_result:
@@ -395,6 +404,16 @@ def build_envelope(sim_id: str, *, include_result: bool = True, raw: dict | None
             "trip_series": raw.get("trip_series"),
         }
     return envelope
+
+def link_geometries_of(raw: dict) -> dict[str, list]:
+    """結果の GeoJSON から多点（3 点以上）の道路形状を {リンク名: 座標列} で返す（直線だけなら空）．"""
+    out: dict[str, list] = {}
+    for f in (raw.get("geojson") or {}).get("features", []):
+        coords = (f.get("geometry") or {}).get("coordinates")
+        if coords is not None and len(coords) > 2:
+            out[f["properties"]["name"]] = coords
+    return out
+
 
 def envelope_json_bytes(sim_id: str, raw: dict | None = None) -> bytes:
     """完全エンベロープを JSON バイト列に直列化する（frames の numpy 列も直接）．"""

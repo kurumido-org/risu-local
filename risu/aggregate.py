@@ -246,8 +246,15 @@ def compare_simulations(a_id: str, b_id: str, max_links: int = 20) -> dict | Non
 
     def dkey(d):
         return (d.get("orig"), d.get("dest"), d.get("t_start"), d.get("t_end"), d.get("flow"))
-    dema = {dkey(d) for d in sa.get("demands") or []}
-    demb = {dkey(d) for d in sb.get("demands") or []}
+
+    def vehicles(demands):
+        # 需要台数は flow の単純和ではなく時間積分（flow × 継続時間）で数える
+        return round(sum(float(d.get("flow") or 0) * (float(d.get("t_end") or 0) - float(d.get("t_start") or 0))
+                         for d in demands), 3)
+    # 同じ行が 2 本ある需要（重複行）も 1 行の減少として数えるため，集合ではなく多重集合で比べる
+    from collections import Counter
+    dema = Counter(dkey(d) for d in sa.get("demands") or [])
+    demb = Counter(dkey(d) for d in sb.get("demands") or [])
     same_seed = sa.get("random_seed") is not None and sa.get("random_seed") == sb.get("random_seed")
     note = ("random_seed が同じなので，差は条件変更によるもの．" if same_seed else
             "random_seed が異なる / 未指定なので，差には乱数（経路選択・合流順）の揺らぎが含まれる．"
@@ -263,8 +270,12 @@ def compare_simulations(a_id: str, b_id: str, max_links: int = 20) -> dict | Non
             "params": params,
             "links": _scenario_items_diff(sa.get("links"), sb.get("links")),
             "nodes": _scenario_items_diff(sa.get("nodes"), sb.get("nodes")),
-            "demands": {"n_added": len(demb - dema), "n_removed": len(dema - demb),
-                        "total_flow": [round(sum(d[4] or 0 for d in dema), 3), round(sum(d[4] or 0 for d in demb), 3)]},
+            "demands": {"n_added": sum((demb - dema).values()), "n_removed": sum((dema - demb).values()),
+                        "n_rows": [sum(dema.values()), sum(demb.values())],
+                        "total_flow": [round(sum(k[4] or 0 for k in dema.elements()), 3),
+                                       round(sum(k[4] or 0 for k in demb.elements()), 3)],
+                        # 総需要（台）= Σ flow × (t_end − t_start)．total_flow（台/秒の和）と混同しないこと
+                        "total_vehicles": [vehicles(sa.get("demands") or []), vehicles(sb.get("demands") or [])]},
         },
         "same_random_seed": same_seed,
         "note": note,

@@ -4,7 +4,12 @@
 from __future__ import annotations
 
 from fastapi import HTTPException
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+# 座標・長さ・速度・流量に NaN / Infinity（JSON の NaN トークンや文字列 "NaN"）が入ると，
+# pydantic の既定では float として受理され，UXsim の計算と図に非有限値が流れる．
+# 全モデルで拒否して，検証エラー（422 / ツール結果のエラー）として返す．
+_NO_INF_NAN = ConfigDict(allow_inf_nan=False)
 
 # モジュール外から使う名前（他モジュール・server.py・scripts・tests）．これ以外は内部実装．
 __all__ = [
@@ -19,6 +24,7 @@ __all__ = [
 # Pydantic スキーマ
 # ──────────────────────────────────────────────
 class NodeInput(BaseModel):
+    model_config = _NO_INF_NAN
     name: str
     x: float
     y: float
@@ -26,6 +32,7 @@ class NodeInput(BaseModel):
     signal: list[float] | None = None  # 信号現示の青時間リスト（秒）．例: [60,60] → 2現示各60秒
 
 class LinkInput(BaseModel):
+    model_config = _NO_INF_NAN
     name: str
     start: str
     end: str
@@ -41,6 +48,7 @@ class LinkInput(BaseModel):
     signal_group: int | list[int] | None = None
 
 class DemandInput(BaseModel):
+    model_config = _NO_INF_NAN
     orig: str
     dest: str
     t_start: float = Field(ge=0)
@@ -56,6 +64,7 @@ class DemandInput(BaseModel):
         return self
 
 class SimulationInput(BaseModel):
+    model_config = _NO_INF_NAN
     name: str = "sim"
     tmax: int = Field(default=3600, gt=0)
     # 車両集計単位（プラトンサイズ）．UXsim 内部の「1 車両」が deltan 台を表す．

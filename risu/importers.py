@@ -17,6 +17,7 @@ __all__ = [
     "MIN_LINK_LENGTH_M",
     "OSM_ROAD_PRESETS",
     "clamp_link_lengths",
+    "demand_flow_unit",
     "gmns_to_scenario",
     "parse_csv_scenario",
     "run_osm_import",
@@ -227,7 +228,10 @@ def parse_csv_scenario(content: str) -> dict:
     # ============ 需要 CSV 判定 ============
     DEMAND_ORIG_COLS = ["orig", "origin", "o_zone_id", "from", "source", "出発"]
     DEMAND_DEST_COLS = ["dest", "destination", "d_zone_id", "to", "target", "到着"]
-    DEMAND_VOL_COLS = ["flow", "volume", "demand", "rate", "交通量"]
+    DEMAND_VOL_COLS = ["flow", "volume", "demand", "rate", "交通量",
+                       # 単位を列名で明示する形（demand_flow_unit が判定に使う）
+                       "volume_per_hour", "vph", "veh_per_hour", "hourly_volume", "flow_per_hour", "trips_per_hour",
+                       "flow_per_sec", "veh_per_sec", "vps"]
 
     col_do = _find_col(raw_fields, DEMAND_ORIG_COLS)
     col_dd = _find_col(raw_fields, DEMAND_DEST_COLS)
@@ -248,7 +252,8 @@ def parse_csv_scenario(content: str) -> dict:
                 "t_end": _get_float(row, col_tend, 3600),
                 "flow": vol,
             })
-        return {"format": "demand_csv", "demands": demands}
+        # 流量の列名（単位の判定に使う．gmns_to_scenario 参照）
+        return {"format": "demand_csv", "demands": demands, "flow_column": col_dv}
 
     raise ValueError("CSV 形式を認識できません．ノード（name,x,y），リンク（start,end,length），または RISU CSV 形式を使用してください．")
 
@@ -332,18 +337,25 @@ def gmns_to_scenario(
 
     # 需要
     demands = []
+    notes: list[str] = []
     if demand_csv:
         parsed = parse_csv_scenario(demand_csv)
         if parsed["format"] in ("gmns_demand", "demand_csv"):
+            unit, unit_note = demand_flow_unit(parsed.get("flow_column"))
+            if unit_note:
+                notes.append(unit_note)
             for d in parsed["demands"]:
                 orig_zone = str(d["orig"])
                 dest_zone = str(d["dest"])
                 # zone_id → node_id マッピング
                 orig_node = node_zone_map.get(orig_zone, orig_zone)
                 dest_node = node_zone_map.get(dest_zone, dest_zone)
-                # flow がすでに台/秒の場合はそのまま，volume が大きい場合は台/時→台/秒変換
-                flow = d.get("flow", 0)
-                if flow > 10:  # 10 台/秒超 → 台/時と推定
+                flow = float(d.get("flow", 0))
+                if unit == "per_hour":
+                    flow = flow / 3600.0
+                elif unit == "per_sec":
+                    pass
+                elif flow > 10:  # 単位不明: 10 台/秒超は台/時とみなす（notes で通知）
                     flow = flow / 3600.0
                 if flow > 0:
                     demands.append({
@@ -362,7 +374,30 @@ def gmns_to_scenario(
         "nodes": nodes,
         "links": links,
         "demands": demands,
+        # 取込時の仮定（単位の推定など）．空なら仮定なし．API の message と出所の説明に使う
+        "notes": notes,
     }
+
+
+# 需要列の単位: 列名から判別できるものだけ確定し，それ以外は値の大小で推定して通知する．
+# 曖昧な小さい値を根拠なく台/時・台/秒のどちらかに固定しない（取込時の仮定は notes で返す）．
+_FLOW_PER_SEC_COLS = ("flow", "flow_per_sec", "veh_per_sec", "vps")
+_FLOW_PER_HOUR_COLS = ("volume_per_hour", "vph", "veh_per_hour", "hourly_volume", "flow_per_hour", "trips_per_hour")
+
+
+def demand_flow_unit(column: str | None) -> tuple[str | None, str | None]:
+    """需要の流量列の単位を列名から判定する．戻り値は (unit, note)．
+
+    unit: "per_sec" / "per_hour"（列名で確定）/ None（判別不能．値の大小で推定する）．
+    note: 利用者に通知する仮定の説明（確定できたときは None）．
+    """
+    c = (column or "").strip().lower()
+    if c in _FLOW_PER_SEC_COLS:
+        return "per_sec", None
+    if c in _FLOW_PER_HOUR_COLS or c.endswith(("_per_hour", "_per_hr", "/h", "/hr")):
+        return "per_hour", None
+    return None, (f"需要の列 '{column or '?'}' の単位が明示されていないため，10 台/秒を超える値は台/時，"
+                  "それ以下は台/秒とみなした（列名を flow（台/秒）または volume_per_hour（台/時）にすると確定できる）")
 
 
 # OSM 道路種別プリセット

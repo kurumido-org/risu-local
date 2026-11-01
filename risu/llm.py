@@ -36,9 +36,11 @@ __all__ = [
     "chat_claude_stream",
     "chat_mock",
     "chat_ollama",
+    "explicit_no_run",
     "extract_charts",
     "log_usage",
     "mark_cache_tail",
+    "pending_tools_note",
     "trim_history",
 ]
 
@@ -279,48 +281,182 @@ class UsageTally:
 # （入力の 5 倍単価）を大量に使う．{"$data": "network_avg_speed"} のような参照を
 # サーバー側で実データに置き換える．
 # ──────────────────────────────────────────────
-def _resolve_chart_refs(obj, data_cache: dict, default_sim_id: str | None):
-    """chart JSON 内の {"$data": "<path>", "sim_id"?: "..."} を集計データで置換する"""
+# 時刻ごとの系列（time_labels と同じ長さ）．別の sim の time_labels に載せるときは整列が要る
+_TIME_SERIES_PATHS = ("network_avg_speed", "network_vehicle_count",
+                      "network_entered_count", "network_completed_count")
+
+
+def _is_time_series_path(path: str) -> bool:
+    return path in _TIME_SERIES_PATHS or path.startswith("link_speeds.")
+
+
+def _lookup_data(data_cache: dict, sim_id: str) -> dict | None:
+    data = data_cache.get(sim_id)
+    if data is None and sim_id:
+        data = get_simulation_data(sim_id)
+        if data is not None:
+            data_cache[sim_id] = data
+    return data
+
+
+def _resolve_chart_refs(obj: Any, data_cache: dict, default_sim_id: str | None, report: dict | None = None) -> Any:
+    """chart JSON 内の {"$data": "<path>", "sim_id"?: "..."} を集計データで置換する．
+
+    report（省略可）に解決の記録を残す:
+      refs:       [(path, sim_id)]  解決できた参照
+      unresolved: [(path, sim_id)]  見つからなかった参照（空配列に置換される）
+    """
     if isinstance(obj, dict):
         if "$data" in obj and isinstance(obj["$data"], str):
             sim_id = str(obj.get("sim_id") or default_sim_id or "")
-            data = data_cache.get(sim_id)
-            if data is None and sim_id:
-                data = get_simulation_data(sim_id)
-                if data is not None:
-                    data_cache[sim_id] = data
-            cur = data
+            cur = _lookup_data(data_cache, sim_id)
             for part in obj["$data"].split("."):
                 if isinstance(cur, dict) and part in cur:
                     cur = cur[part]
                 else:
                     log.warning(f"chart $data unresolved: {obj['$data']!r} (sim {sim_id!r})")
+                    if report is not None:
+                        report.setdefault("unresolved", []).append((obj["$data"], sim_id))
                     return []
+            if report is not None:
+                report.setdefault("refs", []).append((obj["$data"], sim_id))
             return cur
-        return {k: _resolve_chart_refs(v, data_cache, default_sim_id) for k, v in obj.items()}
+        return {k: _resolve_chart_refs(v, data_cache, default_sim_id, report) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [_resolve_chart_refs(v, data_cache, default_sim_id) for v in obj]
+        return [_resolve_chart_refs(v, data_cache, default_sim_id, report) for v in obj]
     return obj
+
+
+def _ref_of(node) -> tuple[str, str | None] | None:
+    """node が {"$data": path, "sim_id"?} なら (path, sim_id) を返す．"""
+    if isinstance(node, dict) and isinstance(node.get("$data"), str):
+        return (node["$data"], node.get("sim_id"))
+    return None
+
+
+def _resolve_chart(chart: dict, data_cache: dict, default_sim_id: str | None) -> tuple[dict | None, list[str]]:
+    """1 つの Chart.js 設定を解決する．戻り値は (chart または None, 利用者向けの注記)．
+
+    方針（参照が壊れたグラフを「正常なゼロ交通量」と読ませない）:
+      - データセットの参照が解決できなければ，そのデータセットを外して注記を残す
+      - ラベルの参照が解決できない，またはデータセットが 1 つも残らなければ，グラフ自体を省く
+      - ラベルが sim A の time_labels で，データセットが sim B の時刻系列（A と時刻配置が違う）なら，
+        両方の時刻の和集合を軸にして各系列をその sim 自身の時刻に置き直す（無い時刻は null）．
+        片方の時刻ラベルに他方の配列を無条件で重ねると，点の (時刻, 値) の対応が壊れるため．
+    """
+    notes: list[str] = []
+    data = chart.get("data") if isinstance(chart, dict) else None
+    if not isinstance(data, dict):
+        resolved_any: Any = _resolve_chart_refs(chart, data_cache, default_sim_id)
+        return (resolved_any if isinstance(resolved_any, dict) else None), notes
+
+    # ── ラベル ──
+    labels_ref = _ref_of(data.get("labels"))
+    labels_sim = str((labels_ref[1] if labels_ref else None) or default_sim_id or "")
+    rep: dict = {}
+    labels = _resolve_chart_refs(data.get("labels"), data_cache, default_sim_id, rep)
+    if rep.get("unresolved"):
+        path, sid = rep["unresolved"][0]
+        notes.append(f"グラフの時間軸の参照 {path}（sim {sid or '不明'}）が見つからないため，このグラフは省略しました")
+        return None, notes
+
+    # ── データセット ──
+    datasets_in = data.get("datasets")
+    datasets_out: list[Any] = []
+    series_sims: list[tuple[int, str, str]] = []     # (index, path, sim_id) 時刻系列だけ
+    if isinstance(datasets_in, list):
+        for ds in datasets_in:
+            if not isinstance(ds, dict):
+                datasets_out.append(_resolve_chart_refs(ds, data_cache, default_sim_id))
+                continue
+            rep = {}
+            resolved = _resolve_chart_refs(ds, data_cache, default_sim_id, rep)
+            if rep.get("unresolved"):
+                path, sid = rep["unresolved"][0]
+                label = ds.get("label") or f"データセット {len(datasets_out) + 1}"
+                notes.append(f"グラフ「{label}」の参照 {path}（sim {sid or '不明'}）が見つからないため除外しました")
+                continue
+            ref = _ref_of(ds.get("data"))
+            if ref and _is_time_series_path(ref[0]):
+                series_sims.append((len(datasets_out), ref[0], str(ref[1] or default_sim_id or "")))
+            datasets_out.append(resolved)
+        if not datasets_out:
+            notes.append("グラフの参照データがいずれも見つからないため，このグラフは省略しました")
+            return None, notes
+
+    out: dict[str, Any] = _resolve_chart_refs({k: v for k, v in chart.items() if k != "data"},
+                                              data_cache, default_sim_id)
+    out["data"] = {**{k: _resolve_chart_refs(v, data_cache, default_sim_id)
+                      for k, v in data.items() if k not in ("labels", "datasets")},
+                   "labels": labels, "datasets": datasets_out}
+
+    # ── 時間軸の整列（ラベルが time_labels で，別の時刻配置の sim の系列が混ざるとき） ──
+    if labels_ref and labels_ref[0] == "time_labels" and series_sims:
+        base_t = (data_cache.get(labels_sim) or {}).get("time_labels")
+        axes = {}
+        for _i, _p, sid in series_sims:
+            t = (data_cache.get(sid) or {}).get("time_labels")
+            if t is not None:
+                axes[sid] = list(t)
+        if base_t is not None and any(ax != list(base_t) for ax in axes.values()):
+            union = sorted({float(t) for ax in axes.values() for t in ax} | {float(t) for t in base_t})
+            for i, _p, sid in series_sims:
+                own_t = axes.get(sid)
+                vals = datasets_out[i].get("data")
+                if own_t is None or not isinstance(vals, list) or len(vals) != len(own_t):
+                    continue
+                by_t = {float(t): v for t, v in zip(own_t, vals)}
+                datasets_out[i]["data"] = [by_t.get(t) for t in union]
+            out["data"]["labels"] = [int(t) if float(t).is_integer() else t for t in union]
+            opts: dict[str, Any] = out["options"] if isinstance(out.get("options"), dict) else {}
+            out["options"] = opts
+            opts["spanGaps"] = True
+            plugins: dict[str, Any] = opts["plugins"] if isinstance(opts.get("plugins"), dict) else {}
+            opts["plugins"] = plugins
+            plugins["risu"] = {"alignedTimeAxis": True, "sims": sorted(set(axes) | {labels_sim})}
+            log.info(f"chart time axes aligned: sims={sorted(set(axes) | {labels_sim})} -> {len(union)} points")
+    return out, notes
 
 
 _CHART_PATTERN = None
 
 def extract_charts(text: str, data_cache: dict, default_sim_id: str | None) -> tuple[list, str]:
-    """```chart ... ``` ブロックを抽出して $data を解決し，(charts, 本文) を返す"""
+    """```chart ... ``` ブロックを抽出して $data を解決し，(charts, 本文) を返す．
+
+    壊れた JSON・解決できない参照のグラフは省き，その旨を本文末尾に注記する（黙って消さない）．
+    """
     global _CHART_PATTERN
     if _CHART_PATTERN is None:
         import re
         _CHART_PATTERN = re.compile(r'```\s*chart\w*\s*\n?(.*?)\n?\s*```', re.DOTALL | re.IGNORECASE)
     charts = []
+    notes: list[str] = []
     for m in _CHART_PATTERN.finditer(text):
         try:
             chart_json = json.loads(m.group(1))
         except json.JSONDecodeError as e:
             log.warning(f"chart JSON parse failed: {e}; raw={m.group(1)[:200]!r}")
+            notes.append("グラフ設定の解析に失敗したため，そのグラフは省略しました")
             continue
-        charts.append(_resolve_chart_refs(chart_json, data_cache, default_sim_id))
+        if not isinstance(chart_json, dict):
+            notes.append("グラフ設定が JSON オブジェクトでないため，そのグラフは省略しました")
+            continue
+        chart, chart_notes = _resolve_chart(chart_json, data_cache, default_sim_id)
+        notes.extend(chart_notes)
+        if chart is not None:
+            charts.append(chart)
     clean_text = _CHART_PATTERN.sub('', text).strip()
+    if notes:
+        clean_text = (clean_text + "\n\n" if clean_text else "") + "\n".join(f"（注記: {n}）" for n in notes)
     return charts, clean_text
+
+
+def pending_tools_note(tool_blocks) -> str:
+    """ツール呼び出しの上限で実行できなかった要求を，本文末尾に明示する文．"""
+    names = [getattr(b, "name", "?") for b in tool_blocks]
+    return (f"\n\n（注記: ツール呼び出しの上限（{MAX_TOOL_ROUNDS} ラウンド）に達したため，"
+            f"次の処理は実行していません: {', '.join(names)}．この応答は未完了です．"
+            "必要なら操作を分けて再度依頼してください）")
 
 
 # ──────────────────────────────────────────────
@@ -369,6 +505,47 @@ def log_usage(context: str, response) -> dict:
 # tool_use ループ上限（暴走・コスト爆弾対策）
 # ──────────────────────────────────────────────
 MAX_TOOL_ROUNDS = int(os.getenv("RISU_MAX_TOOL_ROUNDS", "3"))
+
+# ──────────────────────────────────────────────
+# 「実行しないで」の明示指示
+#
+# 初回応答が文章だけで，ユーザー文に「交通」「渋滞」等のキーワードがあると，ツール呼び出しを
+# 強制して再試行する（LLM が「実行します」と言うだけで止まるのを防ぐ）．ただしユーザーが
+# 明示的に「実行しないで」「再計算は不要」と言っているときにこれをやると，説明だけの依頼に
+# 対して勝手にシミュレーションを走らせることになる（アプリ側が指示を上書きする）．
+# 以下の語が含まれるときは再試行しない．
+# ──────────────────────────────────────────────
+NO_RUN_PATTERNS = (
+    "実行しない", "実行せず", "実行は不要", "実行不要", "実行はしない", "実行しなくて",
+    "再計算せず", "再計算は不要", "再計算不要", "再計算しない", "計算せず", "計算は不要", "計算不要",
+    "再実行せず", "再実行は不要", "再実行不要", "再実行しない",
+    "説明だけ", "説明のみ", "だけ説明", "のみ説明", "だけ教えて", "だけを説明",
+    "走らせない", "走らせず", "動かさない", "動かさず",
+    "do not run", "don't run", "without running", "no simulation", "explain only",
+)
+
+
+def explicit_no_run(text: str | None) -> bool:
+    """ユーザー文に「実行しないで」等の明示指示があるか．"""
+    t = (text or "").lower()
+    return any(p in t for p in NO_RUN_PATTERNS)
+
+
+def _force_tool_hint(body: ChatInput) -> str:
+    """ツール呼び出しを強制して再試行するときの指示文．
+
+    会話に紐づく結果があるときは「その結果の修正なら rerun_simulation」と案内する．
+    以前は無条件に run_simulation を強制していたので，「容量だけ変えて再実行して」に対して
+    LLM が文章だけ返した場合，別ネットワークをゼロから新規実行していた．
+    """
+    sim_id = conversation_sim_id(body)
+    if sim_id:
+        return (f"ツールを使って今すぐ実行してください．表示中の結果（sim_id={sim_id}）を修正・再実行する"
+                f"依頼なら rerun_simulation(base_sim_id=\"{sim_id}\") に差分だけを渡し，新しいネットワークを"
+                "設計する依頼のときだけ run_simulation を使ってください．実行できない場合は，その理由を"
+                "述べて未完了であることを明示してください．")
+    return ("run_simulation ツールを使って今すぐシミュレーションを実行してください．"
+            "実行できない場合は，その理由を述べて未完了であることを明示してください．")
 
 # ──────────────────────────────────────────────
 # トークン節約の設定
@@ -428,25 +605,29 @@ async def chat_claude_stream(body: ChatInput):
             if response.stop_reason != "tool_use":
                 text = "".join(b.text for b in response.content if b.type == "text")
 
-                # シミュレーション意図がありそうならリトライ（tool_choice で強制）
+                # シミュレーション意図がありそうならリトライ（tool_choice で強制）．
+                # ただし「実行しないで」「再計算は不要」等の明示指示があるときは再試行しない
+                # （説明だけの依頼に対してアプリ側が勝手に実行しない．NO_RUN_PATTERNS）．
                 last_user_msg = last_user_message_text(body) or ""
                 sim_keywords = ["シミュレーション", "シミュレート", "実行", "グリッド", "ネットワーク", "渋滞", "ボトルネック", "道路", "交通"]
-                if any(k in last_user_msg for k in sim_keywords):
+                if any(k in last_user_msg for k in sim_keywords) and not explicit_no_run(last_user_msg):
                     if first_streamed_text:
                         yield _sse_event({"type": "stream_end_partial"})
                     yield _sse_event({"type": "progress", "message": "Step 1/3: シナリオを再設計中..."})
                     messages.append({"role": "assistant", "content": text})
-                    messages.append({"role": "user", "content": "run_simulation ツールを使って今すぐシミュレーションを実行してください．"})
+                    messages.append({"role": "user", "content": _force_tool_hint(body)})
                     # 非ストリーミングの create は，SDK が max_tokens から見積もった所要時間が
                     # 10 分を超える（約 21,000 トークン超）と ValueError で拒否する．
                     # ここはツール呼び出し（run_simulation の引数）だけなので 16,000 で足りる．
+                    # tool_choice は "any"（特定ツールを強制しない）: 表示中の結果の修正依頼に
+                    # run_simulation を強制すると，別ネットワークを新規実行してしまう．
                     response = client.messages.create(
                         model=CLAUDE_MODEL,
                         max_tokens=16000,
                         system=_cached_system(system),
                         messages=api_messages(mark_cache_tail(messages)),
                         tools=_cached_tools(),
-                        tool_choice={"type": "tool", "name": "run_simulation"},
+                        tool_choice={"type": "any"},
                     )
                     usage.add("stream retry (tool_choice)", response)
                     if response.stop_reason != "tool_use":
@@ -556,6 +737,10 @@ async def chat_claude_stream(body: ChatInput):
                         next_tool_blocks = item["tool_blocks"]
                         stream_result = item
 
+            # ラウンド上限で未実行のツール要求が残ったら，完了したと誤解させない
+            if next_tool_blocks:
+                final_text += pending_tools_note(next_tool_blocks)
+
             # チャート抽出（$data 参照はこのターンで取得した集計データで解決）
             charts, clean_text = extract_charts(
                 final_text, state.sim_data_cache,
@@ -572,6 +757,8 @@ async def chat_claude_stream(body: ChatInput):
                     "usage": usage.as_dict()}
             if charts:
                 resp["charts"] = charts
+            if next_tool_blocks:
+                resp["incomplete"] = True
             yield _sse_event(resp)
 
         except anthropic.AuthenticationError:
@@ -628,10 +815,11 @@ async def _chat_claude(body: ChatInput):
             text = "".join(b.text for b in response.content if b.type == "text")
 
             # LLM が「実行します」と言ったのにツールを呼ばなかった場合，再試行
+            # （ユーザーが「実行しないで」と明示しているときは再試行しない）
             sim_keywords = ["実行します", "作成します", "シミュレーション", "構築します"]
-            if any(k in text for k in sim_keywords):
+            if any(k in text for k in sim_keywords) and not explicit_no_run(last_user_message_text(body)):
                 messages.append({"role": "assistant", "content": text})
-                messages.append({"role": "user", "content": "run_simulation ツールを呼び出して，今すぐシミュレーションを実行してください．テキストだけでなくツールを使ってください．"})
+                messages.append({"role": "user", "content": _force_tool_hint(body)})
                 retry = client.messages.create(
                     model=CLAUDE_MODEL,
                     max_tokens=8192,
@@ -683,6 +871,10 @@ async def _chat_claude(body: ChatInput):
             messages.append({"role": "assistant", "content": resp_next.content})
             messages.append({"role": "user", "content": next_tool_results})
             mark_cache_tail(messages)
+        else:
+            # for が break せずに終わった = 上限に達してもツール要求が残っている
+            if next_tool_blocks:
+                final_text += pending_tools_note(next_tool_blocks)
 
         # ```chart ... ``` ブロックからChart.js設定を抽出（$data 参照を解決）
         charts, clean_text = extract_charts(

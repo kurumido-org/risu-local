@@ -499,9 +499,18 @@ def run_uxsim(scenario: SimulationInput) -> dict:
         f["properties"]["timeline"] = link_timeline[f["properties"]["name"]]
 
     # ---- 流入・到着の累積台数（実イベントから．描画用フレームとは独立） ----
-    # 時間軸は 0・各フレーム時刻・tmax．フレームは「走行車両がいる時刻」にしか無いので，
-    # 全車両到着後の状態（走行中 0 台・到着 = 全台）はこの系列でしか表せない．
-    _axis = sorted({0.0, float(scenario.tmax), *frame_times})
+    # 時間軸は 0・各フレーム時刻・各空白の始まり・tmax．フレームは「走行車両がいる時刻」にしか
+    # 無いので，全車両到着後の状態（走行中 0 台・到着 = 全台）はこの系列でしか表せない．
+    # 空白の始まり（最後のフレーム + フレーム間隔）を入れるのは，最後の車両の到着がその区間に
+    # 落ちるため．無いと，需要バースト間の空白で「流入 2 / 到着 1」のように前のフレームの値を
+    # 引きずり，走行車両がいないのに走行中 1 台と表示される．
+    _gap_starts = []
+    if frame_times:
+        _fi = frame_interval_s
+        for _a, _b in zip(frame_times, frame_times[1:] + [None]):
+            if _b is None or _b - _a > _fi * 1.5:
+                _gap_starts.append(min(float(scenario.tmax), _a + _fi))
+    _axis = sorted({0.0, float(scenario.tmax), *frame_times, *_gap_starts})
     _ent = np.sort(entry_t[np.isfinite(entry_t)]) if entry_t.size else np.empty(0)
     _arr = np.sort(np.asarray(_arrivals, dtype=np.float64))
     _dn = int(W.DELTAN)

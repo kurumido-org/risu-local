@@ -343,14 +343,16 @@ class TestLLMTokenSaving:
                     '{"label":"r1","data":{"$data":"link_speeds.r1","sim_id":"%s"}},'
                     '{"label":"missing","data":{"$data":"nope.x"}}]}}\n```\n以上．' % sid)
             charts, clean = risu.llm.extract_charts(text, cache, sid)
-            assert clean == "結果です．\n\n以上．".replace("\n\n", "\n\n") or "chart" not in clean
+            assert "```" not in clean and clean.startswith("結果です．")
             assert len(charts) == 1
             d = charts[0]["data"]
             sd = risu.aggregate.get_simulation_data(sid)
             assert d["labels"] == sd["time_labels"]
             assert d["datasets"][0]["data"] == sd["network_avg_speed"]
             assert d["datasets"][1]["data"] == sd["link_speeds"]["r1"]
-            assert d["datasets"][2]["data"] == []  # 未解決は空配列
+            # 未解決の参照は「正常なゼロ系列」として描かず，データセットを外して本文に注記する
+            assert len(d["datasets"]) == 2
+            assert "nope.x" in clean and "missing" in clean and "注記" in clean
             assert sid in cache  # 未取得なら get_simulation_data で補う
         finally:
             results_store.pop(sid, None)

@@ -122,6 +122,9 @@ async function sendMessage() {
 
   const btn = document.getElementById('send-btn');
   btn.disabled = true;
+  // この送信が属する会話の世代．途中で NEW されたら以降のイベントは捨てる
+  const gen = chatGeneration;
+  const stale = () => gen !== chatGeneration;
 
   // ── AI ステータスバー制御 ──
   const aiStatus = document.getElementById('ai-status');
@@ -198,7 +201,7 @@ async function sendMessage() {
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done || stale()) break;
         buffer += decoder.decode(value, { stream: true });
 
         const lines = buffer.split('\n\n');
@@ -240,6 +243,7 @@ async function sendMessage() {
       }
 
       hideStatus();
+      if (stale()) { btn.disabled = false; return; }   // NEW 後に届いた旧会話の結果は表示しない
       if (!data) throw new Error('サーバーからの応答がありませんでした');
 
       // ストリーミング中のメッセージをクリーンアップ → 最終版で置き換え
@@ -248,11 +252,14 @@ async function sendMessage() {
 
     } else {
       // 従来の JSON レスポンス（mock / ollama）
+      const json = await res.json();
       hideStatus();
-      renderAssistantResponse(await res.json());
+      if (stale()) { btn.disabled = false; return; }
+      renderAssistantResponse(json);
     }
   } catch(e) {
     hideStatus();
+    if (stale()) { btn.disabled = false; return; }     // NEW による中止は新しい会話に何も残さない
     if (e.name === 'AbortError' || (e.message || '').toLowerCase().includes('abort')) {
       addMsg('system', '中止しました');
     } else {

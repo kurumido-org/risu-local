@@ -26,7 +26,8 @@
 .venv\Scripts\activate
 
 python server.py                     # 起動 → http://localhost:8001
-pytest tests/ -v                     # テスト全件（サーバー起動が要るものは未起動なら自動 skip）
+pytest tests/ -v                     # テスト全件（HTTP の契約は TestClient で毎回実行．playwright があれば tests/e2e も）
+python scripts\evaluate_chat.py --cases L01-L12 --trials 3   # 実 LLM 評価（API 費用がかかる．evals/README.md）
 ruff check .                         # lint（CI の lint ジョブと同一設定）
 pyright --pythonpath .venv\Scripts\python.exe   # 型チェック（basic．対象は pyproject の [tool.pyright]）
 python scripts\bench.py              # 性能ベンチ（§3.5 / §3.6 の前提を確認）
@@ -76,13 +77,24 @@ risu-local/
 │   └── sample_risu.csv
 ├── scripts/
 │   ├── run_scenario.py   ← 素の UXsim で実行する CLI（サーバー不要）
-│   └── bench.py          ← 後処理・直列化のベンチマーク
+│   ├── bench.py          ← 後処理・直列化のベンチマーク
+│   └── evaluate_chat.py  ← 実 LLM のタスク評価ハーネス（evals/cases の L01〜L24．費用がかかるので明示実行）
+├── evals/
+│   ├── cases/            ← 実 LLM 評価の固定入力（1 タスク 1 JSON）．runs/ は記録（gitignore）
+│   └── README.md
 ├── tests/
-│   ├── helpers.py        ← 共通のシナリオ定数とフェイク Anthropic クライアント
+│   ├── helpers.py        ← 共通のシナリオ定数と，要求・ツール履歴を記録する偽 Anthropic クライアント
+│   ├── fixtures/         ← 公開可能な固定シナリオ F1〜F6 と判定ヘルパー（差分・需要の時間積分・ストアの隔離）
 │   ├── test_<module>.py  ← risu/<module>.py に対応（simulation / schema / results / llm / tools / api …）
+│   ├── test_chat_intent.py          ← 実行意図: 「実行しないで」の尊重，修正依頼の基準保持，失敗の終端，ラウンド上限
+│   ├── test_reference_integrity.py  ← 参照先・差分命令・図の sim_id 対応と時間軸の整列・需要の多重集合
+│   ├── test_provenance.py           ← 需要の出所（自動生成の仮定）が派生・保存・再読込で残る
+│   ├── test_numerical_contracts.py  ← 独立した数値基準（自由流・容量境界・閉鎖・空白・信号・再現性・直接構築との一致）
+│   ├── test_api_contracts.py        ← HTTP の契約（TestClient で毎回実行．壊れた入力の 4xx，GMNS 単位，非有限値）
 │   ├── test_frontend.py  ← フロントのソース検査，test_project.py ← ライセンス衛生・構成ガード
+│   ├── TEST_DESIGN_MAP.md ← テスト設計書の項目（T / N / U / L）とテスト関数の対応表
 │   ├── js/core.test.js   ← risu-core.js の単体テスト（node --test tests/js/*.test.js，依存なし）
-│   └── e2e/              ← headless Chromium のスモークテスト（playwright が無ければ skip）
+│   └── e2e/              ← headless Chromium: スモーク（test_browser_smoke）と操作シナリオ（test_chat_workflow）．playwright が無ければ skip
 ├── pyproject.toml        ← ruff / pytest 設定 + パッケージメタデータ
 ├── requirements.txt      ← 範囲指定（上限付き）
 ├── requirements.lock.txt ← 検証済みの完全な pip freeze（Python 3.12 用）．CI の 3.12 ジョブはこれに固定，他の Python と週次は最新で走る
@@ -380,6 +392,8 @@ MCP（`mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
 | **台数を扱う集計を足す** | `vehicle_counts` を使うか `deltan` を掛ける（§3.3）．フレームの点数はプラトン数 |
 | **入力の値域を変える** | `SimulationInput` の `Field(gt=/ge=)`．`TestScenarioValidation` に 1 件足す（deltan=0・負のリンク長・負の需要・時刻逆転を受理していた） |
 | **フロントのロジックを足す** | `static/js/risu-core.js` に純粋関数として書き，`tests/js` に単体テスト（§3.7）．index.html には DOM の結線だけ |
+| **LLM の振る舞いに関わる変更**（プロンプト・ツール定義・再試行・チャート解決） | `tests/test_chat_intent.py` / `test_reference_integrity.py` を通し，`python scripts\evaluate_chat.py --cases L01-L12`（実 LLM，費用あり）でタスク別の成否を確認する．判定の中心は正規化シナリオの差分と実データ（`tests/fixtures`） |
+| **需要・台数・平均の定義に触れる** | `tests/test_numerical_contracts.py` の独立基準（UXsim 直接構築・自由流時間・容量境界）．許容差は失敗を消すために広げない |
 | **ファイルを追加する** | §6 の公開対象かどうか |
 
 ---
@@ -405,6 +419,10 @@ MCP（`mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
 | 同じ入力で結果が毎回変わる | `random_seed` 未指定．比較・追試ではシナリオに持たせる（§3.1） |
 | GUI で再実行すると容量の前提が変わる | 送信データから `reaction_time` が落ちていた．`et-run` は全体パラメータを引き継ぐ（`TestGuiRerunCarriesScenarioParams`） |
 | `pip install` が `No such file or directory` で止まる | Windows の 260 文字パス長制限（`anthropic` の長いファイル名）．浅い場所に clone するか長いパスを有効化 |
+| 「実行しないで」と言ったのにシミュレーションが走る | 初回応答が文章だけのときの強制再試行．`NO_RUN_PATTERNS`（risu/llm.py）に当たれば再試行しない．再試行は `tool_choice=any` で，表示中の結果があれば rerun_simulation を案内する（run_simulation を強制すると別網を新規実行する） |
+| 設定上 360 台なのに `total_trips` が 359 | UXsim の `adddemand` は flow×DELTAT を累積して DELTAN 以上で 1 台出す．浮動小数の累積で境界の 1 台が出ないことがある（`tests/test_numerical_contracts.py` の `demand_count` が同じ規則）．需要台数の検証は flow×継続時間ではなくこの規則で見る |
+| 需要の空白時間に「流入 2 / 到着 1 / 走行中 1」と出る | `trip_series` の時間軸にフレーム時刻しか無いと，最後の到着が空白に落ちて前の値を引きずる．各空白の始まり（最後のフレーム + フレーム間隔）を軸に含める（`run_uxsim`） |
+| 比較で「同じ需要行が 2 本 → 1 本」の減少が見えない | `compare_simulations` の需要差分は多重集合（Counter）で数える．総需要は `total_vehicles`（flow×継続時間）で，`total_flow`（flow の和）と混同しない |
 
 `ruff format` は**意図的に CI へ入れていません**．`risu/simulation.py` などの数値処理は
 桁を揃えて書いてあり，自動整形すると数千行の差分が出て履歴が読めなくなるためです．

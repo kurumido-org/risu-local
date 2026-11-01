@@ -4,6 +4,9 @@
 // DOM に触らないロジックは risu-core.js（node でテスト）へ．
 const API = '';
 let chatHistory = [];
+// 会話の世代．NEW で進む．応答待ちの間に NEW されたとき，遅れて届く旧会話の done が
+// 新しい会話に吹き出し・表示 ID を混ぜないよう，送信時の世代と比べて捨てる（chat.js sendMessage）
+let chatGeneration = 0;
 let geoData    = null;
 // framesData: {str(t): {n, ids:Uint32, xs:Float32, ys:Float32, vs:Float32, alphas:Float32, li:Uint16}}
 let framesData = null;

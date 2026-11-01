@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse as _JSONResp
 from fastapi.responses import Response
@@ -109,6 +110,30 @@ async def global_exception_handler(request, exc):
             "error_id": id(exc) & 0xFFFFFF,  # 運用ログと突き合わせ可能な簡易 ID
         },
     )
+
+def _json_safe(obj):
+    """検証エラーの detail を JSON にできる形へ（NaN / Infinity は文字列に，例外オブジェクトは str に）．"""
+    import math
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else str(obj)
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if obj is None or isinstance(obj, (str, int, bool)):
+        return obj
+    return str(obj)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc: RequestValidationError):
+    """入力検証エラーは 422 で返す．
+
+    FastAPI 既定のハンドラは errors() の input をそのまま JSON にするので，入力に NaN / Infinity が
+    あると応答の直列化で落ちて 500 になっていた（非有限値を拒否したのに「予期しないエラー」に見える）．
+    """
+    return _JSONResp(status_code=422, content={"detail": _json_safe(exc.errors())})
+
 
 _default_origins = "http://localhost:8001,http://127.0.0.1:8001"
 ALLOWED_ORIGINS = [
@@ -323,14 +348,26 @@ async def upload_files(
     file_contents = {}
     for f in files:
         raw = await f.read()
-        content = raw.decode("utf-8-sig")  # BOM 対応
+        try:
+            content = raw.decode("utf-8-sig")  # BOM 対応
+        except UnicodeDecodeError as e:
+            raise HTTPException(422, detail=f"ファイル '{f.filename}' を UTF-8 として読めません（位置 {e.start}）．"
+                                             "文字コードを UTF-8 にして再度アップロードしてください")
         name = f.filename.lower() if f.filename else ""
         file_contents[name] = content
 
     # ---- JSON ファイルの場合 ----
     json_files = [n for n in file_contents if n.endswith(".json")]
     if json_files:
-        payload = json.loads(file_contents[json_files[0]])
+        try:
+            payload = json.loads(file_contents[json_files[0]])
+        except json.JSONDecodeError as e:
+            # 壊れた JSON は 500（予期しないエラー）ではなく，どこが壊れているかを返す
+            raise HTTPException(422, detail=f"JSON ファイル '{json_files[0]}' を解析できません: "
+                                             f"{e.msg}（{e.lineno} 行 {e.colno} 列）")
+        if not isinstance(payload, dict):
+            raise HTTPException(422, detail=f"JSON ファイル '{json_files[0]}' はシナリオのオブジェクト"
+                                             "（nodes / links / demands を持つ）である必要があります")
         # 新スキーマ (risu_schema_version 1.0) に対応
         # 形式 1: { "risu_schema_version": "1.0", "scenario": {...}, ... }
         # 形式 2: 旧 RISU JSON: トップレベルに nodes/links/demands
@@ -343,7 +380,9 @@ async def upload_files(
         else:
             scenario_dict = payload
         # 道路形状（多点 LineString）が同梱されていれば描画に使う（OSM 取込と同じ仕組み）
-        link_geometries = scenario_dict.pop("link_geometries", None) if isinstance(scenario_dict, dict) else None
+        if not isinstance(scenario_dict, dict):
+            raise HTTPException(422, detail=f"JSON ファイル '{json_files[0]}' の scenario がオブジェクトではありません")
+        link_geometries = scenario_dict.pop("link_geometries", None)
         sim_input = scenario_to_input(scenario_dict)
         result = await run_uxsim_async(sim_input)
         if link_geometries:
@@ -369,7 +408,10 @@ async def upload_files(
     # 単一 CSV の場合（RISU 独自形式を試行）
     if len(csv_files) == 1:
         name, content = next(iter(csv_files.items()))
-        parsed = parse_csv_scenario(content)
+        try:
+            parsed = parse_csv_scenario(content)
+        except ValueError as e:
+            raise HTTPException(422, detail=f"CSV '{name}' を解釈できません: {e}")
 
         if parsed["format"] == "risu_csv":
             scenario = {
@@ -419,7 +461,10 @@ async def upload_files(
     if not nodes_csv and not links_csv:
         raise HTTPException(400, detail="node.csv または link.csv が見つかりません")
 
-    scenario = gmns_to_scenario(nodes_csv, links_csv, demand_csv, config_csv, tmax)
+    try:
+        scenario = gmns_to_scenario(nodes_csv, links_csv, demand_csv, config_csv, tmax)
+    except ValueError as e:
+        raise HTTPException(422, detail=f"GMNS パースエラー: {e}")
 
     if not scenario["links"]:
         raise HTTPException(400, detail="link.csv が見つからないかリンクが0件です")
@@ -445,7 +490,8 @@ async def upload_files(
     return {
         "id": sim_id,
         "stats": result["stats"],
-        "message": f"GMNS データからシミュレーション実行完了（{len(scenario['nodes'])} ノード, {len(scenario['links'])} リンク）",
+        "message": f"GMNS データからシミュレーション実行完了（{len(scenario['nodes'])} ノード, {len(scenario['links'])} リンク）"
+                   + "".join(f"．{n}" for n in scenario.get("notes") or []),
     }
 
 

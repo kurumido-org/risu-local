@@ -20,15 +20,48 @@ from .simulation import apply_link_geometries, run_uxsim_async, validate_scenari
 
 # モジュール外から使う名前（他モジュール・server.py・scripts・tests）．これ以外は内部実装．
 __all__ = [
+    "DEMAND_CHANGING_ACTIONS",
     "ToolTurnState",
     "collect_tool_results",
     "conversation_context_block",
     "conversation_sim_id",
+    "derived_demand_provenance",
     "dispatch_tool_blocks",
     "handle_get_network_info",
     "handle_rerun_simulation",
     "last_user_message_text",
 ]
+
+# 需要の中身を変える差分命令．派生結果の需要出所（source.demand）の注記に使う
+DEMAND_CHANGING_ACTIONS = frozenset({
+    "update_demands", "add_demand", "remove_demands", "generate_demands", "shift_demands", "remove_nodes",
+})
+
+
+def derived_demand_provenance(base_meta: dict | None, base_id: str, mods: list) -> dict | None:
+    """派生結果（rerun_simulation）の需要の出所を，基準結果から引き継いで返す．
+
+    OSM 取込の自動生成需要は「仮定値」で，その注記は source.demand に入っている．
+    派生結果にこれを引き継がないと，容量を変えただけの結果について LLM が需要を実測と
+    取り違えて説明し得る（毎ターンのコンテキスト「需要の出所」は source.demand を見る）．
+    需要を変える差分命令が含まれていれば，その旨も注記に足す（元は自動生成，その後に何を変えたか）．
+    基準に需要の出所が無ければ None．
+    """
+    src = (base_meta or {}).get("source") or {}
+    dem = src.get("demand")
+    if not isinstance(dem, dict):
+        return None
+    out = dict(dem)
+    changed = [str(m.get("action")) for m in mods
+               if isinstance(m, dict) and m.get("action") in DEMAND_CHANGING_ACTIONS]
+    note = str(dem.get("note") or "")
+    if changed:
+        out["note"] = f"{note}（{base_id} から派生．派生時に需要を変更: {', '.join(changed)}）"
+        out["modified_by"] = changed
+    else:
+        out["note"] = f"{note}（{base_id} から引き継ぎ．派生時に需要は変更していない）"
+    out["inherited_from"] = str(dem.get("inherited_from") or base_id)
+    return out
 
 
 def last_user_message_text(body) -> str | None:
@@ -169,22 +202,34 @@ async def handle_rerun_simulation(fn_args: dict, body, *, via: str = "chat"
             apply_link_geometries(result, base_geom)
 
         new_id = str(uuid.uuid4())[:8]
-        store_sim(new_id, result, {
+        meta = {
             "type": "llm",
             "via": via,
             "llm_backend": "claude",
             "tool": "rerun_simulation",
             "base_sim_id": base_id,
             "llm_user_message": last_user_message_text(body),
-        })
-        content = json.dumps({
+        }
+        # 需要の出所（OSM 取込の自動生成など）は派生しても引き継ぐ（§3.3 の「仮定の需要を実測と
+        # 取り違えない」は派生結果にも要る）．基準の type も残して出所を辿れるようにする
+        base_src = (base.get("_meta") or {}).get("source") or {}
+        if base_src.get("type"):
+            meta["base_type"] = base_src.get("type")
+        dem = derived_demand_provenance(base.get("_meta"), base_id, mods)
+        if dem is not None:
+            meta["demand"] = dem
+        store_sim(new_id, result, meta)
+        payload = {
             **result["stats"],
             "sim_id": new_id,
             "base_sim_id": base_id,
             "applied": applied,
             "network": {"nodes": len(scenario["nodes"]), "links": len(scenario["links"]),
                         "demands": len(scenario["demands"])},
-        }, ensure_ascii=False)
+        }
+        if dem is not None:
+            payload["demand_assumption"] = dem.get("note")
+        content = json.dumps(payload, ensure_ascii=False)
         return (content, new_id, False)
     except HTTPException as e:
         return (f"再実行エラー: {e.detail}", None, True)

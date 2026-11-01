@@ -1,4 +1,4 @@
-"""HTTP 層（risu.api）: 起動中サーバーへのエンドポイント確認と待ち受けの既定値．"""
+"""HTTP 層（risu.api）: エンドポイントの契約（TestClient または起動中サーバー）と待ち受けの既定値．"""
 
 import os
 import sys
@@ -15,22 +15,24 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 class TestAPIEndpoints:
     """
-    サーバーが起動している場合のみ実行．
-    pytest tests/ -v -k "api" で選択実行可．
+    HTTP の契約を必ず実行する（サーバー未起動を理由に skip しない）．
+    環境変数 RISU_TEST_API_URL があればその起動済みサーバーを叩き，無ければ TestClient で
+    アプリを直接叩く（主要 API が毎回 CI で検証される経路．tests/test_api_contracts.py も参照）．
     """
 
-    API = "http://localhost:8001"
+    API = os.environ.get("RISU_TEST_API_URL", "").rstrip("/")
 
     @pytest.fixture(scope="class")
     def client(self):
-        import httpx
-        try:
-            r = httpx.get(f"{self.API}/docs", timeout=3)
-            if r.status_code != 200:
-                pytest.skip("サーバー未起動")
-        except Exception:
-            pytest.skip("サーバー未起動")
-        return httpx.Client(base_url=self.API, timeout=60)
+        if self.API:
+            import httpx
+            r = httpx.get(f"{self.API}/docs", timeout=5)
+            assert r.status_code == 200, f"RISU_TEST_API_URL={self.API} に接続できない"
+            return httpx.Client(base_url=self.API, timeout=60)
+        from fastapi.testclient import TestClient
+
+        import risu.api
+        return TestClient(risu.api.app)
 
     @pytest.fixture(scope="class")
     def sim_id(self, client):

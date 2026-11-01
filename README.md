@@ -76,7 +76,7 @@ LLM と対話しながら操作できるローカルアプリケーションで�
 | 環境 | 状況 |
 |---|---|
 | Windows 11 / Python 3.13 / Chrome | **全機能を実機で確認**．セットアップから UI 操作まで |
-| Ubuntu / Windows × Python 3.10〜3.13 | **CI で `pytest` 全件が通過**（件数は CI のログを参照．サーバー起動が要る一部は CI では skip）．サーバー側の動作は確認済み |
+| Ubuntu / Windows × Python 3.10〜3.13 | **CI で `pytest` 全件が通過**（件数は CI のログを参照．HTTP の契約も TestClient で毎回実行）．サーバー側の動作は確認済み |
 | ブラウザ UI（Linux / headless Chromium） | **CI でスモークテスト**（読み込み・3 描画モード・統計パネル・エディタ．`tests/e2e`）．フロントの純粋ロジックは node の単体テスト（`tests/js`） |
 | ブラウザ UI（Chrome 以外） | **未確認** |
 | macOS | **サポート対象外**．検証の予定もありません |
@@ -1102,7 +1102,17 @@ ruff check .                     # lint（CI と同じ設定）
 pyright                          # 型チェック（basic．対象は pyproject の [tool.pyright]）
 node --test tests/js/*.test.js   # フロントの純粋ロジック（依存なし）
 python scripts/bench.py          # 性能ベンチ
+python scripts/evaluate_chat.py --cases L01-L12 --trials 3   # 実 LLM のタスク評価（API 費用あり．evals/README.md）
 ```
+
+自動テストの構成（設計書の項目との対応は `tests/TEST_DESIGN_MAP.md`）:
+
+- `tests/test_*.py` — サーバー側の回帰．`tests/fixtures` の公開可能な固定シナリオ（直列ボトルネック・双方向・信号・格子・
+  OSM 相当の合成網）を使い，LLM の文章ではなく保存された正規化シナリオと実データで判定する．実 LLM は呼ばない
+  （要求とツール履歴を記録する偽クライアント）．
+- `tests/test_numerical_contracts.py` — UXsim を RISU 抜きで直接構築した結果や自由流時間・容量境界と照合する独立基準．
+- `tests/e2e` — 実ブラウザでの操作シナリオ（チャット送信・中止・履歴・取込・保存・描画モード・信号境界）．
+- `evals/` + `scripts/evaluate_chat.py` — 実 LLM による 24 タスクの評価（自然言語の要求理解を測る．毎 PR の必須ではない）．
 
 CI（GitHub Actions）は次の 7 ジョブを定義しています:
 

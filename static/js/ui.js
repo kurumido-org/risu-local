@@ -35,6 +35,9 @@ addMsg = function(role, text, thinking = false) {
 
 // ── New Chat / Clear history ──
 function newChat() {
+  // 進行中の /chat は中止し，世代を進める（遅延イベントは sendMessage 側で捨てる）
+  cancelSend();
+  chatGeneration++;
   if (chatHistory.length > 0) {
     saveHistoryEntry();
   }

@@ -1,0 +1,13 @@
+{
+  "id": "L20",
+  "title": "異なる seed の比較",
+  "setup": "s0_diffseed",
+  "preamble": false,
+  "turns": [
+    "${S0}と${DIFFERENT_SEED}の平均旅行時間と完了率を比較し，容量変更の効果を説明してください．再計算は不要です．"
+  ],
+  "human": [
+    "差の符号と数値を引用し，seed 不一致による乱数の影響が残ることを説明している"
+  ],
+  "checks": "L20"
+}

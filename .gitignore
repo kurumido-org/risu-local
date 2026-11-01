@@ -69,3 +69,6 @@ slides/
 
 # 結果の永続化先（README §3.6 の RISU_RESULTS_DIR=./results）
 results/
+
+# 実 LLM 評価の記録（scripts/evaluate_chat.py．応答文と使用量を含む作業成果物）
+evals/runs/

@@ -91,6 +91,14 @@ def apply_modifications(scenario: dict, mods: list[dict]) -> tuple[dict, list[st
             applied.append(f"update_nodes: {len(idxs)} 個に {sorted(sets)} を設定")
 
         elif action == "update_demands":
+            # 対象は orig / dest（省略で全需要）．set か scale_flow のどちらかが必要．
+            # 未知のキー（filter / names / remove など）は黙って無視せずエラーにする．以前は
+            # {"action":"update_demands","filter":{...},"remove":true} が「全需要に何も設定しない」として
+            # 成功扱いになり，LLM が削除したつもりで需要が残った（評価 L22）．
+            bad_keys = set(mod) - {"action", "orig", "dest", "all", "set", "scale_flow"}
+            if bad_keys:
+                raise ValueError(f"update_demands に未対応のキー: {sorted(bad_keys)}（対象は orig / dest，内容は set / scale_flow．"
+                                 "需要の削除は remove_demands）")
             orig, dest = mod.get("orig"), mod.get("dest")
             idxs = [i for i, d in enumerate(sc["demands"])
                     if (orig is None or d.get("orig") == orig)
@@ -102,6 +110,8 @@ def apply_modifications(scenario: dict, mods: list[dict]) -> tuple[dict, list[st
             if bad:
                 raise ValueError(f"update_demands の set に未対応のフィールド: {sorted(bad)}")
             scale = mod.get("scale_flow")
+            if not sets and scale is None:
+                raise ValueError("update_demands には set（flow / t_start / t_end）か scale_flow が必要です")
             for i in idxs:
                 sc["demands"][i].update(sets)
                 if scale is not None:
@@ -153,6 +163,10 @@ def apply_modifications(scenario: dict, mods: list[dict]) -> tuple[dict, list[st
                 f"需要 {n_dem_before - len(sc['demands'])} 件も削除）")
 
         elif action == "remove_demands":
+            bad_keys = set(mod) - {"action", "orig", "dest", "all"}
+            if bad_keys:
+                raise ValueError(f"remove_demands に未対応のキー: {sorted(bad_keys)}（対象は orig / dest / all で指定．"
+                                 "例: {\"action\":\"remove_demands\",\"orig\":\"A\",\"dest\":\"C\"}）")
             orig, dest = mod.get("orig"), mod.get("dest")
             if orig is None and dest is None and not mod.get("all"):
                 raise ValueError("remove_demands には orig / dest / all のいずれかが必要です")

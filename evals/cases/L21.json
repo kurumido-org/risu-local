@@ -1,0 +1,11 @@
+{
+  "id": "L21",
+  "title": "長い履歴の後に表示中の結果だけ修正",
+  "setup": "s0_long_history",
+  "preamble": false,
+  "turns": [
+    "いま表示している結果のAB容量だけ900台/時にして，再実行してください．"
+  ],
+  "human": [],
+  "checks": "L21"
+}
