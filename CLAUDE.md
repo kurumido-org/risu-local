@@ -60,6 +60,7 @@ risu-local/
 │   ├── aggregate.py      ← LLM 向け集計 get_simulation_data §3.3
 │   ├── scenario_ops.py   ← 差分命令・grid・OD 自動生成
 │   ├── importers.py      ← CSV / GMNS / OSM 取込
+│   ├── network_tiles.py  ← 招待制ネットワークサーバーのタイル取得・結合（OSM 取込の取得元．依存なし）
 │   ├── prompts.py        ← SYSTEM_PROMPT・CLAUDE_TOOLS・mock（固定文字列）§3.4
 │   ├── tools.py          ← ツール実行 dispatch_tool_blocks と各ハンドラ §3.2
 │   ├── llm.py            ← claude / ollama / mock，Prompt Caching，履歴，使用量
@@ -131,7 +132,8 @@ LLM が扱うのは `sim_id`・差分命令・集計値だけです（§3.3）�
 | `get_simulation_data(sim_id)` | `risu.aggregate` | LLM に渡す集計データ（数 KB に制限） |
 | `apply_modifications` | `risu.scenario_ops` | `rerun_simulation` の差分命令をシナリオに適用 |
 | `parse_csv_scenario` / `gmns_to_scenario` | `risu.importers` | CSV / GMNS パーサー |
-| `run_osm_import(place)` | `risu.importers` | OSMnx で道路ネットワーク取得 |
+| `run_osm_import(place)` | `risu.importers` | OSMnx で道路ネットワーク取得．取得元は `RISU_NETWORK_URL` があればタイル，無ければ公開 Overpass |
+| `graph_from_tiles` | `risu.network_tiles` | z13 タイル（OSM XML）を結合し，`graph_from_bbox` と同じ手順でグラフ化 |
 | `envelope_compressed_bytes` | `risu.results` | 結果の直列化 + 圧縮（方式別キャッシュ） |
 | `POST /simulate` / `GET /results/{id}` | `risu.api` | 直接実行 / 結果取得 |
 | `POST /chat` | `risu.api` → `risu.llm` | LLM 対話（claude = SSE ストリーミング / ollama / mock） |
@@ -370,7 +372,11 @@ MCP（`mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
   戻すと同一 LAN の誰でも結果を閲覧でき，`/chat` 経由で**サーバー所有者の API キーに
   課金**できてしまいます．ループバック以外を指定した場合は起動時に警告を出します．
 - **CORS の既定も localhost のみ**（`RISU_ALLOWED_ORIGINS`）．
-- **テスト**: `TestBindDefaults`が既定値を固定．
+- **外部サービスの資格情報は別物**: `ANTHROPIC_API_KEY` や `RISU_NETWORK_API_KEY`（招待制の
+  ネットワークサーバー）は risu-local が**外に出ていくための鍵**で，利用者の認証ではない．
+  `.env` で受け取り，宛先の origin にだけ送る（`_NetworkServerAuth`）．ログ・エラー文・結果のメタ・
+  LLM への文面に出さない．招待・発行・失効はサーバー側（別リポジトリ）の仕事で，risu-local に入れない．
+- **テスト**: `TestBindDefaults`が既定値を固定．鍵の宛先は `TestNetworkTiles`．
 
 ---
 
@@ -418,6 +424,9 @@ MCP（`mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
 | GUI で容量 0 が消える | 空欄だけが「自動」．`0` は有効値として送る（`v < 0` のときだけ削除） |
 | 同じ入力で結果が毎回変わる | `random_seed` 未指定．比較・追試ではシナリオに持たせる（§3.1） |
 | GUI で再実行すると容量の前提が変わる | 送信データから `reaction_time` が落ちていた．`et-run` は全体パラメータを引き継ぐ（`TestGuiRerunCarriesScenarioParams`） |
+| OSM 取込が「該当する道路が見つかりませんでした」で失敗し，LLM が半径を広げて再試行する | 取得時の例外（サーバー障害・鍵の拒否）をすべて「道路が無い」に変換していた．取得元の障害は `OsmUnavailableError`（`/import/osm` は 503）で返し，文面で「範囲を変えずに再試行」と伝える（`tests/test_network_tiles.py`） |
+| 小さい範囲の OSM 取込が `no preexisting 'maxspeed'` で落ちる | osmnx 2 の `add_edge_speeds` は範囲内に maxspeed が 1 本も無いと例外．`fallback=30` を渡す |
+| タイル経路と Overpass で道路が違う | 道路種別は Overpass のフィルタ文字列を `parse_overpass_filter` で解釈して当てる．drive / all は osmnx の network_type の文字列を `_NETWORK_FILTERS` に写してあり，osmnx を上げて変わると `test_network_filters_match_osmnx` が落ちる．`all`（drive_service）も駐車場内通路は含まない |
 | `pip install` が `No such file or directory` で止まる | Windows の 260 文字パス長制限（`anthropic` の長いファイル名）．浅い場所に clone するか長いパスを有効化 |
 | 「実行しないで」と言ったのにシミュレーションが走る | 初回応答が文章だけのときの強制再試行．`NO_RUN_PATTERNS`（risu/llm.py）に当たれば再試行しない．再試行は `tool_choice=any` で，表示中の結果があれば rerun_simulation を案内する（run_simulation を強制すると別網を新規実行する） |
 | 設定上 360 台なのに `total_trips` が 359 | UXsim の `adddemand` は flow×DELTAT を累積して DELTAN 以上で 1 台出す．浮動小数の累積で境界の 1 台が出ないことがある（`tests/test_numerical_contracts.py` の `demand_count` が同じ規則）．需要台数の検証は flow×継続時間ではなくこの規則で見る |

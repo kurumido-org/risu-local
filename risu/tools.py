@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from .aggregate import compare_simulations, get_simulation_data
-from .importers import run_osm_import
+from .importers import OsmUnavailableError, run_osm_import
 from .results import list_results, results_store, store_sim
 from .runtime import executor, log
 from .scenario_ops import apply_modifications, expand_run_simulation_args, generate_osm_demands, osm_demand_summary
@@ -436,6 +436,9 @@ async def dispatch_tool_blocks(tool_blocks, state: ToolTurnState, *, follow_up: 
                     "link_count": len(scenario["links"]),
                     "demand_assumption": demand_info["note"],
                 }, ensure_ascii=False)))
+            except OsmUnavailableError as e:
+                log.warning("OSM import: %s", e)
+                results.append(_tool_result(tb.id, f"OSMインポートエラー: {e!s}", True))
             except Exception as e:
                 log.exception("unexpected error")
                 results.append(_tool_result(tb.id, f"OSMインポートエラー: {e!s}", True))

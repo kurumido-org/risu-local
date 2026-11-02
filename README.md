@@ -690,6 +690,22 @@ API の `road_types` パラメータで選べます:
 取得したデータは `./cache` にキャッシュされ，同じ地名の 2 回目以降は高速です．
 キャッシュ先は `RISU_OSM_CACHE_DIR` で変更できます．
 
+道路データは既定では公開の Overpass API から取得します．公開サーバーは混雑しやすく，
+応答に数十秒かかったり失敗したりします．取得に失敗したときは「道路が見つからない」ではなく
+「サーバーが応答しない」と返します（範囲を広げても解決しないため）．
+
+招待を受けて API キーを発行された場合は，`.env` に次の 2 行を書くと，道路データを
+招待制のネットワークサーバー（日本全国の道路を約 4 km 四方のタイルに分けて配信）から取得します．
+Overpass と同じ範囲・同じ道路種別のネットワークになり，取得したタイルは
+`RISU_OSM_CACHE_DIR` の `risu-network/` に保存されて，サーバーに繋がらないときも
+一度取得した範囲はそのまま取り込めます．キーはそのサーバー宛ての要求にだけ送られ，
+地名検索（Nominatim）・ログ・LLM には渡りません．
+
+```
+RISU_NETWORK_URL=<招待時に案内された URL>
+RISU_NETWORK_API_KEY=<発行された API キー>
+```
+
 > **ライセンス**: OSM データは ODbL です．取得したネットワークや結果を公開する場合は
 > 帰属表示（© OpenStreetMap contributors）が必要です．
 
@@ -933,6 +949,8 @@ curl -X POST http://localhost:8001/simulate \
 | `RISU_PORT` | `8001` | 待ち受けポート |
 | `RISU_RELOAD` | `false` | 開発用のオートリロード．`1` で有効 |
 | `RISU_OSM_CACHE_DIR` | `./cache` | OSM 取得結果のキャッシュ先 |
+| `RISU_NETWORK_URL` | （なし） | 招待制のネットワークサーバー．設定すると OSM 取込の道路データをここから取得する（[4.2](#42-openstreetmap)） |
+| `RISU_NETWORK_API_KEY` | （なし） | 上記サーバーの API キー．そのサーバー宛ての要求にだけ付ける |
 | `RISU_ALLOWED_ORIGINS` | localhost | CORS の許可オリジン（カンマ区切り） |
 
 > ⚠️ **`RISU_HOST` を変更する前に**

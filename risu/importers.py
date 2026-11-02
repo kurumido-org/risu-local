@@ -8,6 +8,8 @@ import io
 import math
 import os
 
+from . import network_tiles
+from .network_tiles import OsmUnavailableError, OutOfCoverageError
 from .runtime import log
 
 # モジュール外から使う名前（他モジュール・server.py・scripts・tests）．これ以外は内部実装．
@@ -16,6 +18,7 @@ __all__ = [
     "GMNS_RAW",
     "MIN_LINK_LENGTH_M",
     "OSM_ROAD_PRESETS",
+    "OsmUnavailableError",
     "clamp_link_lengths",
     "demand_flow_unit",
     "gmns_to_scenario",
@@ -415,6 +418,49 @@ OSM_ROAD_PRESETS = {
     "all": None,
 }
 _OSM_NETWORK_TYPE = {"drive": "drive", "all": "drive_service"}
+# network_type の drive / drive_service を Overpass のタグ条件で書いたもの（osmnx 2.1 の
+# _overpass._get_network_filter と同じ文字列．タイル経路はこれで絞り込む．
+# osmnx を上げて変わったら TestNetworkTiles.test_network_filters_match_osmnx が落ちる）
+_NETWORK_FILTERS = {
+    "drive": (
+        '["highway"]["area"!~"yes"]["access"!~"private"]'
+        '["highway"!~"abandoned|bridleway|bus_guideway|construction|corridor|cycleway|elevator|'
+        'escalator|footway|no|path|pedestrian|planned|platform|proposed|raceway|razed|rest_area|'
+        'service|services|steps|track"]'
+        '["motor_vehicle"!~"no"]["motorcar"!~"no"]'
+        '["service"!~"alley|driveway|emergency_access|parking|parking_aisle|private"]'
+    ),
+    "all": (
+        '["highway"]["area"!~"yes"]["access"!~"private"]'
+        '["highway"!~"abandoned|bridleway|bus_guideway|construction|corridor|cycleway|elevator|'
+        'escalator|footway|no|path|pedestrian|planned|platform|proposed|raceway|razed|rest_area|'
+        'services|steps|track"]'
+        '["motor_vehicle"!~"no"]["motorcar"!~"no"]'
+        '["service"!~"emergency_access|parking|parking_aisle|private"]'
+    ),
+}
+
+
+def _fetch_osm_graph(ox, center, distance_m: int, road_types: str):
+    """道路グラフ（未投影）を取得する．RISU_NETWORK_URL があればタイル経路，無ければ公開 Overpass．
+    取得元の障害は OsmUnavailableError，範囲に該当道路が無いときはそれ以外の例外．"""
+    custom_filter = OSM_ROAD_PRESETS[road_types]
+    if network_tiles.NETWORK_URL:
+        return network_tiles.graph_from_tiles(
+            ox, center, distance_m, custom_filter or _NETWORK_FILTERS[road_types])
+    if network_tiles.NETWORK_API_KEY:
+        log.warning("RISU_NETWORK_API_KEY is set but RISU_NETWORK_URL is not; using public Overpass")
+
+    import requests
+    from osmnx._errors import ResponseStatusCodeError
+    try:
+        if custom_filter is not None:
+            return ox.graph_from_point(center, dist=distance_m, custom_filter=custom_filter)
+        return ox.graph_from_point(center, dist=distance_m, network_type=_OSM_NETWORK_TYPE[road_types])
+    except (requests.RequestException, ResponseStatusCodeError) as e:
+        raise OsmUnavailableError(
+            f"OpenStreetMap の Overpass サーバーが応答しませんでした（{e.__class__.__name__}）"
+        ) from None
 
 
 def run_osm_import(place: str, distance_m: int = 1000, road_types: str = "drive") -> dict:
@@ -441,14 +487,14 @@ def run_osm_import(place: str, distance_m: int = 1000, road_types: str = "drive"
     center_lat, center_lon = center
 
     # ── 道路ネットワーク取得 ──
-    custom_filter = OSM_ROAD_PRESETS[road_types]
     try:
-        if custom_filter is not None:
-            G = ox.graph_from_point(center, dist=distance_m, custom_filter=custom_filter)
-        else:
-            G = ox.graph_from_point(
-                center, dist=distance_m, network_type=_OSM_NETWORK_TYPE[road_types]
-            )
+        G = _fetch_osm_graph(ox, center, distance_m, road_types)
+    except OsmUnavailableError as e:
+        raise OsmUnavailableError(
+            f"{e}．道路が無いわけではないので，範囲や道路種別は変えずに時間をおいて再試行してください．"
+        ) from None
+    except OutOfCoverageError:
+        raise                       # 配信国の外．「半径を大きく」の案内は当てはまらない
     except Exception as e:
         # 対象道路が範囲内に存在しない場合（郊外で major 指定など）
         raise ValueError(
@@ -456,7 +502,9 @@ def run_osm_import(place: str, distance_m: int = 1000, road_types: str = "drive"
             f"道路が見つかりませんでした．road_types を 'arterial' や 'drive' に広げるか，"
             f"半径を大きくしてください．（{e.__class__.__name__}）"
         ) from e
-    G = ox.add_edge_speeds(G)       # highway 種別から速度推定 (speed_kph)
+    # highway 種別ごとに maxspeed の平均で速度を補う（speed_kph）．範囲内に maxspeed が 1 本も無いと
+    # osmnx 2 は例外を投げるので，その種別は 30 km/h（下のリンク抽出の既定と同じ）にする
+    G = ox.add_edge_speeds(G, fallback=30)
 
     # メートル座標に投影
     Gp = ox.project_graph(G)

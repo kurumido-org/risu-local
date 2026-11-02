@@ -21,7 +21,15 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.requests import Request
 
-from .importers import GMNS_API, GMNS_RAW, OSM_ROAD_PRESETS, gmns_to_scenario, parse_csv_scenario, run_osm_import
+from .importers import (
+    GMNS_API,
+    GMNS_RAW,
+    OSM_ROAD_PRESETS,
+    OsmUnavailableError,
+    gmns_to_scenario,
+    parse_csv_scenario,
+    run_osm_import,
+)
 from .llm import LLM_BACKEND, chat_claude_stream, chat_mock, chat_ollama
 from .mcp_server import router as mcp_router
 from .results import (
@@ -521,6 +529,8 @@ async def import_osm(place: str = Form(...), tmax: int = Form(3600),
     loop = asyncio.get_event_loop()
     try:
         result = await loop.run_in_executor(executor, run_osm_import, place, distance_m, road_types)
+    except OsmUnavailableError as e:      # 取得元の障害．「道路が無い」（500）とは分ける
+        raise HTTPException(503, detail=f"OSM インポートエラー: {str(e)}")
     except Exception as e:
         raise HTTPException(500, detail=f"OSM インポートエラー: {str(e)}")
 
