@@ -224,11 +224,61 @@ class TestNetworkTiles:
         from risu.importers import OsmUnavailableError, run_osm_import
         run_osm_import("仙台駅", 300, "drive")
         tiles = list((server["cache"] / "risu-network").rglob("*.osm.bz2"))
+        for m in (server["cache"] / "risu-network").rglob("*.marshal"):
+            m.unlink()                                   # 解析済みの控えが無い状態で XML が壊れている
         tiles[0].write_bytes(b"not bz2")
         with pytest.raises(OsmUnavailableError, match="壊れていました"):
             run_osm_import("仙台駅", 300, "drive")
         assert not tiles[0].exists()                     # 次回は取り直す
         assert len(run_osm_import("仙台駅", 300, "drive")["nodes"]) == 4
+
+    def test_parsed_tiles_are_reused(self, server, monkeypatch):
+        """2 回目以降はタイルの XML を読まず，解析済みの控え（marshal）を使う．壊れた控えは読み直す．"""
+        from risu.importers import run_osm_import
+        nt = server["nt"]
+        first = run_osm_import("仙台駅", 300, "all")
+        parsed = list((server["cache"] / "risu-network").rglob("*.marshal"))
+        assert len(parsed) == 2
+
+        def no_xml(path):
+            raise AssertionError(f"XML を読み直した: {path}")
+        with monkeypatch.context() as mp:
+            mp.setattr(nt, "_parse_tile_xml", no_xml)
+            assert run_osm_import("仙台駅", 300, "all")["nodes"] == first["nodes"]
+        parsed[0].write_bytes(b"garbage")
+        assert run_osm_import("仙台駅", 300, "all")["nodes"] == first["nodes"]
+        assert parsed[0].read_bytes() != b"garbage"     # 作り直した
+
+    def test_direct_graph_equals_xml_route(self, server, monkeypatch):
+        """osmnx の _create_graph に直接渡したグラフは graph_from_xml 経由と属性まで同じ．
+        osmnx を上げて非公開関数が変わったらここが落ちる（使えなければ XML 経由に戻る）．"""
+        import builtins
+
+        import osmnx
+
+        from risu.importers import _NETWORK_FILTERS
+        nt = server["nt"]
+        center = osmnx.geocode("x")
+
+        def sig(G):
+            return (sorted((n, sorted((k, str(v)) for k, v in d.items())) for n, d in G.nodes(data=True)),
+                    sorted((u, v, k, sorted((a, str(b)) for a, b in d.items()))
+                           for u, v, k, d in G.edges(keys=True, data=True)))
+        direct = nt.graph_from_tiles(osmnx, center, 300, _NETWORK_FILTERS["all"])
+        real_import = builtins.__import__
+
+        def no_private(name, *a, **k):
+            if name == "osmnx.graph" and a and a[2] and "_create_graph" in a[2]:
+                raise ImportError("simulated")
+            return real_import(name, *a, **k)
+        calls = []
+        real_from_xml = osmnx.graph_from_xml
+        with monkeypatch.context() as mp:
+            mp.setattr(builtins, "__import__", no_private)
+            mp.setattr(osmnx, "graph_from_xml", lambda *a, **k: calls.append(1) or real_from_xml(*a, **k))
+            via_xml = nt.graph_from_tiles(osmnx, center, 300, _NETWORK_FILTERS["all"])
+        assert calls == [1]                              # XML 経由に戻った
+        assert len(direct) == 6 and sig(direct) == sig(via_xml)
 
     def test_auth_header_only_for_the_network_server(self):
         import requests

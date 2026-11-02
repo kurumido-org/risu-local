@@ -16,6 +16,10 @@ OSM XML（.osm.bz2）に切ったものを配信してもらい，ここで結�
   Overpass で同じ範囲を問い合わせたのと同じ集合になる．
 - キャッシュ: ``<RISU_OSM_CACHE_DIR>/risu-network/<region>/<date>/<z>/<x>/<y>.osm.bz2``．
   region のデータの日付が変わったら，その region の古い日付のディレクトリは消す．
+- 速さのため，タイルは初回に XML を読んだら全道路を marshal で隣に保存し（``<y>.py312.marshal``），
+  2 回目からそれを読む（XML の解析 1 秒前後が 0.1 秒未満になる）．pickle は読込でコードを実行し得るので使わない．
+  グラフは osmnx の ``_create_graph`` に Overpass の応答と同じ形で直接渡す（XML の書き出し・読み直しを省く）．
+  非公開関数なので，使えなければ XML 経由（``graph_from_xml``）に戻る．
 - グラフ化は ``osmnx.graph_from_bbox`` と同じ手順（500 m 外側まで取って切り詰め → 最大連結成分 →
   単純化 → 元の範囲で切り詰め）を公開 API で行う．道路種別の絞り込みは Overpass のフィルタ文字列
   （``OSM_ROAD_PRESETS`` / osmnx の network_type）をここで解釈して当てる．
@@ -25,10 +29,12 @@ from __future__ import annotations
 
 import bz2
 import json
+import marshal
 import math
 import os
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -320,30 +326,68 @@ def _fetch_tile(sess, region: str, date: str, z: int, x: int, y: int) -> Path | 
 
 # ── 結合 ────────────────────────────────────────────────
 
-def _read_tile(path: Path, terms, nodes: dict, ways: dict) -> None:
-    """タイル 1 個を読み，nodes / ways に足す（ID で重複除去．way は道路種別のフィルタに合うものだけ）．"""
+_PARSED_SUFFIX = f".py{sys.version_info[0]}{sys.version_info[1]}.marshal"   # marshal は Python の版ごとに形式が違う
+_PARSED_VERSION = 1
+
+
+def _parse_tile_xml(path: Path) -> tuple[dict, list]:
+    """タイルの XML を全道路そのままで読む．nodes: {id: (lat, lon, tags or None)}，ways: [(id, refs, tags)]．"""
+    nodes: dict = {}
+    ways: list = []
+    with bz2.open(path, "rb") as f:
+        for _, el in ET.iterparse(f, events=("end",)):
+            tag = el.tag
+            if tag == "node":
+                tags = {t.get("k"): t.get("v") for t in el.iter("tag")}
+                nodes[int(el.get("id"))] = (float(el.get("lat")), float(el.get("lon")), tags or None)
+                el.clear()
+            elif tag == "way":
+                ways.append((int(el.get("id")), [int(nd.get("ref")) for nd in el.iter("nd")],
+                             {t.get("k"): t.get("v") for t in el.iter("tag")}))
+                el.clear()
+    return nodes, ways
+
+
+def _load_tile(path: Path) -> tuple[dict, list]:
+    """タイル 1 個の中身．解析済みの控え（marshal）があればそれを読み，無ければ XML を読んで控えを作る．"""
+    parsed = path.with_name(path.name[: -len(".osm.bz2")] + _PARSED_SUFFIX)
+    if parsed.is_file():
+        try:
+            ver, nodes, ways = marshal.loads(parsed.read_bytes())
+            if ver == _PARSED_VERSION:
+                return nodes, ways
+        except (EOFError, ValueError, TypeError):
+            pass
+        parsed.unlink(missing_ok=True)
     try:
-        with bz2.open(path, "rb") as f:
-            for _, el in ET.iterparse(f, events=("end",)):
-                tag = el.tag
-                if tag == "node":
-                    nid = int(el.get("id"))
-                    if nid not in nodes:
-                        nodes[nid] = (float(el.get("lat")), float(el.get("lon")),
-                                      {t.get("k"): t.get("v") for t in el.iter("tag")})
-                    el.clear()
-                elif tag == "way":
-                    wid = int(el.get("id"))
-                    if wid not in ways:
-                        tags = {t.get("k"): t.get("v") for t in el.iter("tag")}
-                        if way_matches(tags, terms):
-                            refs = [int(nd.get("ref")) for nd in el.iter("nd")]
-                            ways[wid] = (refs, tags)
-                    el.clear()
+        nodes, ways = _parse_tile_xml(path)
     except (OSError, EOFError, ET.ParseError, ValueError, TypeError) as e:
         path.unlink(missing_ok=True)          # 壊れたキャッシュは次回取り直す
         raise OsmUnavailableError(f"ネットワークサーバーのタイルが壊れていました（{path.name}: "
                                   f"{e.__class__.__name__}）．もう一度実行してください") from None
+    try:
+        tmp = parsed.with_name(f".{parsed.name}.{uuid.uuid4().hex}.tmp")
+        tmp.write_bytes(marshal.dumps((_PARSED_VERSION, nodes, ways)))
+        os.replace(tmp, parsed)
+    except OSError as e:                      # 控えが書けなくても取込は続ける
+        log.warning("network tiles: could not cache parsed tile %s: %s", parsed.name, e)
+    return nodes, ways
+
+
+def _merge_tiles(paths, terms) -> tuple[dict, dict]:
+    """タイルを結合する（ID で重複除去．way は道路種別のフィルタに合うものだけ）．"""
+    nodes: dict = {}
+    ways: dict = {}
+    for p in paths:
+        if p is None:
+            continue
+        tn, tw = _load_tile(p)
+        for nid, v in tn.items():
+            nodes.setdefault(nid, v)
+        for wid, refs, tags in tw:
+            if wid not in ways and way_matches(tags, terms):
+                ways[wid] = (refs, tags)
+    return nodes, ways
 
 
 def _in_bounds(nodes: dict, refs, bounds) -> bool:
@@ -353,6 +397,35 @@ def _in_bounds(nodes: dict, refs, bounds) -> bool:
         if n is not None and south <= n[0] <= north and west <= n[1] <= east:
             return True
     return False
+
+
+def _build_graph(ox, nodes: dict, ways: dict):
+    """結合したデータから単純化前のグラフを作る（graph_from_xml(simplify=False, retain_all=True) と同じもの）．"""
+    try:
+        from osmnx.graph import _create_graph
+    except ImportError:
+        _create_graph = None
+    if _create_graph is not None:
+        used: set[int] = set()
+        for refs, _ in ways.values():
+            used.update(r for r in refs if r in nodes)
+        elements: list[dict] = []
+        for nid in used:
+            lat, lon, tags = nodes[nid]
+            el = {"type": "node", "id": nid, "lat": lat, "lon": lon}
+            if tags:
+                el["tags"] = tags
+            elements.append(el)
+        for wid, (refs, tags) in ways.items():
+            elements.append({"type": "way", "id": wid, "nodes": [r for r in refs if r in nodes], "tags": tags})
+        try:
+            return _create_graph([{"elements": elements}], False)
+        except TypeError as e:               # osmnx の非公開関数の形が変わった
+            log.warning("network tiles: osmnx _create_graph unusable (%s); falling back to XML", e)
+    with tempfile.TemporaryDirectory(prefix="risu-tiles-") as d:
+        xml_path = Path(d) / "area.osm"
+        _write_osm_xml(xml_path, nodes, ways)
+        return ox.graph_from_xml(xml_path, bidirectional=False, simplify=False, retain_all=True)
 
 
 def _write_osm_xml(path: Path, nodes: dict, ways: dict) -> None:
@@ -418,20 +491,13 @@ def graph_from_tiles(ox, center: tuple[float, float], distance_m: float, road_fi
         sess.close()
     t_fetch = time.perf_counter() - t0
 
-    nodes: dict = {}
-    ways: dict = {}
-    for p in paths:
-        if p is not None:
-            _read_tile(p, terms, nodes, ways)
+    nodes, ways = _merge_tiles(paths, terms)
     # node が 1 つでも範囲（外側の余裕込み）に入る way だけ残す（Overpass の bbox 問い合わせと同じ）
     ways = {w: v for w, v in ways.items() if _in_bounds(nodes, v[0], bounds)}
     if not ways:
         raise ValueError("該当する道路がありません")
 
-    with tempfile.TemporaryDirectory(prefix="risu-tiles-") as d:
-        xml_path = Path(d) / "area.osm"
-        _write_osm_xml(xml_path, nodes, ways)
-        G_buff = ox.graph_from_xml(xml_path, bidirectional=False, simplify=False, retain_all=True)
+    G_buff = _build_graph(ox, nodes, ways)
 
     # 以下は osmnx.graph_from_polygon と同じ手順
     G_buff = ox.truncate.truncate_graph_polygon(G_buff, poly_buff, truncate_by_edge=False)

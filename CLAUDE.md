@@ -426,7 +426,7 @@ MCP（`mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
 | GUI で再実行すると容量の前提が変わる | 送信データから `reaction_time` が落ちていた．`et-run` は全体パラメータを引き継ぐ（`TestGuiRerunCarriesScenarioParams`） |
 | OSM 取込が「該当する道路が見つかりませんでした」で失敗し，LLM が半径を広げて再試行する | 取得時の例外（サーバー障害・鍵の拒否）をすべて「道路が無い」に変換していた．取得元の障害は `OsmUnavailableError`（`/import/osm` は 503）で返し，文面で「範囲を変えずに再試行」と伝える（`tests/test_network_tiles.py`） |
 | 小さい範囲の OSM 取込が `no preexisting 'maxspeed'` で落ちる | osmnx 2 の `add_edge_speeds` は範囲内に maxspeed が 1 本も無いと例外．`fallback=30` を渡す |
-| タイル経路と Overpass で道路が違う | 道路種別は Overpass のフィルタ文字列を `parse_overpass_filter` で解釈して当てる．drive / all は osmnx の network_type の文字列を `_NETWORK_FILTERS` に写してあり，osmnx を上げて変わると `test_network_filters_match_osmnx` が落ちる．`all`（drive_service）も駐車場内通路は含まない |
+| タイル経路と Overpass で道路が違う | 道路種別は Overpass のフィルタ文字列を `parse_overpass_filter` で解釈して当てる．drive / all は osmnx の network_type の文字列を `_NETWORK_FILTERS` に写してあり，osmnx を上げて変わると `test_network_filters_match_osmnx` が落ちる．`all`（drive_service）も駐車場内通路は含まない．グラフは osmnx の非公開 `_create_graph` に直接渡している（使えなければ XML 経由に戻る．一致は `test_direct_graph_equals_xml_route`）．タイルの解析済みの控えは marshal（pickle は読込でコードを実行し得るので使わない） |
 | `pip install` が `No such file or directory` で止まる | Windows の 260 文字パス長制限（`anthropic` の長いファイル名）．浅い場所に clone するか長いパスを有効化 |
 | 「実行しないで」と言ったのにシミュレーションが走る | 初回応答が文章だけのときの強制再試行．`NO_RUN_PATTERNS`（risu/llm.py）に当たれば再試行しない．再試行は `tool_choice=any` で，表示中の結果があれば rerun_simulation を案内する（run_simulation を強制すると別網を新規実行する） |
 | 設定上 360 台なのに `total_trips` が 359 | UXsim の `adddemand` は flow×DELTAT を累積して DELTAN 以上で 1 台出す．浮動小数の累積で境界の 1 台が出ないことがある（`tests/test_numerical_contracts.py` の `demand_count` が同じ規則）．需要台数の検証は flow×継続時間ではなくこの規則で見る |
