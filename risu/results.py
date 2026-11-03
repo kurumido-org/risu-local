@@ -217,7 +217,8 @@ def result_summary(sim_id: str, raw: dict) -> dict:
         "created_at": meta.get("created_at"),
         # 出所は識別に要るものだけ（ユーザーの発話文は載せない）
         "source": {k: v for k, v in src.items()
-                   if k in ("type", "via", "tool", "place", "distance_m", "road_types", "base_sim_id", "demand")},
+                   if k in ("type", "via", "tool", "place", "distance_m", "area", "area_km2", "road_types", "provider", "data_date",
+                           "base_sim_id", "demand")},
         "tmax": sc.get("tmax"),
         "random_seed": sc.get("random_seed"),
         "uxsim_version": meta.get("uxsim_version"),

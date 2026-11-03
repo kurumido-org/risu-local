@@ -82,9 +82,9 @@ python scripts\evaluate_chat.py --cases L01-L12 --trials 3   # L（実 LLM，費
 | U11 | `test_u11_draw_modes_and_signal_boundary`，既存 `test_browser_smoke.py::test_signals_are_drawn_as_stop_bars` / `test_result_loads_and_all_draw_modes_render` |
 | U12 | `test_u12_bad_file_then_network_error_then_recovery`（壊れたファイル 422 → 通信エラー → 正しい入力で回復，既存結果の閲覧可） |
 
-## 実 LLM 評価 24 タスク（§4 / §15）— `evals/cases/L01〜L24.json`，`scripts/evaluate_chat.py`
+## 実 LLM 評価 26 タスク（§4 / §15）— `evals/cases/L01〜L26.json`，`scripts/evaluate_chat.py`
 
-判定器は `scripts/evaluate_chat.py` の `check_L01`〜`check_L24`．`--selfcheck` が §16.4 の
+判定器は `scripts/evaluate_chat.py` の `check_L01`〜`check_L26`．`--selfcheck` が §16.4 の
 「誤りを入れたデータで不合格を返す」確認（L01 容量 1800 / L05 BC 変更 / L06 S1 からの派生 /
 L12 区間長違い / L08 時刻対応の誤り / L11 平均 0 秒 / L07 実行してしまう）．
 記録は `evals/runs/<日時>/`（§16.3 の形式．gitignore）．2026-10-27 の 36 / 72 会話の集計と判断は `evals/RESULTS.md`．

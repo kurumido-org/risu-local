@@ -401,6 +401,31 @@ def test_u01_chat_progress_result_and_chart(page):
     assert _page_errors(page) == [], page._risu_errors
 
 
+def test_u01_map_shows_before_the_explanation_finishes(page):
+    """結果ができた時点（sim_ready）で地図を出し，説明の生成完了（done）を待たない．done で読み直さない．
+
+    [修正履歴] 地図は done を受けてから読み込んでいたので，計算が 3〜4 秒で終わっても
+    LLM が説明を書く 8 秒ほど地図が出なかった．"""
+    FAKE.messages._script[:] = [
+        run_sim_msg(F1),
+        slow_text([f"説明{i}．" for i in range(12)], delay=0.3),
+    ]
+    gets: list[str] = []
+    page.on("request", lambda r: gets.append(r.url) if "/results/" in r.url else None)
+    page.fill("#user-input", "ボトルネック道路を作ってシミュレーションして")
+    page.click("#send-btn")
+    page.wait_for_function("lastSimId && frameTimes.length > 0", timeout=30000)
+    shown = page.evaluate("lastSimId")
+    # 地図が出た時点では，まだ説明を生成中（送信ボタンが戻っていない）
+    assert page.evaluate("document.getElementById('send-btn').disabled") is True
+    _wait_idle(page)
+    _wait_result(page, shown)
+    assert page.text_content("#sim-id-label") == shown
+    assert shown in page.text_content("#messages .msg.assistant .sim-badge")
+    assert len([u for u in gets if u.endswith(f"/results/{shown}")]) == 1    # done で読み直さない
+    assert _page_errors(page) == [], page._risu_errors
+
+
 # ══════════════════════════════════════════════
 # U02 添付 → 表示 → エディタで容量を変更 → 再実行
 # ══════════════════════════════════════════════

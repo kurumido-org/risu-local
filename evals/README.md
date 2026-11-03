@@ -1,13 +1,13 @@
 # 実 LLM 評価（テスト設計 §4 / §8 / §15）
 
-`evals/cases/*.json` が 1 タスク = 1 ファイル（L01〜L24）．`scripts/evaluate_chat.py` が
+`evals/cases/*.json` が 1 タスク = 1 ファイル（L01〜L26）．`scripts/evaluate_chat.py` が
 事前状態を作り，実 LLM（`.env` の `LLM_BACKEND=claude` / `ANTHROPIC_API_KEY`）で会話を回し，
 ツール履歴・保存結果・応答を照合して `evals/runs/<日時>/` に記録する．
 
 ```powershell
 .venv\Scripts\activate
 python scripts\evaluate_chat.py --cases L01-L12 --trials 3          # 初回 36 会話
-python scripts\evaluate_chat.py --cases L01-L24 --trials 3          # 拡張 72 会話
+python scripts\evaluate_chat.py --cases L01-L26 --trials 3          # 拡張 78 会話
 python scripts\evaluate_chat.py --cases L05,L07 --trials 1 --dry-run # 事前状態と判定器の確認（LLM を呼ばない）
 python scripts\evaluate_chat.py --selfcheck                          # 判定器が誤りを検出することの確認（§16.4）
 ```

@@ -55,6 +55,7 @@ __all__ = [
     "OutOfCoverageError",
     "choose_region",
     "graph_from_tiles",
+    "graph_from_tiles_polygon",
     "parse_overpass_filter",
     "tiles_for_bounds",
     "way_matches",
@@ -189,19 +190,19 @@ def _get(sess, path: str) -> bytes | None:
         r = sess.get(url, timeout=_TIMEOUT_S)
     except requests.RequestException as e:
         raise OsmUnavailableError(
-            f"ネットワークサーバー（RISU_NETWORK_URL）に接続できませんでした（{e.__class__.__name__}）"
+            f"risu-network（RISU_NETWORK_URL）に接続できませんでした（{e.__class__.__name__}）"
         ) from None
     if r.status_code in (401, 403):
         log.error("network server rejected the request: %s %s", r.status_code, path)
         raise OsmUnavailableError(
-            "ネットワークサーバーが API キーを受け付けませんでした"
+            "risu-network が API キーを受け付けませんでした"
             + ("（RISU_NETWORK_API_KEY が無効か失効しています）" if NETWORK_API_KEY
                else "（RISU_NETWORK_API_KEY を設定してください）")
         )
     if r.status_code == 404:
         return None
     if r.status_code >= 400:
-        raise OsmUnavailableError(f"ネットワークサーバーがエラーを返しました（HTTP {r.status_code}）")
+        raise OsmUnavailableError(f"risu-network がエラーを返しました（HTTP {r.status_code}）")
     return r.content
 
 
@@ -257,7 +258,7 @@ def _load_json(sess, path: str, disk: Path, validate) -> tuple[Any, bool]:
         try:
             raw = _get(sess, path)
             if raw is None:
-                raise OsmUnavailableError(f"ネットワークサーバーに {path} がありません（RISU_NETWORK_URL を確認）")
+                raise OsmUnavailableError(f"risu-network に {path} がありません（RISU_NETWORK_URL を確認）")
         except OsmUnavailableError as e:
             if disk.is_file():
                 log.warning("network tiles: %s; using the cached %s", e, disk.name)
@@ -268,7 +269,7 @@ def _load_json(sess, path: str, disk: Path, validate) -> tuple[Any, bool]:
         try:
             v = validate(json.loads(raw))
         except (ValueError, TypeError, AttributeError) as e:
-            raise OsmUnavailableError(f"ネットワークサーバーの {path} が読めません（{e}）") from None
+            raise OsmUnavailableError(f"risu-network の {path} が読めません（{e}）") from None
         disk.parent.mkdir(parents=True, exist_ok=True)
         tmp = disk.with_name(f".{disk.name}.{uuid.uuid4().hex}.tmp")
         tmp.write_bytes(raw)
@@ -284,7 +285,7 @@ def choose_region(regions: list[dict], lat: float, lon: float) -> str:
     if not hits:
         names = "，".join(r["id"] for r in regions) or "なし"
         raise OutOfCoverageError(
-            f"この地点（緯度 {lat:.4f}，経度 {lon:.4f}）はネットワークサーバーの配信範囲外です"
+            f"この地点（緯度 {lat:.4f}，経度 {lon:.4f}）は risu-network の配信範囲外です"
             f"（配信中: {names}）．範囲や道路種別を変えても取得できません．"
             "RISU_NETWORK_URL を外すと公開 Overpass から取得します"
         )
@@ -363,7 +364,7 @@ def _load_tile(path: Path) -> tuple[dict, list]:
         nodes, ways = _parse_tile_xml(path)
     except (OSError, EOFError, ET.ParseError, ValueError, TypeError) as e:
         path.unlink(missing_ok=True)          # 壊れたキャッシュは次回取り直す
-        raise OsmUnavailableError(f"ネットワークサーバーのタイルが壊れていました（{path.name}: "
+        raise OsmUnavailableError(f"risu-network のタイルが壊れていました（{path.name}: "
                                   f"{e.__class__.__name__}）．もう一度実行してください") from None
     try:
         tmp = parsed.with_name(f".{parsed.name}.{uuid.uuid4().hex}.tmp")
@@ -461,15 +462,25 @@ def graph_from_tiles(ox, center: tuple[float, float], distance_m: float, road_fi
 
     取得元の障害は OsmUnavailableError，配信国の外は OutOfCoverageError，
     範囲に該当道路が無いときは ValueError．"""
+    bbox = ox.utils_geo.bbox_from_point(center, distance_m)        # (left, bottom, right, top)
+    return graph_from_tiles_polygon(ox, ox.utils_geo.bbox_to_poly(bbox), road_filter,
+                                    point=(center[0], center[1]))
+
+
+def graph_from_tiles_polygon(ox, polygon, road_filter: str, point: tuple[float, float] | None = None):
+    """polygon（緯度経度の shapely (Multi)Polygon）の内側の道路グラフ（未投影）を作る．
+    ``ox.graph_from_polygon(polygon, custom_filter=road_filter)`` の置き換え（行政区域の形での取込）．
+    配信国は point（lat, lon．省略時は polygon の内点）で選ぶ．例外は graph_from_tiles と同じ．"""
     import networkx as nx
 
     if not NETWORK_URL:
         raise RuntimeError("RISU_NETWORK_URL is not set")
     terms = parse_overpass_filter(road_filter)
     t0 = time.perf_counter()
+    if point is None:
+        rp = polygon.representative_point()
+        point = (rp.y, rp.x)
 
-    bbox = ox.utils_geo.bbox_from_point(center, distance_m)        # (left, bottom, right, top)
-    polygon = ox.utils_geo.bbox_to_poly(bbox)
     poly_proj, crs_utm = ox.projection.project_geometry(polygon)
     poly_buff, _ = ox.projection.project_geometry(poly_proj.buffer(_BUFFER_M), crs=crs_utm, to_latlong=True)
     west, south, east, north = poly_buff.bounds
@@ -477,11 +488,11 @@ def graph_from_tiles(ox, center: tuple[float, float], distance_m: float, road_fi
 
     sess = _session()
     try:
-        region, m = _load_region_manifest(sess, center[0], center[1])
+        region, m = _load_region_manifest(sess, point[0], point[1])
         z = m["zoom"]
         wanted = tiles_for_bounds(west, south, east, north, z)
         if len(wanted) > _MAX_TILES:
-            raise ValueError(f"範囲が広すぎます（タイル {len(wanted)} 個）．半径を小さくしてください")
+            raise ValueError(f"範囲が広すぎます（タイル {len(wanted)} 個）．範囲を小さくしてください")
         present = [t for t in wanted if t in m["tiles"]]
         if not present:
             raise ValueError("この範囲には道路のタイルがありません（海上など）")
@@ -508,6 +519,7 @@ def graph_from_tiles(ox, center: tuple[float, float], distance_m: float, road_fi
     spn = ox.stats.count_streets_per_node(G_buff, nodes=G.nodes)
     nx.set_node_attributes(G, values=spn, name="street_count")
 
+    G.graph["risu_network"] = {"region": region, "date": m["date"]}   # 取得元の表記（run_osm_import）
     log.info("network tiles: %s, %d tiles (data %s) fetched in %.1f s, graph %d nodes / %d edges in %.1f s",
              region, len(present), m["date"], t_fetch, len(G), len(G.edges), time.perf_counter() - t0)
     return G

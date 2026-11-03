@@ -17,6 +17,7 @@ __all__ = [
     "GMNS_API",
     "GMNS_RAW",
     "MIN_LINK_LENGTH_M",
+    "OSM_AREA_MODES",
     "OSM_ROAD_PRESETS",
     "OsmUnavailableError",
     "clamp_link_lengths",
@@ -441,33 +442,81 @@ _NETWORK_FILTERS = {
 }
 
 
-def _fetch_osm_graph(ox, center, distance_m: int, road_types: str):
+# 取込範囲の決め方．radius = 地名の代表点から ±distance_m の正方形（osmnx.graph_from_point），
+# boundary = 地名の境界（区・市・町などの形．osmnx.graph_from_polygon）
+OSM_AREA_MODES = ("radius", "boundary")
+# boundary の面積の上限．radius の上限（半径 5 km = 100 km²）と揃える．23 区全体（約 630 km²）などは断る
+BOUNDARY_MAX_KM2 = 100.0
+# これより小さい境界は駅舎・建物など地物の形で，区域ではない
+BOUNDARY_MIN_KM2 = 0.05
+
+
+def _geocode_boundary(ox, place: str):
+    """地名の境界（緯度経度の (Multi)Polygon）と面積 km² を返す．区域として使えなければ ValueError．"""
+    import requests
+    from osmnx._errors import InsufficientResponseError
+    try:
+        gdf = ox.geocode_to_gdf(place)
+    except TypeError:                 # Nominatim の結果に面が無い（駅・交差点など点の地物）
+        raise ValueError(
+            f"「{place}」の境界（区域の形）が OpenStreetMap にありませんでした．"
+            f"区・市・町などの地名にするか，area='radius' で中心からの半径を指定してください"
+        ) from None
+    except InsufficientResponseError:
+        raise ValueError(f"「{place}」が見つかりませんでした．地名を確認してください") from None
+    except requests.RequestException as e:
+        raise OsmUnavailableError(
+            f"地名検索（Nominatim）が応答しませんでした（{e.__class__.__name__}）"
+        ) from None
+    polygon = gdf.geometry.iloc[0]
+    area_km2 = ox.projection.project_geometry(polygon)[0].area / 1e6
+    if area_km2 > BOUNDARY_MAX_KM2:
+        raise ValueError(
+            f"「{place}」の区域は約 {area_km2:,.0f} km² で，取込の上限 {BOUNDARY_MAX_KM2:g} km² を超えます．"
+            f"区域を分けるか（区・市ごとなど），area='radius' で一部を取ってください"
+        )
+    if area_km2 < BOUNDARY_MIN_KM2:
+        raise ValueError(
+            f"「{place}」の境界は約 {area_km2 * 1e6:,.0f} m² の建物などの形でした．"
+            f"区域ではないので，area='radius' で中心からの半径を指定してください"
+        )
+    return polygon, area_km2
+
+
+def _fetch_osm_graph(ox, center, distance_m: int, road_types: str, polygon=None):
     """道路グラフ（未投影）を取得する．RISU_NETWORK_URL があればタイル経路，無ければ公開 Overpass．
+    polygon があればその内側（境界での取込），無ければ center ±distance_m．
     取得元の障害は OsmUnavailableError，範囲に該当道路が無いときはそれ以外の例外．"""
     custom_filter = OSM_ROAD_PRESETS[road_types]
     if network_tiles.NETWORK_URL:
-        return network_tiles.graph_from_tiles(
-            ox, center, distance_m, custom_filter or _NETWORK_FILTERS[road_types])
+        road_filter = custom_filter or _NETWORK_FILTERS[road_types]
+        if polygon is not None:
+            return network_tiles.graph_from_tiles_polygon(ox, polygon, road_filter)
+        return network_tiles.graph_from_tiles(ox, center, distance_m, road_filter)
     if network_tiles.NETWORK_API_KEY:
         log.warning("RISU_NETWORK_API_KEY is set but RISU_NETWORK_URL is not; using public Overpass")
 
     import requests
     from osmnx._errors import ResponseStatusCodeError
+    kw = ({"custom_filter": custom_filter} if custom_filter is not None
+          else {"network_type": _OSM_NETWORK_TYPE[road_types]})
     try:
-        if custom_filter is not None:
-            return ox.graph_from_point(center, dist=distance_m, custom_filter=custom_filter)
-        return ox.graph_from_point(center, dist=distance_m, network_type=_OSM_NETWORK_TYPE[road_types])
+        if polygon is not None:
+            return ox.graph_from_polygon(polygon, **kw)
+        return ox.graph_from_point(center, dist=distance_m, **kw)
     except (requests.RequestException, ResponseStatusCodeError) as e:
         raise OsmUnavailableError(
             f"OpenStreetMap の Overpass サーバーが応答しませんでした（{e.__class__.__name__}）"
         ) from None
 
 
-def run_osm_import(place: str, distance_m: int = 1000, road_types: str = "drive") -> dict:
+def run_osm_import(place: str, distance_m: int = 1000, road_types: str = "drive",
+                   area: str = "radius") -> dict:
     """OSM から道路ネットワークを取得して UXsim シナリオに変換．
     OSMnx のグラフを直接活用し，道路形状・速度推定・車線数を取得する．
 
     road_types: "major" | "arterial" | "drive" | "all"（OSM_ROAD_PRESETS 参照）
+    area: "radius"（代表点 ±distance_m の正方形） | "boundary"（地名の境界の内側．distance_m は使わない）
     """
     import osmnx as ox
 
@@ -482,13 +531,28 @@ def run_osm_import(place: str, distance_m: int = 1000, road_types: str = "drive"
             f"road_types は {', '.join(OSM_ROAD_PRESETS)} のいずれかを指定してください: {road_types}"
         )
 
-    # ── ジオコーディング: 自然言語 → (lat, lon) ──
-    center = ox.geocode(place)  # (lat, lon)
+    area = (area or "radius").strip().lower()
+    if area not in OSM_AREA_MODES:
+        raise ValueError(f"area は {', '.join(OSM_AREA_MODES)} のいずれかを指定してください: {area}")
+
+    # ── ジオコーディング: 自然言語 → (lat, lon) または境界 ──
+    polygon = None
+    area_km2 = None
+    if area == "boundary":
+        polygon, area_km2 = _geocode_boundary(ox, place)
+        rp = polygon.representative_point()
+        center = (rp.y, rp.x)
+        where = f"「{place}」の区域内（約 {area_km2:.1f} km²）"
+        widen = "road_types を 'arterial' や 'drive' に広げてください"
+    else:
+        center = ox.geocode(place)  # (lat, lon)
+        where = f"「{place}」周辺（半径{distance_m}m）"
+        widen = "road_types を 'arterial' や 'drive' に広げるか，半径を大きくしてください"
     center_lat, center_lon = center
 
     # ── 道路ネットワーク取得 ──
     try:
-        G = _fetch_osm_graph(ox, center, distance_m, road_types)
+        G = _fetch_osm_graph(ox, center, distance_m, road_types, polygon)
     except OsmUnavailableError as e:
         raise OsmUnavailableError(
             f"{e}．道路が無いわけではないので，範囲や道路種別は変えずに時間をおいて再試行してください．"
@@ -498,10 +562,15 @@ def run_osm_import(place: str, distance_m: int = 1000, road_types: str = "drive"
     except Exception as e:
         # 対象道路が範囲内に存在しない場合（郊外で major 指定など）
         raise ValueError(
-            f"「{place}」周辺（半径{distance_m}m）で road_types='{road_types}' に該当する"
-            f"道路が見つかりませんでした．road_types を 'arterial' や 'drive' に広げるか，"
-            f"半径を大きくしてください．（{e.__class__.__name__}）"
+            f"{where}で road_types='{road_types}' に該当する"
+            f"道路が見つかりませんでした．{widen}．（{e.__class__.__name__}）"
         ) from e
+    # 取得元の表記．risu-network 経由なら OpenStreetMap 由来であることとデータの日付を添える（ODbL の出典表示）
+    rn = G.graph.get("risu_network")
+    provider = "risu-network" if rn else "overpass"
+    data_date = rn.get("date") if rn else None
+    source_label = (f"risu-network（OpenStreetMap 由来，{data_date} 時点のデータ）" if rn
+                    else "OpenStreetMap（公開 Overpass API）")
     # highway 種別ごとに maxspeed の平均で速度を補う（speed_kph）．範囲内に maxspeed が 1 本も無いと
     # osmnx 2 は例外を投げるので，その種別は 30 km/h（下のリンク抽出の既定と同じ）にする
     G = ox.add_edge_speeds(G, fallback=30)
@@ -584,9 +653,13 @@ def run_osm_import(place: str, distance_m: int = 1000, road_types: str = "drive"
         "demands": [],
         "link_geometries": link_geometries,
         "center": {"lat": center_lat, "lon": center_lon},
-        "distance_m": distance_m,
+        "distance_m": distance_m if polygon is None else None,
+        "area": area,
+        "area_km2": None if area_km2 is None else round(area_km2, 2),
+        "provider": provider,
+        "data_date": data_date,
         "summary": (
-            f"OSM から「{place}」周辺（半径{distance_m}m，{_road_labels[road_types]}）の"
+            f"{source_label}から{where[:-1]}，{_road_labels[road_types]}）の"
             f"道路ネットワークを取得しました．"
             f"{len(scenario_nodes)} ノード，{len(scenario_links)} リンク．"
             + (f"長さ 0 のリンク {len(fixed)} 本を {MIN_LINK_LENGTH_M:g} m に補正しました．" if fixed else "")

@@ -197,6 +197,8 @@ async function sendMessage() {
       let data = null;
       let streamingMsgEl = null;
       let streamingBody = null;
+      // sim_ready で先に読み込んだ結果 { id, p }．loadResult は並行に呼ぶと状態が混ざるので順につなぐ
+      let earlyLoad = null;
       const messagesWrap = document.getElementById('messages');
 
       while (true) {
@@ -231,6 +233,11 @@ async function sendMessage() {
               if (streamingMsgEl && streamingBody && !(streamingBody._raw || '').trim()) streamingMsgEl.remove();
               streamingMsgEl = null;
               streamingBody = null;
+            } else if (evt.type === 'sim_ready' && evt.sim_id) {
+              // 結果ができた時点で地図を出す（LLM が説明を書き終えるのを待たない）
+              const id = evt.sim_id;
+              const prev = earlyLoad ? earlyLoad.p : Promise.resolve();
+              earlyLoad = { id, p: prev.then(() => (stale() ? null : loadResult(id))).catch(() => {}) };
             } else if (evt.type === 'done') {
               data = evt;
             } else if (evt.type === 'error') {
@@ -248,7 +255,7 @@ async function sendMessage() {
 
       // ストリーミング中のメッセージをクリーンアップ → 最終版で置き換え
       if (streamingMsgEl) streamingMsgEl.remove();
-      renderAssistantResponse(data);
+      renderAssistantResponse(data, earlyLoad);
 
     } else {
       // 従来の JSON レスポンス（mock / ollama）
@@ -364,7 +371,8 @@ function addMsg(role, text, thinking = false) {
 // LLM の最終応答を吹き出しに反映する（SSE 経路と JSON 経路で共通）．
 // sim バッジ / チャート / トークン使用量の付け方は両経路で同じなので，
 // ここに 1 本化しておく（以前は 2 か所に同じコードがあった）．
-function renderAssistantResponse(data) {
+// early: SSE の sim_ready で読み込み始めた結果 { id, p }（無ければ null）．同じ結果は読み直さない
+function renderAssistantResponse(data, early = null) {
   const msgEl = addMsg('assistant', data.content);
 
   if (data.sim_id) {
@@ -373,7 +381,8 @@ function renderAssistantResponse(data) {
     badge.textContent = `▶ 結果を表示  ID: ${data.sim_id}`;
     badge.onclick = () => loadResult(data.sim_id);
     msgEl.querySelector('.body').appendChild(badge);
-    loadResult(data.sim_id);
+    if (!early) loadResult(data.sim_id);
+    else if (early.id !== data.sim_id) early.p.then(() => loadResult(data.sim_id));
   }
   if (data.charts && data.charts.length) {
     for (const chart of data.charts) renderChart(msgEl, chart);

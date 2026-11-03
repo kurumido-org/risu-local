@@ -100,17 +100,22 @@ class TestToolDispatch:
         from risu.tools import ToolTurnState, dispatch_tool_blocks
 
         state = ToolTurnState(body or self._body())
-        progress, results = [], []
+        progress, results, sims = [], [], []
 
         async def go():
             async for kind, payload in dispatch_tool_blocks(blocks, state, follow_up=follow_up):
                 if kind == "progress":
                     progress.append(payload)
+                elif kind == "sim":
+                    sims.append(payload)
                 else:
+                    assert kind == "results", kind
                     results.append(payload)
 
         asyncio.run(go())
         assert len(results) == 1, "results は最後に 1 回だけ yield されるべき"
+        # 結果を保存したら，その都度 sim を知らせる（ブラウザが説明を待たずに地図を出す）
+        assert (sims[-1] if sims else None) == state.sim_id
         return progress, results[0], state
 
     # ── API 不変条件 ──────────────────────────────

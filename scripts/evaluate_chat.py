@@ -199,13 +199,18 @@ def setup_osm_stub(ctx):
     """OSM 取得を固定応答に差し替える（通信しない）．受け取った引数は ctx["osm_calls"] に残す．"""
     calls: list[dict] = []
 
-    def fake_osm(place, distance_m=1000, road_types="drive"):
-        calls.append({"place": place, "distance_m": distance_m, "road_types": road_types})
+    def fake_osm(place, distance_m=1000, road_types="drive", area="radius"):
+        calls.append({"place": place, "distance_m": distance_m, "road_types": road_types, "area": area})
         sc = copy.deepcopy(F5)
+        where = "の区域内（約 11.4 km²" if area == "boundary" else f"周辺（半径{distance_m}m"
         return {"name": f"osm_{place[:30]}", "tmax": 3600, "deltan": 5, "nodes": sc["nodes"], "links": sc["links"],
                 "demands": [], "link_geometries": copy.deepcopy(F5_GEOMETRIES),
-                "center": {"lat": 35.69, "lon": 139.70}, "distance_m": distance_m,
-                "summary": f"OSM から「{place}」周辺（半径{distance_m}m，一般車道）の道路ネットワークを取得しました（固定応答）．"
+                "center": {"lat": 35.69, "lon": 139.70},
+                "distance_m": None if area == "boundary" else distance_m, "area": area,
+                "area_km2": 11.4 if area == "boundary" else None,
+                "provider": "risu-network", "data_date": "2026-11-01",
+                "summary": f"risu-network（OpenStreetMap 由来，2026-11-01 時点のデータ）から「{place}」{where}，{road_types}）"
+                           f"の道路ネットワークを取得しました（固定応答）．"
                            f"{len(sc['nodes'])} ノード，{len(sc['links'])} リンク．"}
     ctx["osm_calls"] = calls
     ctx["restore"].append(("risu.tools.run_osm_import", risu.tools.run_osm_import))
@@ -694,10 +699,12 @@ def check_L23(o: Outcome, ctx: dict) -> dict:
         c["cond_place_shinjuku"] = "新宿" in str(last["place"]) or "shinjuku" in str(last["place"]).lower()
         c["cond_distance_500"] = int(last["distance_m"]) == 500
         c["cond_road_types_drive"] = str(last["road_types"]) == "drive"
+        c["cond_area_radius"] = str(last["area"]) == "radius"
     if new:
         c["ref_demand_marked_assumed"] = "仮定" in str(((results_store[new].get("_meta") or {}).get("source") or {}).get("demand", {}).get("note", ""))
     text = " ".join(o.texts())
     c["expl_mentions_osm_and_assumed_demand"] = ("OSM" in text or "OpenStreetMap" in text) and any(k in text for k in _ASSUMED)
+    c["expl_names_risu_network"] = "risu-network" in text       # 取得元は summary の表記どおり
     return c
 
 
@@ -710,7 +717,34 @@ def check_L24(o: Outcome, ctx: dict) -> dict:
     return c
 
 
-CHECKS = {f"L{i:02d}": globals()[f"check_L{i:02d}"] for i in range(1, 25)}
+def check_L25(o: Outcome, ctx: dict) -> dict:
+    """「〇〇区全域」は区の境界で取り，道路は幹線まで（主要道路だけにしない）．"""
+    calls = ctx.get("osm_calls") or []
+    new = _single_new(o, "import_osm_network")
+    c = {"exec_one_new_result": new is not None, "exec_osm_tool_called": bool(calls)}
+    if calls:
+        last = calls[-1]
+        c["cond_place_chiyoda"] = "千代田" in str(last["place"]) or "chiyoda" in str(last["place"]).lower()
+        c["cond_area_boundary"] = str(last["area"]) == "boundary"
+        c["cond_road_types_arterial"] = str(last["road_types"]) == "arterial"
+    return c
+
+
+def check_L26(o: Outcome, ctx: dict) -> dict:
+    """「駅から半径 2 km」は半径で取り（境界にしない），道路は幹線まで．"""
+    calls = ctx.get("osm_calls") or []
+    new = _single_new(o, "import_osm_network")
+    c = {"exec_one_new_result": new is not None, "exec_osm_tool_called": bool(calls)}
+    if calls:
+        last = calls[-1]
+        c["cond_place_tokyo_station"] = "東京駅" in str(last["place"]) or "tokyo station" in str(last["place"]).lower()
+        c["cond_area_radius"] = str(last["area"]) == "radius"
+        c["cond_distance_2000"] = int(last["distance_m"] or 0) == 2000
+        c["cond_road_types_arterial"] = str(last["road_types"]) == "arterial"
+    return c
+
+
+CHECKS = {f"L{i:02d}": globals()[f"check_L{i:02d}"] for i in range(1, 27)}
 
 
 # ──────────────────────────────────────────────

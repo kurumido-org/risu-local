@@ -79,7 +79,7 @@ risu-local/
 ├── scripts/
 │   ├── run_scenario.py   ← 素の UXsim で実行する CLI（サーバー不要）
 │   ├── bench.py          ← 後処理・直列化のベンチマーク
-│   └── evaluate_chat.py  ← 実 LLM のタスク評価ハーネス（evals/cases の L01〜L24．費用がかかるので明示実行）
+│   └── evaluate_chat.py  ← 実 LLM のタスク評価ハーネス（evals/cases の L01〜L26．費用がかかるので明示実行）
 ├── evals/
 │   ├── cases/            ← 実 LLM 評価の固定入力（1 タスク 1 JSON）．runs/ は記録（gitignore）
 │   └── README.md
@@ -132,8 +132,8 @@ LLM が扱うのは `sim_id`・差分命令・集計値だけです（§3.3）�
 | `get_simulation_data(sim_id)` | `risu.aggregate` | LLM に渡す集計データ（数 KB に制限） |
 | `apply_modifications` | `risu.scenario_ops` | `rerun_simulation` の差分命令をシナリオに適用 |
 | `parse_csv_scenario` / `gmns_to_scenario` | `risu.importers` | CSV / GMNS パーサー |
-| `run_osm_import(place)` | `risu.importers` | OSMnx で道路ネットワーク取得．取得元は `RISU_NETWORK_URL` があればタイル，無ければ公開 Overpass |
-| `graph_from_tiles` | `risu.network_tiles` | z13 タイル（OSM XML）を結合し，`graph_from_bbox` と同じ手順でグラフ化 |
+| `run_osm_import(place)` | `risu.importers` | OSMnx で道路ネットワーク取得．範囲は `area`（`radius` = 代表点 ±半径 / `boundary` = 地名の境界，上限 100 km²）．取得元は `RISU_NETWORK_URL` があればタイル，無ければ公開 Overpass |
+| `graph_from_tiles` / `graph_from_tiles_polygon` | `risu.network_tiles` | z13 タイル（OSM XML）を結合し，`graph_from_polygon` と同じ手順でグラフ化（前者は正方形，後者は任意の境界） |
 | `envelope_compressed_bytes` | `risu.results` | 結果の直列化 + 圧縮（方式別キャッシュ） |
 | `POST /simulate` / `GET /results/{id}` | `risu.api` | 直接実行 / 結果取得 |
 | `POST /chat` | `risu.api` → `risu.llm` | LLM 対話（claude = SSE ストリーミング / ollama / mock） |
@@ -204,7 +204,9 @@ LLM が扱うのは `sim_id`・差分命令・集計値だけです（§3.3）�
 - **なぜ**: 以前は同じ dispatch が **4 箇所**にコピーされており，実際に
   「同期経路の初回ラウンドだけ未知ツールの分岐が無い」というバグが潜んでいました．
 - **仕組み**: 進捗は `("progress", msg)` として yield し，SSE 経路だけが転送，
-  同期経路は `collect_tool_results` で捨てる．1 ターン分の状態
+  同期経路は `collect_tool_results` で捨てる．結果を保存したら `("sim", sim_id)` を yield し，
+  SSE 経路は `sim_ready` として送る（フロントは LLM の説明の完了を待たずに地図を読み込み，
+  done では同じ結果を読み直さない．説明の生成に 8 秒ほどかかり，その間地図が出なかった）．1 ターン分の状態
   （`sim_id` / `sim_data_cache` / `last_data_sim_id`）は `ToolTurnState` で持ち回る．
 - **絶対条件**: **tool_use には必ず 1 対 1 で tool_result を返す**（Anthropic API の要求．
   欠けると 400）．未知のツール名でも結果を積むこと．
@@ -427,6 +429,7 @@ MCP（`mcp_call_tool`）も同じ dispatcher を通します．会話コンテ�
 | OSM 取込が「該当する道路が見つかりませんでした」で失敗し，LLM が半径を広げて再試行する | 取得時の例外（サーバー障害・鍵の拒否）をすべて「道路が無い」に変換していた．取得元の障害は `OsmUnavailableError`（`/import/osm` は 503）で返し，文面で「範囲を変えずに再試行」と伝える（`tests/test_network_tiles.py`） |
 | 小さい範囲の OSM 取込が `no preexisting 'maxspeed'` で落ちる | osmnx 2 の `add_edge_speeds` は範囲内に maxspeed が 1 本も無いと例外．`fallback=30` を渡す |
 | タイル経路と Overpass で道路が違う | 道路種別は Overpass のフィルタ文字列を `parse_overpass_filter` で解釈して当てる．drive / all は osmnx の network_type の文字列を `_NETWORK_FILTERS` に写してあり，osmnx を上げて変わると `test_network_filters_match_osmnx` が落ちる．`all`（drive_service）も駐車場内通路は含まない．グラフは osmnx の非公開 `_create_graph` に直接渡している（使えなければ XML 経由に戻る．一致は `test_direct_graph_equals_xml_route`）．タイルの解析済みの控えは marshal（pickle は読込でコードを実行し得るので使わない） |
+| 「〇〇区全域」と頼んだのに区の一部しか取れない | 半径の正方形（代表点 ±distance_m）で切っていた．区・市の全域は `area="boundary"`（`ox.geocode_to_gdf` の境界）で取る．あわせて「半径 1000m 以上は arterial か major」の指示で LLM が major を選び，道路がまばらになっていたので，半径 1〜3 km と境界は arterial，3 km 超で major と範囲の広さで選ばせる（`TestBoundaryImport`，評価 L25 / L26） |
 | `pip install` が `No such file or directory` で止まる | Windows の 260 文字パス長制限（`anthropic` の長いファイル名）．浅い場所に clone するか長いパスを有効化 |
 | 「実行しないで」と言ったのにシミュレーションが走る | 初回応答が文章だけのときの強制再試行．`NO_RUN_PATTERNS`（risu/llm.py）に当たれば再試行しない．再試行は `tool_choice=any` で，表示中の結果があれば rerun_simulation を案内する（run_simulation を強制すると別網を新規実行する） |
 | 設定上 360 台なのに `total_trips` が 359 | UXsim の `adddemand` は flow×DELTAT を累積して DELTAN 以上で 1 台出す．浮動小数の累積で境界の 1 台が出ないことがある（`tests/test_numerical_contracts.py` の `demand_count` が同じ規則）．需要台数の検証は flow×継続時間ではなくこの規則で見る |

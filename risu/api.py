@@ -24,6 +24,7 @@ from starlette.requests import Request
 from .importers import (
     GMNS_API,
     GMNS_RAW,
+    OSM_AREA_MODES,
     OSM_ROAD_PRESETS,
     OsmUnavailableError,
     gmns_to_scenario,
@@ -506,11 +507,13 @@ async def upload_files(
 @app.post("/import/osm")
 async def import_osm(place: str = Form(...), tmax: int = Form(3600),
                      distance_m: int = Form(500),
-                     road_types: str = Form("drive")):
+                     road_types: str = Form("drive"),
+                     area: str = Form("radius")):
     """OpenStreetMap から道路ネットワークを取得
 
     road_types: major（高速・国道級のみ） / arterial（幹線まで） /
                 drive（一般車道，デフォルト） / all（サービス道路含む全車道）
+    area: radius（地名の代表点から半径 distance_m，デフォルト） / boundary（地名の境界の内側）
     """
     # 入力バリデーション
     place = place.strip()
@@ -525,10 +528,13 @@ async def import_osm(place: str = Form(...), tmax: int = Form(3600),
     road_types = road_types.strip().lower()
     if road_types not in OSM_ROAD_PRESETS:
         raise HTTPException(400, detail=f"road_types は {', '.join(OSM_ROAD_PRESETS)} のいずれかを指定してください")
+    area = area.strip().lower()
+    if area not in OSM_AREA_MODES:
+        raise HTTPException(400, detail=f"area は {', '.join(OSM_AREA_MODES)} のいずれかを指定してください")
 
     loop = asyncio.get_event_loop()
     try:
-        result = await loop.run_in_executor(executor, run_osm_import, place, distance_m, road_types)
+        result = await loop.run_in_executor(executor, run_osm_import, place, distance_m, road_types, area)
     except OsmUnavailableError as e:      # 取得元の障害．「道路が無い」（500）とは分ける
         raise HTTPException(503, detail=f"OSM インポートエラー: {str(e)}")
     except Exception as e:
@@ -539,6 +545,10 @@ async def import_osm(place: str = Form(...), tmax: int = Form(3600),
     link_geometries = scenario.pop("link_geometries", {})
     scenario.pop("center", None)
     scenario.pop("distance_m", None)
+    scenario.pop("area", None)
+    area_km2 = scenario.pop("area_km2", None)
+    provider = scenario.pop("provider", None)
+    data_date = scenario.pop("data_date", None)
     scenario.pop("summary", None)
     scenario["tmax"] = tmax
 
@@ -558,7 +568,10 @@ async def import_osm(place: str = Form(...), tmax: int = Form(3600),
         "type": "osm",
         "place": place,
         "road_types": road_types,
-        "distance_m": distance_m,
+        **({"provider": provider} if provider else {}),
+        **({"data_date": data_date} if data_date else {}),
+        **({"area": "boundary", "area_km2": area_km2} if area_km2 is not None
+           else {"distance_m": distance_m}),
         "demand": demand_info,
     })
 

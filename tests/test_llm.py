@@ -465,6 +465,12 @@ class TestLLMTokenSaving:
         done = [e for e in events if e["type"] == "done"][0]
         try:
             assert done["sim_id"] in results_store
+            # 結果ができた時点で sim_ready を送り，ブラウザは説明の生成を待たずに地図を出す
+            kinds = [e["type"] for e in events]
+            ready = [e for e in events if e["type"] == "sim_ready"]
+            assert [e["sim_id"] for e in ready] == [done["sim_id"]]
+            last_text = len(kinds) - 1 - kinds[::-1].index("text_delta")
+            assert kinds.index("sim_ready") < last_text < kinds.index("done")
             assert done["usage"]["calls"] == 3 and done["usage"]["output_tokens"] == 60
             assert done["usage"]["cache_read_tokens"] == 150
             assert len(done["charts"]) == 1

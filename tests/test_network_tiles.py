@@ -128,7 +128,7 @@ def server(tmp_path, monkeypatch):
     monkeypatch.setattr(nt, "_json_mem", {})
     monkeypatch.setattr(nt, "_TIMEOUT_S", 5.0)
     monkeypatch.setattr(osmnx, "geocode", lambda place: center)
-    state.update(cache=tmp_path / "cache", httpd=httpd, nt=nt)
+    state.update(cache=tmp_path / "cache", httpd=httpd, nt=nt, center=center)
     yield state
     httpd.shutdown()
     httpd.server_close()
@@ -145,6 +145,9 @@ class TestNetworkTiles:
         # drive: 歩道（102）と敷地内通路（103）は除き，タイル境界をまたぐ 100 は 1 本につながる
         drive = run_osm_import("仙台駅", 300, "drive")
         assert _names(drive) == ["1", "2", "4", "5"]
+        # 取得元は risu-network と書く（OpenStreetMap に問い合わせたとは言わない．出典とデータの日付は添える）
+        assert drive["summary"].startswith("risu-network（OpenStreetMap 由来，2026-11-01 時点のデータ）から")
+        assert (drive["provider"], drive["data_date"]) == ("risu-network", "2026-11-01")
         assert len(drive["links"]) == 6                  # 1-2, 2-4, 2-5 の双方向
         # all: 敷地内通路（driveway）も入るので 3 が交差点として残る
         assert _names(run_osm_import("仙台駅", 300, "all")) == ["1", "2", "3", "4", "5", "7"]
@@ -345,6 +348,110 @@ class TestNetworkTiles:
             assert w < 140.90 and e > 140.87 and s < 38.27 and n > 38.25
         xs, ys = {t[0] for t in ts}, {t[1] for t in ts}
         assert len(ts) == len(xs) * len(ys) and ys == set(range(min(ys), max(ys) + 1))
+
+
+def _box(lat0, lon0, lat1, lon1):
+    from shapely.geometry import box
+    return box(lon0, lat0, lon1, lat1)
+
+
+def _fake_boundary(monkeypatch, geom):
+    """ox.geocode_to_gdf を，与えた形 1 つを返すものに差し替える（Nominatim に出ない）．"""
+    import geopandas as gpd
+    import osmnx
+    monkeypatch.setattr(osmnx, "geocode_to_gdf",
+                        lambda place: gpd.GeoDataFrame({"geometry": [geom]}, crs="EPSG:4326"))
+
+
+class TestBoundaryImport:
+    """area="boundary": 地名の境界（区・市の形）の内側で取り込む．
+
+    [修正履歴] 「千代田区全域」が代表点 ±2,500 m の正方形で取り込まれ，区の南端が欠け，
+    北・西は隣の区まで入っていた．"""
+
+    def test_tiles_are_cut_by_the_boundary(self, server, monkeypatch):
+        from risu.importers import run_osm_import
+        lat, b = server["center"]
+        # 境界は node 1（b - 0.002）を含まない．radius では入る
+        _fake_boundary(monkeypatch, _box(lat - 0.0025, b - 0.001, lat + 0.0025, b + 0.0025))
+        sc = run_osm_import("千代田区, 東京都", 0, "drive", "boundary")
+        assert _names(sc) == ["2", "4", "5"]
+        assert sc["area"] == "boundary" and sc["distance_m"] is None
+        assert 0.1 < sc["area_km2"] < 0.3
+        assert "区域内（約 0.2 km²，一般車道）" in sc["summary"]
+        assert "1" in _names(run_osm_import("千代田区, 東京都", 300, "drive"))   # radius は従来どおり
+
+    def test_too_large_or_not_an_area_is_rejected(self, server, monkeypatch):
+        from risu.importers import run_osm_import
+        lat, b = server["center"]
+        _fake_boundary(monkeypatch, _box(lat - 0.1, b - 0.1, lat + 0.1, b + 0.1))     # 約 390 km²
+        with pytest.raises(ValueError, match="上限 100 km²"):
+            run_osm_import("東京都", 0, "drive", "boundary")
+        _fake_boundary(monkeypatch, _box(lat, b, lat + 0.0001, b + 0.0001))          # 建物の大きさ
+        with pytest.raises(ValueError, match="radius"):
+            run_osm_import("東京駅", 0, "drive", "boundary")
+
+        import osmnx
+
+        def no_polygon(place):
+            raise TypeError("Nominatim did not geocode query to a geometry of type (Multi)Polygon.")
+        monkeypatch.setattr(osmnx, "geocode_to_gdf", no_polygon)
+        with pytest.raises(ValueError, match="境界（区域の形）が OpenStreetMap にありませんでした"):
+            run_osm_import("どこかの交差点", 0, "drive", "boundary")
+        with pytest.raises(ValueError, match="area は"):
+            run_osm_import("千代田区", 0, "drive", "ward")
+        assert not [p for p, _ in server["requests"] if "/tiles/" in p]   # 断るときはタイルを取りに行かない
+
+    def test_overpass_route_uses_graph_from_polygon(self, monkeypatch):
+        pytest.importorskip("osmnx")
+        import osmnx
+
+        import risu.network_tiles as nt
+        from risu.importers import _fetch_osm_graph
+        monkeypatch.setattr(nt, "NETWORK_URL", "")
+        got = {}
+        monkeypatch.setattr(osmnx, "graph_from_polygon", lambda poly, **kw: got.update(poly=poly, **kw) or "G")
+        poly = _box(35.67, 139.73, 35.71, 139.78)
+        assert _fetch_osm_graph(osmnx, (35.69, 139.75), 0, "arterial", poly) == "G"
+        assert got["poly"] is poly and "secondary" in got["custom_filter"]
+        assert _fetch_osm_graph(osmnx, (35.69, 139.75), 0, "drive", poly) == "G"
+        assert got["network_type"] == "drive"
+
+    def test_api_and_tool_pass_the_area(self, monkeypatch):
+        import asyncio
+
+        from fastapi.testclient import TestClient
+        from fixtures import F5, IsolatedStore
+
+        import risu.api as api
+        import risu.tools as tools
+        seen = []
+
+        def fake(place, distance_m=1000, road_types="drive", area="radius"):
+            seen.append(area)
+            return {"name": "osm", "tmax": 3600, "deltan": 5, "nodes": F5["nodes"], "links": F5["links"],
+                    "demands": [], "link_geometries": {}, "center": {"lat": 0, "lon": 0},
+                    "distance_m": None, "area": area, "area_km2": 11.4,
+                    "provider": "risu-network", "data_date": "2026-11-01", "summary": "ok"}
+        monkeypatch.setattr(api, "run_osm_import", fake)
+        monkeypatch.setattr(tools, "run_osm_import", fake)
+        block = type("B", (), {"type": "tool_use", "id": "t1", "name": "import_osm_network",
+                               "input": {"place": "千代田区, 東京都", "area": "boundary", "road_types": "arterial"}})()
+
+        async def run():
+            return await tools.collect_tool_results([block], tools.ToolTurnState(body=None, via="mcp"))
+        with IsolatedStore():
+            client = TestClient(api.app)
+            assert client.post("/import/osm", data={"place": "千代田区", "area": "ward"}).status_code == 400
+            r = client.post("/import/osm", data={"place": "千代田区", "area": "boundary"})
+            assert r.status_code == 200 and seen == ["boundary"]
+            src = api.results_store[r.json()["id"]]["_meta"]["source"]
+            assert src["area"] == "boundary" and src["area_km2"] == 11.4 and "distance_m" not in src
+            assert (src["provider"], src["data_date"]) == ("risu-network", "2026-11-01")
+
+            res = asyncio.run(run())
+            assert seen == ["boundary", "boundary"]
+            assert len(res) == 1 and not res[0].get("is_error") and "sim_id" in str(res[0]["content"])
 
 
 class TestOverpassUnavailable:

@@ -646,7 +646,9 @@ async def chat_claude_stream(body: ChatInput):
             async for _kind, _payload in dispatch_tool_blocks(tool_blocks, state):
                 if _kind == "progress":
                     yield _sse_event({"type": "progress", "message": _payload})
-                else:
+                elif _kind == "sim":       # 説明の生成を待たずに地図を出せるよう先に知らせる
+                    yield _sse_event({"type": "sim_ready", "sim_id": _payload})
+                elif _kind == "results":
                     tool_results = _payload
 
             # ── ツール結果を渡して最終回答をストリーミング生成 ──
@@ -719,7 +721,9 @@ async def chat_claude_stream(body: ChatInput):
                         next_tool_blocks, state, follow_up=True):
                     if _kind == "progress":
                         yield _sse_event({"type": "progress", "message": _payload})
-                    else:
+                    elif _kind == "sim":
+                        yield _sse_event({"type": "sim_ready", "sim_id": _payload})
+                    elif _kind == "results":
                         next_tool_results = _payload
 
                 messages.append({"role": "assistant", "content": stream_result["response"].content})

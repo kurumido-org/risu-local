@@ -10,6 +10,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from . import network_tiles
 from .aggregate import compare_simulations, get_simulation_data
 from .importers import OsmUnavailableError, run_osm_import
 from .results import list_results, results_store, store_sim
@@ -345,6 +346,8 @@ async def dispatch_tool_blocks(tool_blocks, state: ToolTurnState, *, follow_up: 
 
     yield するもの:
         ("progress", "メッセージ")   進捗．SSE 経路だけが転送し，同期経路は捨てる
+        ("sim", sim_id)              結果を保存した直後．SSE 経路は sim_ready として転送し，ブラウザは
+                                     LLM が説明を書き終える前に地図を出す（同期経路は捨てる）
         ("results", [tool_result])   最後に 1 回だけ．API へ返す tool_result のリスト
 
     follow_up=True は 2 ラウンド目以降．進捗の文言と，保存メタの "round" が変わる．
@@ -365,6 +368,7 @@ async def dispatch_tool_blocks(tool_blocks, state: ToolTurnState, *, follow_up: 
                 args, state.body, source_round="follow_up" if follow_up else None, via=state.via)
             if new_sim_id:
                 state.sim_id = new_sim_id
+                yield ("sim", new_sim_id)
             results.append(_tool_result(tb.id, content, is_err))
 
         elif name == "rerun_simulation":
@@ -373,6 +377,7 @@ async def dispatch_tool_blocks(tool_blocks, state: ToolTurnState, *, follow_up: 
             content, new_sim_id, is_err = await handle_rerun_simulation(args, state.body, via=state.via)
             if new_sim_id:
                 state.sim_id = new_sim_id
+                yield ("sim", new_sim_id)
             results.append(_tool_result(tb.id, content, is_err))
 
         elif name == "get_network_info":
@@ -386,18 +391,24 @@ async def dispatch_tool_blocks(tool_blocks, state: ToolTurnState, *, follow_up: 
             dist = args.get("distance_m", 500)
             osm_tmax = args.get("tmax", 3600)
             road_types = args.get("road_types", "drive")
+            area = args.get("area", "radius")
+            source_name = "risu-network" if network_tiles.NETWORK_URL else "OpenStreetMap"
             yield ("progress",
-                   f"OpenStreetMap から「{place}」のデータを取得中..." if follow_up
-                   else f"Step 2/3: OpenStreetMap から「{place}」周辺のデータを取得中...")
+                   f"{source_name} から「{place}」のデータを取得中..." if follow_up
+                   else f"Step 2/3: {source_name} から「{place}」周辺のデータを取得中...")
             try:
                 loop = asyncio.get_event_loop()
                 osm_result = await loop.run_in_executor(
-                    executor, run_osm_import, place, dist, road_types
+                    executor, run_osm_import, place, dist, road_types, area
                 )
                 scenario = dict(osm_result)
                 link_geometries = scenario.pop("link_geometries", {})
                 scenario.pop("center", None)
                 scenario.pop("distance_m", None)
+                scenario.pop("area", None)
+                area_km2 = scenario.pop("area_km2", None)
+                provider = scenario.pop("provider", None)
+                data_date = scenario.pop("data_date", None)
                 summary = scenario.pop("summary", "")
                 scenario["tmax"] = osm_tmax
 
@@ -419,7 +430,11 @@ async def dispatch_tool_blocks(tool_blocks, state: ToolTurnState, *, follow_up: 
                     "via": state.via,
                     "llm_backend": "claude",
                     "place": place,
-                    "distance_m": dist,
+                    "road_types": road_types,
+                    **({"provider": provider} if provider else {}),
+                    **({"data_date": data_date} if data_date else {}),
+                    **({"area": "boundary", "area_km2": area_km2} if area_km2 is not None
+                       else {"distance_m": dist}),
                     "demand": demand_info,     # 需要の出所（仮定）．画面の前提表示と LLM のコンテキストに使う
                     "llm_user_message": last_user_message_text(state.body),
                 }
@@ -427,6 +442,7 @@ async def dispatch_tool_blocks(tool_blocks, state: ToolTurnState, *, follow_up: 
                     meta["round"] = "follow_up"
                 store_sim(new_id, result, meta)
                 state.sim_id = new_id
+                yield ("sim", new_id)
 
                 results.append(_tool_result(tb.id, json.dumps({
                     **result["stats"],
